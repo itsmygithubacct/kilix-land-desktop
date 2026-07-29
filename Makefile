@@ -34,6 +34,7 @@ DEPENDENCIES := $(OBJ:.o=.d)
 GRAPHICS_MANIFEST := assets/graphics/manifest.json
 GAMES_ROOT ?= ../games
 PARITY_TOOL := tools/sync_source_parity.py
+AUDIO_TOOL := tools/generate_audio.py
 
 all: $(BIN)
 
@@ -56,11 +57,26 @@ parity-sync:
 parity-check:
 	$(PYTHON) $(PARITY_TOOL) --games-root "$(abspath $(GAMES_ROOT))"
 
+audio-plan:
+	$(PYTHON) tools/validate_audio.py --plan
+
+audio-requests:
+	$(PYTHON) $(AUDIO_TOOL) requests
+
+audio-record:
+	$(PYTHON) $(AUDIO_TOOL) record-minimax \
+		--generated-on "$(MINIMAX_GENERATED_ON)"
+
+audio:
+	$(PYTHON) $(AUDIO_TOOL) build
+
 test: parity-check $(BIN)
 	$(PYTHON) tools/validate_world.py assets/world/world.json
 	$(PYTHON) tools/validate_visual.py
+	$(PYTHON) tools/validate_audio.py --plan
 	$(PYTHON) tools/land_config.py --check
 	$(PYTHON) tools/walk_editor.py --selftest
+	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 	./$(BIN) --selftest
 	./$(BIN) --audio-test
 	./$(BIN) --graphics-test
@@ -85,6 +101,7 @@ sanitize:
 clean:
 	$(RM) -r build $(BIN)
 
-.PHONY: all clean parity-check parity-sync test test-deps sanitize
+.PHONY: all audio audio-plan audio-record audio-requests clean parity-check \
+	parity-sync test test-deps sanitize
 
 -include $(DEPENDENCIES)

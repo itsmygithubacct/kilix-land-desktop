@@ -21,11 +21,19 @@ bindings file with nothing but the stdlib and is wired into `make test`.
 
 import json
 import os
+import re
+import secrets
 import shutil
+import stat
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KINDS = ("default", "app", "folder")
+ID_CAPACITY = 24
+LAUNCH_BINDING_CAPACITY = 256
+LAUNCH_COMMAND_MAX = 8
+BINDINGS_FILE_MAX = 64 * 1024
+ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 TARGET_LABELS = {
     "terminal": "Terminal", "coding-agents": "Coding agents",
     "files": "File manager", "manuals": "Manuals", "models": "Models",
@@ -36,12 +44,20 @@ TARGET_LABELS = {
 }
 
 
+class BindingFileError(ValueError):
+    """A binding store failed the user-owned configuration contract."""
+
+
 def config_home():
     override = os.environ.get("KILIX_LAND_DESKTOP_CONFIG_HOME")
-    if override:
+    # Match the C launcher: relative overrides are ignored, so the editor and
+    # runtime can never silently read different binding files.
+    if override and os.path.isabs(override):
         return override
-    return os.path.join(os.path.expanduser("~"),
-                        ".local/gpu_terminal/kilix-land-desktop")
+    home = os.environ.get("HOME")
+    if not home or not os.path.isabs(home):
+        raise BindingFileError("HOME must be an absolute path")
+    return os.path.join(home, ".local/gpu_terminal/kilix-land-desktop")
 
 
 def bindings_path():
@@ -62,66 +78,282 @@ def load_world():
     return rooms
 
 
+def validate_key(key):
+    """Return a binding-key problem or None."""
+    if not isinstance(key, str):
+        return "key must be text"
+    parts = key.split(".")
+    if len(parts) != 2 or not all(parts):
+        return "key must be '<room>.<object>'"
+    for label, value in zip(("room", "object"), parts):
+        if not ID_PATTERN.fullmatch(value):
+            return f"{label} id must use lowercase letters, digits, or '-'"
+        if len(value.encode("utf-8")) >= ID_CAPACITY:
+            return f"{label} id is longer than {ID_CAPACITY - 1} bytes"
+    return None
+
+
+def _binding_shape_error(kind, value):
+    if kind not in ("app", "folder"):
+        return "kind must be 'app' or 'folder'"
+    if not isinstance(value, str) or not value:
+        return "missing value"
+    if value != value.strip(" \t"):
+        return "value has leading or trailing whitespace"
+    for character in value:
+        codepoint = ord(character)
+        if codepoint == 0 or codepoint == 127 or (
+                codepoint < 32 and not (kind == "app" and character == "\t")):
+            return "value contains a control character"
+        if character.isspace() and character not in (" ", "\t"):
+            return "value contains unsupported whitespace"
+    if len(value.encode("utf-8")) >= LAUNCH_BINDING_CAPACITY:
+        return (
+            "value is longer than "
+            f"{LAUNCH_BINDING_CAPACITY - 1} bytes"
+        )
+    if kind == "app":
+        arguments = [part for part in re.split(r"[ \t]+", value) if part]
+        if len(arguments) > LAUNCH_COMMAND_MAX:
+            return f"app command has more than {LAUNCH_COMMAND_MAX} arguments"
+    return None
+
+
 def parse_bindings(text):
     """-> (bindings dict key->(kind, value), [error strings])"""
     bindings = {}
     errors = []
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
+    for number, raw in enumerate(text.split("\n"), 1):
+        if "\r" in raw or "\0" in raw:
+            errors.append(f"line {number}: contains a control character")
+            continue
+        line = raw.lstrip(" \t")
+        if not line or not line.strip(" \t") or line.startswith("#"):
             continue
         if "=" not in line:
             errors.append(f"line {number}: missing '='")
             continue
         key, _, value = line.partition("=")
-        key = key.strip()
-        parts = value.strip().split(None, 1)
-        if "." not in key or not key.replace(".", "").replace("-", ""):
-            errors.append(f"line {number}: bad key '{key}'")
+        key = key.strip(" \t")
+        problem = validate_key(key)
+        if problem:
+            errors.append(f"line {number}: bad key '{key}': {problem}")
             continue
-        if not parts or parts[0] not in ("app", "folder"):
+        if key in bindings:
+            errors.append(f"line {number}: duplicate key '{key}'")
+            continue
+        entry = value.lstrip(" \t")
+        if entry.startswith("app "):
+            kind, binding_value = "app", entry[4:]
+        elif entry.startswith("folder "):
+            kind, binding_value = "folder", entry[7:]
+        else:
             errors.append(f"line {number}: kind must be 'app' or 'folder'")
             continue
-        if len(parts) < 2 or not parts[1].strip():
-            errors.append(f"line {number}: missing value")
+        problem = _binding_shape_error(kind, binding_value)
+        if problem:
+            errors.append(f"line {number}: {problem}")
             continue
-        bindings[key] = (parts[0], parts[1].strip())
+        bindings[key] = (kind, binding_value)
     return bindings, errors
+
+
+def _open_config_directory(create):
+    directory = config_home()
+    if directory == os.path.sep:
+        raise BindingFileError("configuration home cannot be '/'")
+    if create:
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+        except OSError as error:
+            raise BindingFileError(
+                f"cannot create configuration directory: {error.strerror}"
+            ) from error
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(directory, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise BindingFileError(
+            f"cannot securely open configuration directory: {error.strerror}"
+        ) from error
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISDIR(status.st_mode):
+            raise BindingFileError("configuration home is not a directory")
+        if status.st_uid != os.geteuid():
+            raise BindingFileError(
+                "configuration directory is not owned by the current user"
+            )
+        if create:
+            os.fchmod(descriptor, 0o700)
+        elif status.st_mode & 0o077:
+            raise BindingFileError(
+                "configuration directory permissions must be 0700"
+            )
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _read_bindings_text():
+    try:
+        directory = _open_config_directory(False)
+    except FileNotFoundError:
+        return None
+    try:
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        try:
+            descriptor = os.open("bindings.conf", flags, dir_fd=directory)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise BindingFileError(
+                f"cannot securely open bindings.conf: {error.strerror}"
+            ) from error
+        try:
+            status = os.fstat(descriptor)
+            if not stat.S_ISREG(status.st_mode):
+                raise BindingFileError("bindings.conf is not a regular file")
+            if status.st_uid != os.geteuid():
+                raise BindingFileError(
+                    "bindings.conf is not owned by the current user"
+                )
+            if status.st_mode & 0o022:
+                raise BindingFileError(
+                    "bindings.conf must not be group/world writable"
+                )
+            chunks = []
+            remaining = BINDINGS_FILE_MAX + 1
+            while remaining:
+                chunk = os.read(descriptor, min(16 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            contents = b"".join(chunks)
+            if len(contents) > BINDINGS_FILE_MAX:
+                raise BindingFileError(
+                    f"bindings.conf exceeds {BINDINGS_FILE_MAX} bytes"
+                )
+            if b"\0" in contents:
+                raise BindingFileError("bindings.conf contains a NUL byte")
+            try:
+                return contents.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise BindingFileError(
+                    "bindings.conf is not valid UTF-8"
+                ) from error
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory)
 
 
 def load_bindings():
     try:
-        with open(bindings_path(), encoding="utf-8") as handle:
-            return parse_bindings(handle.read())[0]
-    except OSError:
+        text = _read_bindings_text()
+        return parse_bindings(text)[0] if text is not None else {}
+    except (BindingFileError, OSError):
         return {}
 
 
+def _write_all(descriptor, contents):
+    offset = 0
+    while offset < len(contents):
+        written = os.write(descriptor, contents[offset:])
+        if written <= 0:
+            raise OSError("short write to bindings.conf")
+        offset += written
+
+
 def save_bindings(bindings):
-    directory = config_home()
-    os.makedirs(directory, mode=0o700, exist_ok=True)
     lines = [
         "# kilix-land-desktop object bindings — edited by tools/land_config.py",
         "# <room>.<object> = app <command...> | folder </absolute/path>",
     ]
     for key in sorted(bindings):
         kind, value = bindings[key]
+        key_problem = validate_key(key)
+        value_problem = _binding_shape_error(kind, value)
+        if key_problem:
+            raise BindingFileError(f"bad key '{key}': {key_problem}")
+        if value_problem:
+            raise BindingFileError(f"{key}: {value_problem}")
         lines.append(f"{key} = {kind} {value}")
-    temporary = bindings_path() + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
-    os.replace(temporary, bindings_path())
+    contents = ("\n".join(lines) + "\n").encode("utf-8")
+    if len(contents) > BINDINGS_FILE_MAX:
+        raise BindingFileError(
+            f"serialized bindings exceed {BINDINGS_FILE_MAX} bytes"
+        )
+    directory = _open_config_directory(True)
+    descriptor = -1
+    temporary = ""
+    try:
+        for _ in range(16):
+            temporary = (
+                f".bindings.conf.tmp.{os.getpid()}."
+                f"{secrets.token_hex(6)}"
+            )
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                    os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory,
+                )
+                break
+            except FileExistsError:
+                continue
+        if descriptor < 0:
+            raise BindingFileError("cannot allocate a binding temporary file")
+        try:
+            _write_all(descriptor, contents)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+            descriptor = -1
+        os.replace(
+            temporary,
+            "bindings.conf",
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+        temporary = ""
+        os.fsync(directory)
+    except OSError as error:
+        raise BindingFileError(
+            f"cannot save bindings.conf: {error.strerror or error}"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+        os.close(directory)
 
 
 def validate_binding(kind, value):
     """-> error string or None."""
+    problem = _binding_shape_error(kind, value)
+    if problem:
+        return problem
     if kind == "folder":
-        if not value.startswith("/"):
+        if not os.path.isabs(value):
             return "folder must be an absolute path"
         if not os.path.isdir(value):
             return "folder does not exist"
         return None
-    program = value.split()[0]
+    program = re.split(r"[ \t]+", value, maxsplit=1)[0]
+    if "/" in program and not os.path.isabs(program):
+        return "program path must be absolute or found on PATH"
     if program.startswith("/"):
         if not (os.path.isfile(program) and os.access(program, os.X_OK)):
             return "program is not an executable file"
@@ -137,9 +369,11 @@ def check():
              for room_id, _, objects in rooms
              for object_id, _, _ in objects}
     try:
-        with open(bindings_path(), encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
+        text = _read_bindings_text()
+    except (BindingFileError, OSError) as error:
+        print(f"bindings: {error}", file=sys.stderr)
+        return 1
+    if text is None:
         print("bindings: none configured (defaults everywhere)")
         return 0
     bindings, errors = parse_bindings(text)

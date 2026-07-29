@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -175,6 +176,56 @@ static bool resolve_file_manager(char *path, size_t size)
     return false;
 }
 
+/* Open only a private, user-owned binding store. The editor creates this
+ * directory as 0700 and bindings.conf as 0600; the runtime independently
+ * verifies that contract so a hand-written symlink or writable replacement
+ * cannot become an argv source. Relative overrides intentionally fall back
+ * to HOME, matching tools/land_config.py. */
+static int open_bindings_file(void)
+{
+    char directory[LAUNCH_PATH_CAPACITY];
+    const char *override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    struct stat status;
+    int directory_fd;
+    int file_fd;
+    int written;
+
+    if (override_dir && override_dir[0] == '/') {
+        if (strcmp(override_dir, "/") == 0) return -1;
+        written = snprintf(directory, sizeof directory, "%s", override_dir);
+    } else if (home && home[0] == '/') {
+        written = snprintf(directory, sizeof directory,
+                           "%s/.local/gpu_terminal/kilix-land-desktop",
+                           home);
+    } else {
+        return -1;
+    }
+    if (written < 0 || (size_t)written >= sizeof directory) return -1;
+    directory_fd = open(directory, O_RDONLY | O_CLOEXEC | O_DIRECTORY |
+                        O_NOFOLLOW);
+    if (directory_fd < 0) return -1;
+    if (fstat(directory_fd, &status) != 0 ||
+        !S_ISDIR(status.st_mode) ||
+        status.st_uid != getuid() ||
+        (status.st_mode & 0077) != 0) {
+        (void)close(directory_fd);
+        return -1;
+    }
+    file_fd = openat(directory_fd, "bindings.conf",
+                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    (void)close(directory_fd);
+    if (file_fd < 0) return -1;
+    if (fstat(file_fd, &status) != 0 ||
+        !S_ISREG(status.st_mode) ||
+        status.st_uid != getuid() ||
+        (status.st_mode & 0022) != 0) {
+        (void)close(file_fd);
+        return -1;
+    }
+    return file_fd;
+}
+
 /* <config-home>/bindings.conf: written by tools/land_config.py, read on
  * every activation so edits apply immediately. Returns true and fills
  * kind/value when the object has an override. */
@@ -182,36 +233,44 @@ static bool lookup_binding(const desk_world *world, const desk_state *state,
                            const char *object_id, char *kind, size_t kind_size,
                            char *value, size_t value_size)
 {
-    char path[LAUNCH_PATH_CAPACITY];
     char key[2 * DESK_ID_CAPACITY + 2];
     char line[LAUNCH_BINDING_CAPACITY + 2 * DESK_ID_CAPACITY + 16];
-    const char *override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
-    const char *home = getenv("HOME");
     FILE *handle;
+    int file_fd;
     int written;
     bool found = false;
     if (!world || !object_id || object_id[0] == '\0') return false;
     if (state->room < 0 || state->room >= world->room_count) return false;
-    if (override_dir && override_dir[0] == '/')
-        written = snprintf(path, sizeof path, "%s/bindings.conf",
-                           override_dir);
-    else if (home && home[0] == '/')
-        written = snprintf(path, sizeof path,
-                           "%s/.local/gpu_terminal/kilix-land-desktop/"
-                           "bindings.conf", home);
-    else
-        return false;
-    if (written < 0 || (size_t)written >= sizeof path) return false;
     written = snprintf(key, sizeof key, "%s.%s",
                        world->rooms[state->room].id, object_id);
     if (written < 0 || (size_t)written >= sizeof key) return false;
-    handle = fopen(path, "r");
-    if (!handle) return false;
+    file_fd = open_bindings_file();
+    if (file_fd < 0) return false;
+    handle = fdopen(file_fd, "r");
+    if (!handle) {
+        (void)close(file_fd);
+        return false;
+    }
     while (fgets(line, (int)sizeof line, handle)) {
         char *cursor = line;
         char *equals;
         char *entry_value;
+        char *binding;
+        size_t line_length;
         size_t key_length;
+        size_t value_length;
+        bool app_binding;
+
+        line_length = strlen(line);
+        if (line_length > 0u && line[line_length - 1u] != '\n' &&
+            !feof(handle)) {
+            int character;
+            do {
+                character = fgetc(handle);
+            } while (character != '\n' && character != EOF);
+            continue;
+        }
+        if (strchr(line, '\r') != NULL) continue;
         while (*cursor == ' ' || *cursor == '\t') ++cursor;
         if (*cursor == '#' || *cursor == '\n' || *cursor == '\0') continue;
         equals = strchr(cursor, '=');
@@ -227,15 +286,35 @@ static bool lookup_binding(const desk_world *world, const desk_state *state,
         while (*entry_value == ' ' || *entry_value == '\t') ++entry_value;
         entry_value[strcspn(entry_value, "\n")] = '\0';
         if (strncmp(entry_value, "app ", 4u) == 0) {
+            app_binding = true;
+            binding = entry_value + 4;
             (void)snprintf(kind, kind_size, "app");
-            (void)snprintf(value, value_size, "%s", entry_value + 4);
         } else if (strncmp(entry_value, "folder ", 7u) == 0) {
+            app_binding = false;
+            binding = entry_value + 7;
             (void)snprintf(kind, kind_size, "folder");
-            (void)snprintf(value, value_size, "%s", entry_value + 7);
         } else {
             continue;
         }
-        if (value[0] != '\0') found = true;
+        value_length = strlen(binding);
+        if (value_length == 0u || value_length >= value_size ||
+            value_length >= LAUNCH_BINDING_CAPACITY ||
+            binding[value_length - 1u] == ' ' ||
+            binding[value_length - 1u] == '\t' ||
+            (!app_binding && binding[0] != '/'))
+            continue;
+        for (size_t index = 0u; index < value_length; ++index) {
+            unsigned char character = (unsigned char)binding[index];
+            if (character == 127u ||
+                (character < 32u &&
+                 !(app_binding && character == (unsigned char)'\t'))) {
+                value_length = 0u;
+                break;
+            }
+        }
+        if (value_length == 0u) continue;
+        (void)snprintf(value, value_size, "%s", binding);
+        found = true;
         break;
     }
     (void)fclose(handle);
@@ -249,16 +328,16 @@ static size_t split_command(char *value, const char **command,
 {
     size_t count = 0u;
     char *cursor = value;
-    while (count < command_max) {
+    for (;;) {
         while (*cursor == ' ' || *cursor == '\t') ++cursor;
-        if (*cursor == '\0') break;
+        if (*cursor == '\0') return count;
+        if (count >= command_max) return command_max + 1u;
         command[count++] = cursor;
         while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t')
             ++cursor;
-        if (*cursor == '\0') break;
+        if (*cursor == '\0') return count;
         *cursor++ = '\0';
     }
-    return count;
 }
 
 /* Children we have spawned but not yet reaped. Only these exact pids are
@@ -416,6 +495,11 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
                                           LAUNCH_COMMAND_MAX);
             if (command_count == 0u) {
                 set_status(launcher, state, "Binding has no command");
+                return true;
+            }
+            if (command_count > LAUNCH_COMMAND_MAX) {
+                set_status(launcher, state,
+                           "Binding has too many arguments");
                 return true;
             }
         }
