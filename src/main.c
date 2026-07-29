@@ -1077,7 +1077,7 @@ static int run_interactive(void)
                 failed = true;
                 break;
             }
-            (void)desk_launcher_service(&launcher, &state);
+            (void)desk_launcher_service(&launcher, &state, &world);
             {
                 /* A persistently failing save (unwritable config dir, full
                  * disk) must not retry at 60 Hz. */

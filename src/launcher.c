@@ -13,7 +13,8 @@
 extern char **environ;
 
 #define LAUNCH_PATH_CAPACITY 512
-#define LAUNCH_COMMAND_MAX 4
+#define LAUNCH_COMMAND_MAX 8
+#define LAUNCH_BINDING_CAPACITY 256
 /* kitten @ --password-file P launch --type=tab --self --tab-title T
  * [--cwd D] -- <command...> NULL */
 #define LAUNCH_ARGV_MAX (12 + LAUNCH_COMMAND_MAX + 1)
@@ -35,7 +36,7 @@ static const target_entry target_table[DESK_TARGET_COUNT] = {
     [DESK_TARGET_VOICE] = { "voice", "Voice" },
     [DESK_TARGET_TRASH] = { "trash", "Trash" },
     [DESK_TARGET_MAILBOX] = { "mailbox", "Mailbox" },
-    [DESK_TARGET_MAINTENANCE] = { "maintenance", "Maintenance" },
+    [DESK_TARGET_MAINTENANCE] = { "maintenance", "Configuration" },
     [DESK_TARGET_WARDROBE] = { "wardrobe", "Wardrobe" },
     [DESK_TARGET_BED] = { "bed", "Bed" },
     [DESK_TARGET_STATUS_BOARD] = { "status-board", "Status board" },
@@ -156,15 +157,105 @@ static size_t tool_or_kilix(const char *tool, const char *subcommand,
     return kilix_command(path, size, subcommand, command);
 }
 
+/* The stack's own text-native file manager wins; general TUI file managers
+ * are the fallback. All of them accept a start directory as argv[1]. */
 static bool resolve_file_manager(char *path, size_t size)
 {
-    static const char *const candidates[] = { "mc", "ranger", "nnn", "lf" };
+    static const char *const candidates[] = {
+        "kilix-file", "mc", "ranger", "nnn", "lf"
+    };
     size_t index;
     for (index = 0u; index < sizeof candidates / sizeof candidates[0];
          ++index) {
         if (which(candidates[index], path, size)) return true;
     }
     return false;
+}
+
+/* <config-home>/bindings.conf: written by tools/land_config.py, read on
+ * every activation so edits apply immediately. Returns true and fills
+ * kind/value when the object has an override. */
+static bool lookup_binding(const desk_world *world, const desk_state *state,
+                           const char *object_id, char *kind, size_t kind_size,
+                           char *value, size_t value_size)
+{
+    char path[LAUNCH_PATH_CAPACITY];
+    char key[2 * DESK_ID_CAPACITY + 2];
+    char line[LAUNCH_BINDING_CAPACITY + 2 * DESK_ID_CAPACITY + 16];
+    const char *override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    FILE *handle;
+    int written;
+    bool found = false;
+    if (!world || !object_id || object_id[0] == '\0') return false;
+    if (state->room < 0 || state->room >= world->room_count) return false;
+    if (override_dir && override_dir[0] == '/')
+        written = snprintf(path, sizeof path, "%s/bindings.conf",
+                           override_dir);
+    else if (home && home[0] == '/')
+        written = snprintf(path, sizeof path,
+                           "%s/.local/gpu_terminal/kilix-land-desktop/"
+                           "bindings.conf", home);
+    else
+        return false;
+    if (written < 0 || (size_t)written >= sizeof path) return false;
+    written = snprintf(key, sizeof key, "%s.%s",
+                       world->rooms[state->room].id, object_id);
+    if (written < 0 || (size_t)written >= sizeof key) return false;
+    handle = fopen(path, "r");
+    if (!handle) return false;
+    while (fgets(line, (int)sizeof line, handle)) {
+        char *cursor = line;
+        char *equals;
+        char *entry_value;
+        size_t key_length;
+        while (*cursor == ' ' || *cursor == '\t') ++cursor;
+        if (*cursor == '#' || *cursor == '\n' || *cursor == '\0') continue;
+        equals = strchr(cursor, '=');
+        if (!equals) continue;
+        key_length = (size_t)(equals - cursor);
+        while (key_length > 0u && (cursor[key_length - 1u] == ' ' ||
+                                   cursor[key_length - 1u] == '\t'))
+            --key_length;
+        if (key_length != strlen(key) ||
+            strncmp(cursor, key, key_length) != 0)
+            continue;
+        entry_value = equals + 1;
+        while (*entry_value == ' ' || *entry_value == '\t') ++entry_value;
+        entry_value[strcspn(entry_value, "\n")] = '\0';
+        if (strncmp(entry_value, "app ", 4u) == 0) {
+            (void)snprintf(kind, kind_size, "app");
+            (void)snprintf(value, value_size, "%s", entry_value + 4);
+        } else if (strncmp(entry_value, "folder ", 7u) == 0) {
+            (void)snprintf(kind, kind_size, "folder");
+            (void)snprintf(value, value_size, "%s", entry_value + 7);
+        } else {
+            continue;
+        }
+        if (value[0] != '\0') found = true;
+        break;
+    }
+    (void)fclose(handle);
+    return found;
+}
+
+/* Whitespace split into an argv — no shell, no quoting, no expansion, the
+ * documented bindings contract. */
+static size_t split_command(char *value, const char **command,
+                            size_t command_max)
+{
+    size_t count = 0u;
+    char *cursor = value;
+    while (count < command_max) {
+        while (*cursor == ' ' || *cursor == '\t') ++cursor;
+        if (*cursor == '\0') break;
+        command[count++] = cursor;
+        while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t')
+            ++cursor;
+        if (*cursor == '\0') break;
+        *cursor++ = '\0';
+    }
+    return count;
 }
 
 /* Children we have spawned but not yet reaped. Only these exact pids are
@@ -272,11 +363,15 @@ static bool spawn_tab(const char *label, const char *cwd,
     return true;
 }
 
-bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
+bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
+                           const desk_world *world)
 {
     char resolved[LAUNCH_PATH_CAPACITY];
     char cwd_path[LAUNCH_PATH_CAPACITY];
     char message[DESK_TOAST_CAPACITY];
+    char object_id[DESK_ID_CAPACITY];
+    char binding_kind[8];
+    char binding_value[LAUNCH_BINDING_CAPACITY];
     const char *command[LAUNCH_COMMAND_MAX];
     size_t command_count = 0u;
     const char *cwd = NULL;
@@ -285,6 +380,8 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
 
     if (!launcher || !state) return false;
     reap_pending_children();
+    (void)snprintf(object_id, sizeof object_id, "%s",
+                   state->pending_launch_object);
     target = desk_take_launch_request(state);
     if (target == DESK_TARGET_NONE) return false;
     if (!desk_target_is_external(target)) return true;
@@ -298,6 +395,35 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
                    "Kilix session not detected - launch inside kilix");
         return true;
     }
+    /* Per-object overrides from the configuration TUI beat the registry. */
+    if (lookup_binding(world, state, object_id, binding_kind,
+                       sizeof binding_kind, binding_value,
+                       sizeof binding_value)) {
+        if (strcmp(binding_kind, "folder") == 0) {
+            if (resolve_file_manager(resolved, sizeof resolved)) {
+                command[command_count++] = resolved;
+                command[command_count++] = binding_value;
+            } else {
+                set_status(launcher, state,
+                           "No file manager is installed");
+                return true;
+            }
+        } else {
+            command_count = split_command(binding_value, command,
+                                          LAUNCH_COMMAND_MAX);
+            if (command_count == 0u) {
+                set_status(launcher, state, "Binding has no command");
+                return true;
+            }
+        }
+        if (spawn_tab(label, NULL, command, command_count))
+            (void)snprintf(message, sizeof message, "Opened %s", label);
+        else
+            (void)snprintf(message, sizeof message, "Could not open %s",
+                           label);
+        set_status(launcher, state, message);
+        return true;
+    }
     switch (target) {
     case DESK_TARGET_TERMINAL:
         command[command_count++] = "bash";
@@ -309,8 +435,12 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
         break;
     case DESK_TARGET_FILES:
         if (resolve_file_manager(resolved, sizeof resolved)) {
+            const char *home = getenv("HOME");
             command[command_count++] = resolved;
-            cwd = getenv("HOME");
+            if (home && home[0] == '/') {
+                command[command_count++] = home;
+                cwd = home;
+            }
         }
         break;
     case DESK_TARGET_MANUALS:
@@ -351,8 +481,10 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
             if (home && home[0] != '\0') {
                 int written = snprintf(cwd_path, sizeof cwd_path,
                                        "%s/.local/share/Trash/files", home);
-                if (written > 0 && (size_t)written < sizeof cwd_path)
+                if (written > 0 && (size_t)written < sizeof cwd_path) {
+                    command[command_count++] = cwd_path;
                     cwd = cwd_path;
+                }
             }
         }
         break;
@@ -360,10 +492,20 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
         command_count = tool_or_kilix("kilix-memory", "memory",
                                       resolved, sizeof resolved, command);
         break;
-    case DESK_TARGET_MAINTENANCE:
-        command_count = kilix_command(resolved, sizeof resolved, "update",
-                                      command);
+    case DESK_TARGET_MAINTENANCE: {
+        /* The shed opens the desktop's own configuration TUI. */
+        const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
+        int written;
+        if (!root || root[0] == '\0') root = ".";
+        written = snprintf(resolved, sizeof resolved,
+                           "%s/tools/land_config.py", root);
+        if (written > 0 && (size_t)written < sizeof resolved &&
+            access(resolved, R_OK) == 0) {
+            command[command_count++] = "python3";
+            command[command_count++] = resolved;
+        }
         break;
+    }
     default:
         break;
     }

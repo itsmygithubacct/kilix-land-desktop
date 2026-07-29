@@ -36,10 +36,31 @@ data can never introduce a new argv. This file documents that registry.
 | `voice` | phone (living) | `kilix-tts` → `kilix tts`; tab |
 | `trash` | trash can (kitchen) | file manager candidate table on `~/.local/share/Trash/files`, tab |
 | `mailbox` | mailbox (yard) | `kilix-memory` → `kilix memory`; tab |
-| `maintenance` | shed (yard) | tab: `kilix update` (via resolved kilix launcher) |
+| `maintenance` | shed (yard) | tab: `tools/land_config.py` — the binding configuration TUI |
 
-The file-manager candidate table (used by `files` and `trash`):
-`mc`, `ranger`, `nnn`, `lf` — first found on PATH wins. All run in a tab.
+The file-manager candidate table (used by `files`, `trash`, and folder
+bindings): **`kilix-file`** (the kilix-tui-utils file manager) first, then
+`mc`, `ranger`, `nnn`, `lf` — first found on PATH wins. All run in a tab
+with the start directory as the positional argument.
+
+## Per-object bindings
+
+`tools/land_config.py` (the shed, or run directly / via `kilix` in a tab)
+writes `<config-home>/bindings.conf`:
+
+```
+<room>.<object> = app <command and arguments>
+<room>.<object> = folder </absolute/path>
+```
+
+The launcher re-reads the file on every activation; a binding overrides the
+registry row for that one object. `app` values are whitespace-split into a
+fixed argv — no shell, no quoting, no expansion (the same trust level as
+kilix.env: user-owned config, still never a shell string). `folder` values
+open in the file-manager candidate table at that path. Deleting the line
+(or choosing Default in the TUI) restores the registry behavior.
+`python3 tools/land_config.py --check` validates the file and runs in
+`make test`.
 
 ## Internal targets (never spawn; handled in desk.c)
 

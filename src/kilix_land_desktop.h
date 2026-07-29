@@ -243,6 +243,7 @@ typedef struct desk_state {
     char toast[DESK_TOAST_CAPACITY];
     int toast_ticks;
     desk_target pending_launch; /* take-and-clear */
+    char pending_launch_object[DESK_ID_CAPACITY]; /* object behind it */
     desk_audio_event pending_audio[4];
     int pending_audio_count;
     bool quit_requested;
@@ -324,7 +325,8 @@ bool desk_profile_reset(void); /* --profile-test helper */
 
 /* launcher.c — target registry and request servicing */
 void desk_launcher_init(desk_launcher *launcher);
-bool desk_launcher_service(desk_launcher *launcher, desk_state *state);
+bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
+                           const desk_world *world);
 desk_target desk_target_from_string(const char *name);
 const char *desk_target_name(desk_target target);
 const char *desk_target_label(desk_target target);

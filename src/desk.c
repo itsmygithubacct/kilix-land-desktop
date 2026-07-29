@@ -801,6 +801,9 @@ static bool interact_room(desk_state *state, const desk_world *world,
         return false;
     default:
         state->pending_launch = object->target;
+        (void)snprintf(state->pending_launch_object,
+                       sizeof state->pending_launch_object, "%s",
+                       object->id);
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return true;
     }
@@ -1062,6 +1065,10 @@ desk_target desk_take_launch_request(desk_state *state)
     if (!state) return DESK_TARGET_NONE;
     target = state->pending_launch;
     state->pending_launch = DESK_TARGET_NONE;
+    /* The caller copies pending_launch_object before taking; the clear here
+     * keeps the pair take-and-clear as one operation. */
+    (void)memset(state->pending_launch_object, 0,
+                 sizeof state->pending_launch_object);
     return target;
 }
 
