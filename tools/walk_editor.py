@@ -10,12 +10,17 @@ rect plus obstacle rects (greedy exact cover) — and rewrites the file, then
 runs tools/validate_world.py so a spawn painted into a wall is caught
 immediately.
 
-Runs inside kitty (kitty graphics protocol + SGR pixel mouse). Keys:
+Runs inside kitty (kitty graphics protocol + SGR pixel mouse). Kitty hides
+the system pointer over the drawn image, so the editor tracks hover motion
+(ANY-event mode 1003) and draws its own cursor: a gold outline on the hovered
+cell, low-alpha hairlines through the pointer, and a dot at the exact pixel.
+Hover only moves the drawn cursor — it never paints.  Keys:
   1-5 / n / p  switch room        t  cycle style        g  toggle grid
   s  save      u  undo            r  reload from json   q  quit
 
-Headless modes: --render OUT.png [--room ID] [--style STYLE] composes one
-frame; --selftest (pure stdlib, no PIL) proves rasterize -> decompose ->
+Headless modes: --render OUT.png [--room ID] [--style STYLE] [--hover X,Y]
+composes one frame (optionally with the drawn cursor at logical X,Y);
+--selftest (pure stdlib, no PIL) proves rasterize -> decompose ->
 rasterize is a fixpoint for every room and stays under the obstacle cap.
 """
 
@@ -43,6 +48,7 @@ STYLES = ("legend", "chumrunner", "fantasy", "pleb-bound")
 DISPLAY_W, DISPLAY_H = 960, 540
 SCALE = DISPLAY_W // LOGICAL_W
 IMAGE_ID = 77
+REPAINT_INTERVAL = 0.040    # min seconds between image retransmits
 
 
 def world_path():
@@ -179,12 +185,19 @@ def load_plate(style, plate):
     return cached
 
 
-def compose(world, room, grid, style, show_grid=True):
+def compose(world, room, grid, style, show_grid=True, hover=None):
     """-> PNG bytes of plate + overlay at 960x540 (PIL only here).
 
     The walkable tint is one COLSxROWS alpha mask scaled with NEAREST and
     alpha_composited once — not one rectangle per cell — so repainting
-    mid-drag stays well under 100ms."""
+    mid-drag stays well under 100ms.
+
+    hover is a logical (x, y) float pair or None.  When set, a drawn cursor
+    is layered topmost: low-alpha hairlines through the exact pointer
+    position, a warm-gold 2px outline (with 1px dark inset so it reads on
+    bright plates too) around the hovered cell, and a 3px dot at the
+    pointer.  kitty hides the system pointer over the image, so this is the
+    only cursor the user gets."""
     from PIL import Image, ImageDraw
     base = load_plate(style, room["plate"])
     walk_alpha = Image.frombytes(
@@ -221,6 +234,21 @@ def compose(world, room, grid, style, show_grid=True):
     for x, y in incoming_spawns(world, room["id"]):
         x, y = x * SCALE, y * SCALE
         draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(90, 230, 120, 230))
+    if hover is not None:
+        hx, hy = hover[0] * SCALE, hover[1] * SCALE
+        # Hairlines first so the cell outline and dot stay solid on top.
+        draw.line([0, hy, DISPLAY_W, hy], fill=(255, 220, 130, 70))
+        draw.line([hx, 0, hx, DISPLAY_H], fill=(255, 220, 130, 70))
+        hcx, hcy = int(hover[0] // CELL), int(hover[1] // CELL)
+        if 0 <= hcx < COLS and 0 <= hcy < ROWS:
+            x0, y0 = hcx * cell_px, hcy * cell_px
+            x1, y1 = x0 + cell_px - 1, y0 + cell_px - 1
+            draw.rectangle([x0, y0, x1, y1], outline=(255, 200, 70, 255),
+                           width=2)
+            draw.rectangle([x0 + 2, y0 + 2, x1 - 2, y1 - 2],
+                           outline=(40, 32, 8, 255), width=1)
+        draw.ellipse([hx - 1, hy - 1, hx + 1, hy + 1],
+                     fill=(255, 200, 70, 255))
     frame = Image.alpha_composite(frame, overlay).convert("RGB")
     buffer = io.BytesIO()
     frame.save(buffer, format="PNG", compress_level=1)
@@ -256,7 +284,14 @@ class Terminal:
 
     def __enter__(self):
         tty.setcbreak(self.fd)
-        self.write("\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?1016h")
+        # 1003 (ANY-event) is a superset of 1002: presses and drags are
+        # unchanged, plus MOVE reports (button bits 3 + motion 32 = cb 35)
+        # while no button is held — that is the hover the drawn cursor
+        # tracks, since kitty hides the system pointer over the image.
+        self.write("\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h\x1b[?1016h")
+        # OSC 22: ask for a crosshair pointer — harmless where unsupported,
+        # helps where the pointer is merely styled rather than hidden.
+        self.write("\x1b]22;crosshair\x07")
         # DECRQM: did the terminal actually grant pixel reports?  The reply
         # (\x1b[?1016;Ps$y, Ps 1 or 3 = set) is consumed by parse_events in
         # the event loop; until it says otherwise we assume pixel coords,
@@ -267,7 +302,8 @@ class Terminal:
 
     def __exit__(self, *_):
         self.write(f"\x1b_Ga=d,d=i,i={IMAGE_ID},q=2\x1b\\")
-        self.write("\x1b[?1016l\x1b[?1006l\x1b[?1002l\x1b[?25h\x1b[?1049l")
+        self.write("\x1b]22;default\x07")
+        self.write("\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?25h\x1b[?1049l")
         termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
 
     def write(self, text):
@@ -402,23 +438,44 @@ def run_editor(initial_room, initial_style):
     paint_value = None
     pixel_mouse = True          # until a DECRQM reply says otherwise
     mouse_note = "mouse: no input yet"
+    hover = None                # logical (x, y) floats, or None
+    hover_cell = None           # (cx, cy) the drawn cursor highlights
 
     with Terminal() as terminal:
         def status_lines():
             room = rooms[room_index]
             state_flag = "*" if dirty else " "
             unit = "" if pixel_mouse else " [cell coords]"
+            if hover is None:
+                hover_note = "hover -"
+            else:
+                hover_note = (f"hover {int(hover[0])},{int(hover[1])} "
+                              f"cell {hover_cell[0]},{hover_cell[1]}")
             return (
                 f"walk-editor  {room['id']} ({STYLES[style_index]})"
                 f"{state_flag}  walkable {sum(grid)}/{COLS * ROWS} cells"
-                f"   {mouse_note}{unit}",
+                f"   {hover_note}   {mouse_note}{unit}",
                 "1-5/n/p room · t style · g grid · s save · u undo · "
                 f"r reload · q quit   {message}")
 
         def repaint():
             terminal.show_image(compose(world, rooms[room_index], grid,
-                                        STYLES[style_index], show_grid))
+                                        STYLES[style_index], show_grid,
+                                        hover))
             terminal.status(*status_lines())
+
+        def set_hover(point):
+            """Track the pointer; repaint only when the CELL changes (the
+            hairlines/dot then snap to the new exact position too) so pure
+            hover costs at most one retransmit per cell crossed."""
+            nonlocal hover, hover_cell, need_image, need_status
+            hover = point
+            cell = (None if point is None else
+                    (int(point[0] // CELL), int(point[1] // CELL)))
+            if cell != hover_cell:
+                hover_cell = cell
+                need_image = True
+            need_status = True
 
         def switch_room(new_index):
             nonlocal room_index, grid, dirty, undo_stack
@@ -432,7 +489,16 @@ def run_editor(initial_room, initial_style):
         pending = b""               # incomplete escape tail, carried over
         need_image = need_status = False
         while True:
-            timeout = 0.05 if (need_image or need_status) else 0.5
+            if need_image:
+                # A repaint was suppressed by the throttle: wake up exactly
+                # when the window closes so the trailing frame fires
+                # promptly even if no further input arrives.
+                timeout = max(0.001, REPAINT_INTERVAL -
+                              (time.monotonic() - last_draw))
+            elif need_status:
+                timeout = 0.05
+            else:
+                timeout = 0.5
             ready, _, _ = select.select([terminal.fd], [], [], timeout)
             if ready:
                 try:
@@ -452,18 +518,28 @@ def run_editor(initial_room, initial_style):
                 need_status = True
                 if button & 256:            # kitty window-leave (cb 288)
                     mouse_note = f"mouse: {px},{py} leave"
+                    set_hover(None)
                     continue
                 if button & (64 | 128):     # wheel / extra buttons
                     mouse_note = f"mouse: {px},{py} wheel/aux"
                     continue
+                point = (terminal.logical_from_pixels(px, py) if pixel_mouse
+                         else terminal.logical_from_cells(px, py))
+                set_hover(point)            # every report moves the cursor
                 if not active:              # release ends the gesture
                     paint_value = None
                     mouse_note = f"mouse: {px},{py} release"
                     continue
                 base_button = button & 3
                 motion = bool(button & 32)
-                point = (terminal.logical_from_pixels(px, py) if pixel_mouse
-                         else terminal.logical_from_cells(px, py))
+                if base_button == 3:
+                    # ANY-event (1003) hover: motion with no button held
+                    # (cb 35).  It moves the drawn cursor and NOTHING else
+                    # — never paint — and it proves any gesture is over
+                    # even if the release report was lost.
+                    paint_value = None
+                    mouse_note = f"mouse: {px},{py} hover"
+                    continue
                 if point is None:
                     mouse_note = f"mouse: {px},{py} outside image"
                     continue
@@ -543,18 +619,20 @@ def run_editor(initial_room, initial_style):
                     switch_room(room_index)
                     message = "reloaded"
                 need_image = True
-            # Coalesce repaints: during a 1016 drag kitty reports every
-            # pixel of motion, so redraw at most ~30fps while input is
-            # still streaming and flush immediately once it pauses.
+            # Coalesce repaints: in 1003+1016 kitty reports every pixel of
+            # motion, so image retransmits are throttled to one per
+            # REPAINT_INTERVAL (40ms).  A suppressed frame is not lost —
+            # need_image stays set and the shortened select timeout above
+            # delivers the trailing repaint.  Status-only updates are a few
+            # bytes, so they flush every batch to keep hover coords live.
             now = time.monotonic()
-            if (need_image or need_status) and (not ready
-                                                or now - last_draw >= 0.03):
-                if need_image:
-                    repaint()
-                else:
-                    terminal.status(*status_lines())
+            if need_image and now - last_draw >= REPAINT_INTERVAL:
+                repaint()
                 last_draw = now
                 need_image = need_status = False
+            elif need_status:
+                terminal.status(*status_lines())
+                need_status = False
 
 
 def main():
@@ -562,19 +640,32 @@ def main():
     parser.add_argument("--room", default="bedroom")
     parser.add_argument("--style", default="legend")
     parser.add_argument("--render", metavar="OUT")
+    parser.add_argument("--hover", metavar="X,Y",
+                        help="with --render: draw the hover cursor at "
+                             "logical X,Y (floats)")
     parser.add_argument("--selftest", action="store_true")
     arguments = parser.parse_args()
     if arguments.selftest:
         return selftest()
     if arguments.render:
+        hover = None
+        if arguments.hover:
+            try:
+                hx, hy = (float(part) for part
+                          in arguments.hover.split(","))
+            except ValueError:
+                parser.error("--hover expects X,Y (logical coordinates)")
+            hover = (hx, hy)
         world = load_world()
         room = next((r for r in world["rooms"]
                      if r["id"] == arguments.room), world["rooms"][0])
-        png = compose(world, room, rasterize(room), arguments.style)
+        png = compose(world, room, rasterize(room), arguments.style,
+                      hover=hover)
         with open(arguments.render, "wb") as handle:
             handle.write(png)
+        note = f" hover {arguments.hover}" if hover else ""
         print(f"walk-editor: rendered {room['id']} ({arguments.style}) "
-              f"to {arguments.render}")
+              f"to {arguments.render}{note}")
         return 0
     return run_editor(arguments.room, arguments.style)
 

@@ -5,19 +5,27 @@ Opens a pty whose slave reports the live kilix tab geometry (48x212 cells,
 1908x960 px) via TIOCSWINSZ before spawn, runs the editor against a TEMP copy
 of assets/world/world.json, and asserts the full interactive contract:
 
-  startup   modes 1002/1006/1016 enabled, kitty graphics a=T transmitted,
-            status line written
+  startup   modes 1003/1006/1016 enabled (1003 = ANY-event, the hover
+            superset of 1002), OSC 22 crosshair pointer requested, kitty
+            graphics a=T transmitted, status line written
+  hovering  motion-only reports (cb 35, final 'M', NO button) sweeping
+            across cells retransmit the image (the drawn cursor tracks),
+            report hover coords in the status line, and leave the grid
+            byte-untouched: no paint/block, no dirty flag, walkable count
+            unchanged — then a normal press+drag+release still paints
   painting  a left press + drag + release in SGR PIXEL coordinates (mode
             1016, the mode the live tab reports SET) flips the targeted grid
             cells, the editor retransmits the image (second a=T)
   saving    's' rewrites world.json so the painted cells rasterize walkable
             and the file still passes tools/validate_world.py; 'q' exits 0
 
-Two scenarios, both must pass:
-  clean     the whole mouse burst arrives in one read
-  torture   the same bytes arrive in 3-byte fragments with 10ms gaps,
-            splitting every escape sequence across reads — what a pty broker
-            or a slow relay does in practice
+Four scenarios, all must pass:
+  clean          the whole mouse burst arrives in one read
+  torture        the same bytes arrive in 3-byte fragments with 10ms gaps,
+                 splitting every escape sequence across reads — what a pty
+                 broker or a slow relay does in practice
+  hover          the hover sweep (then press+drag+release) in one read
+  hover-torture  the hover sweep through the same 3-byte fragmentation
 
 Usage:  test_walk_editor.py            verbose report with log evidence
         test_walk_editor.py --quick    one line per check, nonzero on failure
@@ -103,6 +111,20 @@ def mouse_burst():
         px, py = pixel_for_cell(*cell)
         out.append(f"\x1b[<32;{px};{py}M")              # drag motion
     out.append(f"\x1b[<0;{px};{py}m")                   # release
+    return "".join(out).encode()
+
+
+# Motion-only hover sweep: row 20, cells 6..15 (disjoint from PAINT_CELLS).
+HOVER_CELLS = [(cx, 20) for cx in range(6, 16)]
+
+
+def hover_burst():
+    """ANY-event (1003) hover exactly as kitty emits it: cb 3 (no button)
+    | 32 (motion) = 35, final 'M' — never a press, never a release."""
+    out = []
+    for cell in HOVER_CELLS:
+        px, py = pixel_for_cell(*cell)
+        out.append(f"\x1b[<35;{px};{py}M")
     return "".join(out).encode()
 
 
@@ -193,7 +215,16 @@ def status_rooms(log):
     return seen
 
 
-def run_scenario(name, fragmented, verbose):
+def send_burst(session, burst, fragmented):
+    if fragmented:
+        for i in range(0, len(burst), 3):
+            session.send(burst[i:i + 3])
+            time.sleep(0.010)
+    else:
+        session.send(burst)
+
+
+def run_scenario(name, fragmented, verbose, hover=False):
     checks = []
 
     def check(label, ok, detail=""):
@@ -202,22 +233,46 @@ def run_scenario(name, fragmented, verbose):
     session = Session()
     try:
         # (a) mouse modes, (b) first graphics transmit, (c) status line
-        for mode in (b"\x1b[?1002h", b"\x1b[?1006h", b"\x1b[?1016h"):
+        for mode in (b"\x1b[?1003h", b"\x1b[?1006h", b"\x1b[?1016h"):
             check(f"enables {mode[3:-1].decode()}",
                   session.wait_for(mode, 10) != -1)
+        check("requests crosshair pointer (OSC 22)",
+              session.wait_for(b"\x1b]22;crosshair\x07", 5) != -1)
         first_t = session.wait_for(APC_TRANSMIT, 15)
         check("transmits kitty image (a=T)", first_t != -1)
         check("writes status line",
               session.wait_for(b"walk-editor  ", 5) != -1)
 
+        if hover:
+            # Motion-only sweep with NO button press: the drawn cursor
+            # must track (image retransmit + hover status), the grid must
+            # stay byte-identical (no paint/block notes, no dirty flag,
+            # walkable count unchanged) — and painting must still work
+            # afterwards (the shared paint phase below runs regardless).
+            time.sleep(0.2)              # let startup repaints settle
+            hover_mark = len(session.snapshot())
+            pre_counts = re.findall(rb"walkable (\d+)/",
+                                    session.snapshot()[:hover_mark])
+            send_burst(session, hover_burst(), fragmented)
+            hover_t = session.wait_for(APC_TRANSMIT, 6, start=hover_mark)
+            check("retransmits image on hover sweep (cursor tracks)",
+                  hover_t != -1)
+            last_cell = "cell {},{}".format(*HOVER_CELLS[-1]).encode()
+            check("status reports final hover cell",
+                  session.wait_for(last_cell, 6, start=hover_mark) != -1)
+            time.sleep(0.3)              # trailing repaint + status settle
+            hover_log = session.snapshot()[hover_mark:]
+            check("hover never paints (no paint/block mouse notes)",
+                  not re.search(rb"cell \d+,\d+ (paint|block)", hover_log))
+            check("hover leaves grid clean (no dirty flag)",
+                  b")*  walkable" not in hover_log)
+            counts = set(re.findall(rb"walkable (\d+)/", hover_log))
+            check("walkable count unchanged by hover",
+                  bool(pre_counts) and counts <= {pre_counts[-1]},
+                  f"before={pre_counts[-1:]} during/after={sorted(counts)}")
+
         mark = len(session.snapshot())
-        burst = mouse_burst()
-        if fragmented:
-            for i in range(0, len(burst), 3):
-                session.send(burst[i:i + 3])
-                time.sleep(0.010)
-        else:
-            session.send(burst)
+        send_burst(session, mouse_burst(), fragmented)
 
         second_t = session.wait_for(APC_TRANSMIT, 6, start=mark)
         check("retransmits image after painting (2nd a=T)", second_t != -1)
@@ -270,7 +325,7 @@ def run_scenario(name, fragmented, verbose):
     session.cleanup()
 
     ok = all(c[1] for c in checks)
-    label = "torture (3-byte fragments)" if fragmented else "clean"
+    label = name + (" (3-byte fragments)" if fragmented else "")
     print(f"[{'PASS' if ok else 'FAIL'}] scenario: {label}")
     for label_, good, detail in checks:
         if verbose or not good:
@@ -294,6 +349,8 @@ def main():
     verbose = not arguments.quick
     ok = run_scenario("clean", False, verbose)
     ok &= run_scenario("torture", True, verbose)
+    ok &= run_scenario("hover", False, verbose, hover=True)
+    ok &= run_scenario("hover-torture", True, verbose, hover=True)
     return 0 if ok else 1
 
 
