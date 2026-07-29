@@ -1,0 +1,162 @@
+{
+  "chumrunner/bedroom": {
+    "file": "chumrunner/bedroom.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "eddaf366f40a12b65652312e4a6425f20f28f89174d0459e5f6b4e219c0b60b0",
+    "width": 1280
+  },
+  "chumrunner/kitchen": {
+    "file": "chumrunner/kitchen.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "be454e4e59bf1dc167fa52121760141c8007b36b815ef5094dd6fc5514071f98",
+    "width": 1280
+  },
+  "chumrunner/living": {
+    "file": "chumrunner/living.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "2e1d7dfa1197ee8d674bf3420c71630ba4b0e151545df279cd730a14d1fe4216",
+    "width": 1280
+  },
+  "chumrunner/study": {
+    "file": "chumrunner/study.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "28375d73f35b25ff19412ec38d2a40d12672db83e23de52273181a47b0faaa9d",
+    "width": 1280
+  },
+  "chumrunner/yard": {
+    "file": "chumrunner/yard.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "8f29af382672585b45f68236fd2e12e252c56b49adde35bbe8465044ddec885b",
+    "width": 1280
+  },
+  "fantasy/bedroom": {
+    "file": "fantasy/bedroom.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "3142fdae77eca3723671fac87c1f1054c960173df6f7dfd0f33f95cec0cefb14",
+    "width": 1280
+  },
+  "fantasy/kitchen": {
+    "file": "fantasy/kitchen.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "f1aeadbff00b903643737e54234dac11177128e4c918a0cad8970684f8f6d55d",
+    "width": 1280
+  },
+  "fantasy/living": {
+    "file": "fantasy/living.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "77fe6bfad2ca447c324f4a853fcb7389578a884f284fb23697755a0bf7dddd83",
+    "width": 1280
+  },
+  "fantasy/study": {
+    "file": "fantasy/study.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "3fb5dc6eb8ccb269b85b4021bbde6abb0c25c8aa6b4727572b1911936bda9ac5",
+    "width": 1280
+  },
+  "fantasy/yard": {
+    "file": "fantasy/yard.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "2140a0936514649c06f313b43a69ae7cdaa62fdf20707aa4e9eb44d0ee65c007",
+    "width": 1280
+  },
+  "legend/bedroom": {
+    "file": "legend/bedroom.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "968d654c31dc58b9f6568687e095194ff3e9691da7e04c23433d3605d52c77ad",
+    "width": 1280
+  },
+  "legend/kitchen": {
+    "file": "legend/kitchen.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "1df462fbd0e60e0bb0488bac044d75f5fa299ee15cd5fcb0d7088352110609aa",
+    "width": 1280
+  },
+  "legend/living": {
+    "file": "legend/living.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "da5de1da0b1ceaa6175d0a174400b997ffb88784e279ee8f2a07fd255376c04a",
+    "width": 1280
+  },
+  "legend/study": {
+    "file": "legend/study.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "1c2e135c133754540be537014f173791c291a7aec5b8dde99b91cbf82cf82d47",
+    "width": 1280
+  },
+  "legend/yard": {
+    "file": "legend/yard.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "cf5f2a2fecacef5e000144553b4d10bde18a5d3cc8b10f7c487236dd31ba756c",
+    "width": 1280
+  },
+  "pleb-bound/bedroom": {
+    "file": "pleb-bound/bedroom.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "e68d219478f766dfee569a687360b8ade0308a3afaf4d331473e908a32a5bcff",
+    "width": 1280
+  },
+  "pleb-bound/kitchen": {
+    "file": "pleb-bound/kitchen.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "bfc3e93457d0b2bdbb01e3b293d6525ff2224bafe3dee7299929731a3890676f",
+    "width": 1280
+  },
+  "pleb-bound/living": {
+    "file": "pleb-bound/living.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "ec73eb79d551ee57f5b137dada99d79d73638541ba977e543862000c083f8918",
+    "width": 1280
+  },
+  "pleb-bound/study": {
+    "file": "pleb-bound/study.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "79660754fa4dbdeed50422025b4f65f005765e31f251b12146a2ff95ae52ef40",
+    "width": 1280
+  },
+  "pleb-bound/yard": {
+    "file": "pleb-bound/yard.png",
+    "generated": "2026-07-29",
+    "generator": "gemini-v7 gemini-3-pro-image",
+    "height": 720,
+    "sha256": "5cbff84add72574175e8c15012e2879dcec6bf0fc718a5470f580f4f9d2037d2",
+    "width": 1280
+  }
+}
