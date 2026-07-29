@@ -1,0 +1,336 @@
+#include "kilix_land_desktop.h"
+
+#include <fcntl.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
+
+#define LAUNCH_PATH_CAPACITY 512
+#define LAUNCH_COMMAND_MAX 4
+/* kitten @ --password-file P launch --type=tab --self --tab-title T
+ * [--cwd D] -- <command...> NULL */
+#define LAUNCH_ARGV_MAX (12 + LAUNCH_COMMAND_MAX + 1)
+
+typedef struct target_entry {
+    const char *name;
+    const char *label;
+} target_entry;
+
+static const target_entry target_table[DESK_TARGET_COUNT] = {
+    [DESK_TARGET_NONE] = { "", "" },
+    [DESK_TARGET_TERMINAL] = { "terminal", "Terminal" },
+    [DESK_TARGET_CODING_AGENTS] = { "coding-agents", "Coding agents" },
+    [DESK_TARGET_FILES] = { "files", "File manager" },
+    [DESK_TARGET_MANUALS] = { "manuals", "Manuals" },
+    [DESK_TARGET_MODELS] = { "models", "Models" },
+    [DESK_TARGET_GAMES] = { "games", "Games" },
+    [DESK_TARGET_MUSIC] = { "music", "Music player" },
+    [DESK_TARGET_VOICE] = { "voice", "Voice" },
+    [DESK_TARGET_TRASH] = { "trash", "Trash" },
+    [DESK_TARGET_MAILBOX] = { "mailbox", "Mailbox" },
+    [DESK_TARGET_MAINTENANCE] = { "maintenance", "Maintenance" },
+    [DESK_TARGET_WARDROBE] = { "wardrobe", "Wardrobe" },
+    [DESK_TARGET_BED] = { "bed", "Bed" },
+    [DESK_TARGET_STATUS_BOARD] = { "status-board", "Status board" },
+    [DESK_TARGET_GATE_LOCKED] = { "gate-locked", "Locked gate" }
+};
+
+desk_target desk_target_from_string(const char *name)
+{
+    int index;
+    if (!name || name[0] == '\0') return DESK_TARGET_NONE;
+    for (index = 1; index < DESK_TARGET_COUNT; ++index) {
+        if (strcmp(target_table[index].name, name) == 0)
+            return (desk_target)index;
+    }
+    return DESK_TARGET_NONE;
+}
+
+const char *desk_target_name(desk_target target)
+{
+    if ((int)target < 0 || (int)target >= DESK_TARGET_COUNT) return "";
+    return target_table[target].name;
+}
+
+const char *desk_target_label(desk_target target)
+{
+    if ((int)target < 0 || (int)target >= DESK_TARGET_COUNT) return "";
+    return target_table[target].label;
+}
+
+bool desk_target_is_external(desk_target target)
+{
+    return target >= DESK_TARGET_TERMINAL && target <= DESK_TARGET_MAINTENANCE;
+}
+
+void desk_launcher_init(desk_launcher *launcher)
+{
+    const char *kill_switch;
+    if (!launcher) return;
+    (void)memset(launcher, 0, sizeof *launcher);
+    kill_switch = getenv("KILIX_LAND_DESKTOP_EXTERNAL_APPS");
+    launcher->external_enabled =
+        !(kill_switch && strcmp(kill_switch, "0") == 0);
+}
+
+static void set_status(desk_launcher *launcher, desk_state *state,
+                       const char *text)
+{
+    (void)snprintf(launcher->status, sizeof launcher->status, "%s", text);
+    (void)snprintf(state->toast, sizeof state->toast, "%s", text);
+    state->toast_ticks = DESK_TOAST_TICKS;
+}
+
+/* Manual PATH scan; an empty component means the current directory. */
+static bool which(const char *name, char *path, size_t size)
+{
+    const char *search = getenv("PATH");
+    if (!name || name[0] == '\0' || !path || size == 0u) return false;
+    if (!search || search[0] == '\0') return false;
+    for (;;) {
+        const char *end = strchr(search, ':');
+        size_t dir_length = end ? (size_t)(end - search) : strlen(search);
+        int written;
+        if (dir_length == 0u)
+            written = snprintf(path, size, "./%s", name);
+        else
+            written = snprintf(path, size, "%.*s/%s", (int)dir_length,
+                               search, name);
+        if (written > 0 && (size_t)written < size &&
+            access(path, X_OK) == 0)
+            return true;
+        if (!end) return false;
+        search = end + 1;
+    }
+}
+
+/* Installed launcher first, then the source checkout, then PATH; NULL when
+ * no kilix launcher can be found anywhere. */
+static const char *resolve_kilix(char *path, size_t size)
+{
+    const char *base = getenv("KILIX_HOME");
+    int written;
+    if (base && base[0] != '\0') {
+        written = snprintf(path, size, "%s/kilix", base);
+        if (written > 0 && (size_t)written < size &&
+            access(path, X_OK) == 0)
+            return path;
+    }
+    base = getenv("GPU_TERMINAL_SOURCE_HOME");
+    if (base && base[0] != '\0') {
+        written = snprintf(path, size, "%s/kilix/kilix", base);
+        if (written > 0 && (size_t)written < size &&
+            access(path, X_OK) == 0)
+            return path;
+    }
+    if (which("kilix", path, size)) return "kilix";
+    return NULL;
+}
+
+static size_t kilix_command(char *path, size_t size, const char *subcommand,
+                            const char **command)
+{
+    const char *kilix = resolve_kilix(path, size);
+    if (!kilix) return 0u;
+    command[0] = kilix;
+    command[1] = subcommand;
+    return 2u;
+}
+
+static size_t tool_or_kilix(const char *tool, const char *subcommand,
+                            char *path, size_t size, const char **command)
+{
+    if (which(tool, path, size)) {
+        command[0] = path;
+        return 1u;
+    }
+    return kilix_command(path, size, subcommand, command);
+}
+
+static bool resolve_file_manager(char *path, size_t size)
+{
+    static const char *const candidates[] = { "mc", "ranger", "nnn", "lf" };
+    size_t index;
+    for (index = 0u; index < sizeof candidates / sizeof candidates[0];
+         ++index) {
+        if (which(candidates[index], path, size)) return true;
+    }
+    return false;
+}
+
+/* Checked on every activation, never cached. */
+static bool tab_session_ready(void)
+{
+    const char *listen = getenv("KITTY_LISTEN_ON");
+    const char *password = getenv("KILIX_RC_PASSWORD_FILE");
+    return listen && listen[0] != '\0' && password && password[0] != '\0' &&
+           access(password, R_OK) == 0;
+}
+
+static bool spawn_tab(const char *label, const char *cwd,
+                      const char *const *command, size_t command_count)
+{
+    const char *kitten = getenv("KILIX_KITTEN");
+    const char *password = getenv("KILIX_RC_PASSWORD_FILE");
+    char *argv[LAUNCH_ARGV_MAX];
+    size_t argc = 0u;
+    size_t index;
+    posix_spawn_file_actions_t actions;
+    pid_t pid = -1;
+    int result;
+
+    if (!password || password[0] == '\0') return false;
+    if (command_count == 0u || command_count > LAUNCH_COMMAND_MAX)
+        return false;
+    if (!kitten || kitten[0] == '\0') kitten = "kitten";
+    /* posix_spawnp takes non-const argv; the strings are never modified. */
+    argv[argc++] = (char *)kitten;
+    argv[argc++] = (char *)"@";
+    argv[argc++] = (char *)"--password-file";
+    argv[argc++] = (char *)password;
+    argv[argc++] = (char *)"launch";
+    argv[argc++] = (char *)"--type=tab";
+    argv[argc++] = (char *)"--self";
+    argv[argc++] = (char *)"--tab-title";
+    argv[argc++] = (char *)label;
+    if (cwd && cwd[0] != '\0') {
+        argv[argc++] = (char *)"--cwd";
+        argv[argc++] = (char *)cwd;
+    }
+    argv[argc++] = (char *)"--";
+    for (index = 0u; index < command_count; ++index)
+        argv[argc++] = (char *)command[index];
+    argv[argc] = NULL;
+
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
+                                         "/dev/null", O_RDONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+    result = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+    (void)posix_spawn_file_actions_destroy(&actions);
+    if (result != 0) return false;
+    /* kitten exits as soon as the tab is placed; accept late reaping. */
+    (void)waitpid(pid, NULL, WNOHANG);
+    return true;
+}
+
+bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
+{
+    char resolved[LAUNCH_PATH_CAPACITY];
+    char cwd_path[LAUNCH_PATH_CAPACITY];
+    char message[DESK_TOAST_CAPACITY];
+    const char *command[LAUNCH_COMMAND_MAX];
+    size_t command_count = 0u;
+    const char *cwd = NULL;
+    const char *label;
+    desk_target target;
+
+    if (!launcher || !state) return false;
+    target = desk_take_launch_request(state);
+    if (target == DESK_TARGET_NONE) return false;
+    if (!desk_target_is_external(target)) return true;
+    label = desk_target_label(target);
+    if (!launcher->external_enabled) {
+        set_status(launcher, state, "External apps are disabled.");
+        return true;
+    }
+    if (!tab_session_ready()) {
+        set_status(launcher, state,
+                   "Kilix session not detected - launch inside kilix");
+        return true;
+    }
+    switch (target) {
+    case DESK_TARGET_TERMINAL:
+        command[command_count++] = "bash";
+        command[command_count++] = "-l";
+        break;
+    case DESK_TARGET_CODING_AGENTS:
+        command_count = tool_or_kilix("kilix-rollout-resume", "rollout",
+                                      resolved, sizeof resolved, command);
+        break;
+    case DESK_TARGET_FILES:
+        if (resolve_file_manager(resolved, sizeof resolved)) {
+            command[command_count++] = resolved;
+            cwd = getenv("HOME");
+        }
+        break;
+    case DESK_TARGET_MANUALS:
+        command[command_count++] = "man";
+        command[command_count++] = "man";
+        break;
+    case DESK_TARGET_MODELS:
+        command_count = tool_or_kilix("kilix-bonsai", "bonsai",
+                                      resolved, sizeof resolved, command);
+        break;
+    case DESK_TARGET_GAMES: {
+        const char *assets = getenv("KILIX_LAND_DESKTOP_ASSETS");
+        int written;
+        if (!assets || assets[0] == '\0') assets = "assets";
+        written = snprintf(resolved, sizeof resolved,
+                           "%s/../tools/land_games.py", assets);
+        if (written > 0 && (size_t)written < sizeof resolved) {
+            command[command_count++] = "python3";
+            command[command_count++] = resolved;
+        }
+        break;
+    }
+    case DESK_TARGET_MUSIC:
+        command_count = tool_or_kilix("kilix-amp", "amp",
+                                      resolved, sizeof resolved, command);
+        break;
+    case DESK_TARGET_VOICE:
+        command_count = tool_or_kilix("kilix-tts", "tts",
+                                      resolved, sizeof resolved, command);
+        break;
+    case DESK_TARGET_TRASH:
+        if (resolve_file_manager(resolved, sizeof resolved)) {
+            const char *home = getenv("HOME");
+            command[command_count++] = resolved;
+            if (home && home[0] != '\0') {
+                int written = snprintf(cwd_path, sizeof cwd_path,
+                                       "%s/.local/share/Trash/files", home);
+                if (written > 0 && (size_t)written < sizeof cwd_path)
+                    cwd = cwd_path;
+            }
+        }
+        break;
+    case DESK_TARGET_MAILBOX:
+        command_count = tool_or_kilix("kilix-memory", "memory",
+                                      resolved, sizeof resolved, command);
+        break;
+    case DESK_TARGET_MAINTENANCE:
+        command_count = kilix_command(resolved, sizeof resolved, "update",
+                                      command);
+        break;
+    default:
+        break;
+    }
+    if (command_count == 0u) {
+        if (target == DESK_TARGET_FILES || target == DESK_TARGET_TRASH)
+            (void)snprintf(message, sizeof message,
+                           "No file manager is installed");
+        else
+            (void)snprintf(message, sizeof message, "%s is not installed",
+                           label);
+        set_status(launcher, state, message);
+        return true;
+    }
+    if (spawn_tab(label, cwd, command, command_count))
+        (void)snprintf(message, sizeof message, "Opened %s", label);
+    else
+        (void)snprintf(message, sizeof message, "Could not open %s", label);
+    set_status(launcher, state, message);
+    return true;
+}
