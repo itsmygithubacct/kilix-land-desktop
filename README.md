@@ -37,9 +37,25 @@ commits: kilix-game-kit, kilix-top-down-engine, kilix-assets, kilix-ui.
 
 ## Provider
 
-Runs standalone in any kitty-graphics terminal. As a kilix desktop provider it
-is executable-mode (like kilix-cap): selection via `KILIX_DESKTOP_PROVIDER=land`
-in kilix.env once the host wiring lands. Environment: `KILIX_LAND_DESKTOP_ASSETS`
-(asset root), `KILIX_LAND_DESKTOP_CONFIG_HOME` (profile store),
-`KILIX_LAND_DESKTOP_EXTERNAL_APPS=0` (disable all launches),
+Runs standalone in any kitty-graphics terminal (`./kilix-land-desktop` from
+the checkout). To boot it as a kilix desktop session **today**, use kilix's
+existing `command` provider mode — no kilix changes needed. In
+`~/.local/gpu_terminal/kilix/config/kilix.env`:
+
+```
+KILIX_DESKTOP_PROVIDER=command
+KILIX_DESKTOP_COMMAND=cd ~/.local/gpu_terminal/sources/kilix-land-desktop && exec ./kilix-land-desktop
+KILIX_DESKTOP_NAME=Kilix Land
+```
+
+Native executable-mode wiring (`kilix land`, `KILIX_DESKTOP_PROVIDER=land`,
+pinned installer — the kilix-cap pattern) is the planned M5 step; per the
+design doc it waits until the game-kit submodule pin is publishable.
+
+Environment: `KILIX_LAND_DESKTOP_ASSETS` (checkout root containing `assets/`
+and `tools/`), `KILIX_LAND_DESKTOP_CONFIG_HOME` (absolute profile-store
+override), `KILIX_LAND_DESKTOP_EXTERNAL_APPS=0` (disable all launches),
 `KILIX_LAND_DESKTOP_AUDIO=0` (mute).
+
+Review CLI: `./kilix-land-desktop --screenshot out.ppm --room study
+--style chumrunner` renders any room in any style headlessly.
