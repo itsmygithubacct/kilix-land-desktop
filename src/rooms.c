@@ -886,6 +886,14 @@ bool desk_world_validate(const desk_world *world, char *error,
                     return vfail(error, error_size,
                                  "%s.doors[%d]: spawn inside '%s' obstacle [%d]",
                                  room->id, i, door->to_id, j);
+            /* Door triggers fire on position alone, so a spawn inside any of
+             * the destination's door rects would teleport an idle player. */
+            for (j = 0; j < destination->door_count; ++j)
+                if (point_in_rect(door->spawn_x, door->spawn_y,
+                                  &destination->doors[j].rect))
+                    return vfail(error, error_size,
+                                 "%s.doors[%d]: spawn inside '%s' door [%d]",
+                                 room->id, i, door->to_id, j);
             reachable[destination_index] = true;
             if (door->to_room != destination_index) {
                 /* Header contract: validate resolves to_room. The world the

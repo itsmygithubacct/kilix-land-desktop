@@ -48,6 +48,8 @@
 #define DESK_TOAST_TICKS 180
 #define DESK_DIALOGUE_REVEAL_TICKS_PER_CHAR 2
 #define DESK_PROFILE_SCHEMA 1
+#define DESK_STATUS_LINE_COUNT 6
+#define DESK_STATUS_LINE_CAPACITY 64
 
 typedef enum desk_cast {
     DESK_CAST_LEGEND = 0,
@@ -75,7 +77,8 @@ typedef enum desk_mode {
     DESK_MODE_ROOM = 1,
     DESK_MODE_DIALOGUE = 2,
     DESK_MODE_PAUSE = 3,
-    DESK_MODE_CONFIRM = 4
+    DESK_MODE_CONFIRM = 4,
+    DESK_MODE_STATUS = 5
 } desk_mode;
 
 typedef enum desk_wizard_step {
@@ -197,7 +200,9 @@ typedef struct desk_profile {
     uint32_t schema;
     desk_cast cast;
     desk_actor actor;
+    uint32_t style; /* == cast in v1; kept separate for later mix-and-match */
     uint32_t outfit;
+    uint32_t talked_mask;
     char name[DESK_NAME_CAPACITY];
     char last_room[DESK_ID_CAPACITY];
     float last_x;
@@ -233,6 +238,8 @@ typedef struct desk_state {
     desk_confirm confirm;
     int confirm_cursor;
     int pause_cursor;
+    char status_lines[DESK_STATUS_LINE_COUNT][DESK_STATUS_LINE_CAPACITY];
+    int status_line_count;
     char toast[DESK_TOAST_CAPACITY];
     int toast_ticks;
     desk_target pending_launch; /* take-and-clear */
@@ -309,6 +316,7 @@ int desk_dialogue_count(const desk_state *state);
 size_t desk_dialogue_visible_chars(const desk_state *state);
 const char *desk_interact_prompt(const desk_state *state,
                                  const desk_world *world);
+int desk_interact_npc(const desk_state *state, const desk_world *world);
 
 bool desk_profile_load(desk_profile *profile);
 bool desk_profile_save(const desk_profile *profile);

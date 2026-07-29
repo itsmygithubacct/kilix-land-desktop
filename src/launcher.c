@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -129,7 +130,9 @@ static const char *resolve_kilix(char *path, size_t size)
             access(path, X_OK) == 0)
             return path;
     }
-    if (which("kilix", path, size)) return "kilix";
+    /* Return the verified absolute path: the command after "--" runs in the
+     * kitty process, whose PATH may differ from ours. */
+    if (which("kilix", path, size)) return path;
     return NULL;
 }
 
@@ -162,6 +165,37 @@ static bool resolve_file_manager(char *path, size_t size)
         if (which(candidates[index], path, size)) return true;
     }
     return false;
+}
+
+/* Children we have spawned but not yet reaped. Only these exact pids are
+ * ever waited on: the audio runtime may own children of its own, so a
+ * waitpid(-1) sweep would steal their exit statuses. */
+#define LAUNCH_PENDING_MAX 8
+static pid_t pending_children[LAUNCH_PENDING_MAX];
+
+static void reap_pending_children(void)
+{
+    size_t index;
+    for (index = 0u; index < LAUNCH_PENDING_MAX; ++index) {
+        pid_t pid = pending_children[index];
+        if (pid <= 0) continue;
+        if (waitpid(pid, NULL, WNOHANG) != 0)
+            pending_children[index] = 0;
+    }
+}
+
+static void track_pending_child(pid_t pid)
+{
+    size_t index;
+    for (index = 0u; index < LAUNCH_PENDING_MAX; ++index) {
+        if (pending_children[index] <= 0) {
+            pending_children[index] = pid;
+            return;
+        }
+    }
+    /* Full table: block briefly on the oldest slot rather than leak it. */
+    (void)waitpid(pending_children[0], NULL, 0);
+    pending_children[0] = pid;
 }
 
 /* Checked on every activation, never cached. */
@@ -221,8 +255,20 @@ static bool spawn_tab(const char *label, const char *cwd,
     result = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
     (void)posix_spawn_file_actions_destroy(&actions);
     if (result != 0) return false;
-    /* kitten exits as soon as the tab is placed; accept late reaping. */
-    (void)waitpid(pid, NULL, WNOHANG);
+    /* kitten normally exits within milliseconds of placing the tab. Give it
+     * a bounded window so remote-control refusals surface as failures
+     * instead of a false "Opened" toast; a slow child is tracked and reaped
+     * on a later service pass. */
+    for (index = 0u; index < 20u; ++index) {
+        int status = 0;
+        pid_t reaped = waitpid(pid, &status, WNOHANG);
+        if (reaped == pid)
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (reaped < 0) return true;
+        struct timespec delay = { 0, 10L * 1000L * 1000L };
+        (void)nanosleep(&delay, NULL);
+    }
+    track_pending_child(pid);
     return true;
 }
 
@@ -238,6 +284,7 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
     desk_target target;
 
     if (!launcher || !state) return false;
+    reap_pending_children();
     target = desk_take_launch_request(state);
     if (target == DESK_TARGET_NONE) return false;
     if (!desk_target_is_external(target)) return true;
@@ -275,12 +322,15 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state)
                                       resolved, sizeof resolved, command);
         break;
     case DESK_TARGET_GAMES: {
-        const char *assets = getenv("KILIX_LAND_DESKTOP_ASSETS");
+        /* Same convention as main.c's asset_root(): the env names the
+         * checkout root that CONTAINS assets/ and tools/. */
+        const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
         int written;
-        if (!assets || assets[0] == '\0') assets = "assets";
+        if (!root || root[0] == '\0') root = ".";
         written = snprintf(resolved, sizeof resolved,
-                           "%s/../tools/land_games.py", assets);
-        if (written > 0 && (size_t)written < sizeof resolved) {
+                           "%s/tools/land_games.py", root);
+        if (written > 0 && (size_t)written < sizeof resolved &&
+            access(resolved, R_OK) == 0) {
             command[command_count++] = "python3";
             command[command_count++] = resolved;
         }

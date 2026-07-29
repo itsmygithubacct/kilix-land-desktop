@@ -390,20 +390,23 @@ static void draw_npc_tags(ki_td_soft_renderer *renderer,
         if (entry->actor < DESK_ACTOR_ALLY_1 ||
             entry->actor > DESK_ACTOR_ALLY_3)
             continue;
+        float label_x;
         name = desk_actor_name(cast, entry->actor);
         accent = desk_actor_color(cast, entry->actor);
         label_width = 16.0f + (float)strlen(name) * 6.0f;
         if (label_width < 50.0f) label_width = 50.0f;
         if (label_width > 106.0f) label_width = 106.0f;
+        label_x = entry->x - label_width * 0.5f;
+        if (label_x < 2.0f) label_x = 2.0f;
+        if (label_x + label_width > (float)DESK_LOGICAL_WIDTH - 2.0f)
+            label_x = (float)DESK_LOGICAL_WIDTH - 2.0f - label_width;
         label_y = entry->y + 2.0f;
-        ki_td_soft_fill_rect(renderer, view,
-                             entry->x - label_width * 0.5f, label_y,
+        ki_td_soft_fill_rect(renderer, view, label_x, label_y,
                              label_width, 13.0f,
                              UINT32_C(0x070b13), 0.78f);
-        ki_td_soft_fill_rect(renderer, view,
-                             entry->x - label_width * 0.5f, label_y,
+        ki_td_soft_fill_rect(renderer, view, label_x, label_y,
                              2.0f, 13.0f, accent, 1.0f);
-        text_at(canvas, view, entry->x - label_width * 0.5f + 7.0f,
+        text_at(canvas, view, label_x + 7.0f,
                 label_y - 1.0f, name,
                 state->nearest_npc == npc ? accent : UINT32_C(0xf6e7cb));
     }
@@ -446,22 +449,33 @@ static void draw_room_scene(ki_td_soft_renderer *renderer,
     for (door = 0; door < clamp_int(room->door_count, 0,
                                     DESK_MAX_DOORS_PER_ROOM); ++door) {
         const desk_rect *rect = &room->doors[door].rect;
+        ki_td_soft_fill_rect(renderer, view, rect->x - 2.0f, rect->y - 2.0f,
+                             rect->w + 4.0f, rect->h + 4.0f,
+                             palette->door_edge, 0.9f);
         ki_td_soft_fill_rect(renderer, view, rect->x, rect->y,
                              rect->w, rect->h, palette->door, 1.0f);
-        ki_td_soft_fill_rect(renderer, view, rect->x, rect->y,
-                             rect->w, 1.0f, palette->door_edge, 0.9f);
+        ki_td_soft_fill_rect(renderer, view,
+                             rect->x + rect->w * 0.5f - 1.0f,
+                             rect->y + rect->h * 0.5f - 1.0f, 2.0f, 2.0f,
+                             palette->door_edge, 1.0f);
     }
     for (object = 0; object < clamp_int(room->object_count, 0,
                                         DESK_MAX_OBJECTS_PER_ROOM);
          ++object) {
         const desk_rect *rect = &room->objects[object].rect;
+        ki_td_soft_fill_rect(renderer, view, rect->x - 1.0f, rect->y - 1.0f,
+                             rect->w + 2.0f, rect->h + 2.0f,
+                             UINT32_C(0x05070d), 0.55f);
         ki_td_soft_fill_rect(renderer, view, rect->x, rect->y,
                              rect->w, rect->h, palette->object, 1.0f);
+        ki_td_soft_fill_rect(renderer, view, rect->x, rect->y, rect->w,
+                             rect->h * 0.4f, palette->object_highlight,
+                             0.35f);
         ki_td_soft_fill_rect(renderer, view, rect->x, rect->y,
                              rect->w, 1.0f, palette->object_highlight,
                              0.9f);
     }
-    small_text(canvas, view, 8.0f, 258.0f, room->name, COLOR_INK);
+    small_text(canvas, view, 8.0f, 36.0f, room->name, COLOR_INK);
 }
 
 static void base_style(kilix_ui_style *style, uint32_t accent)
@@ -487,12 +501,13 @@ static void draw_interact_prompt(ki_td_soft_renderer *renderer,
     float width;
     float bob;
     float left;
+    int talk_actor;
     if (state->mode != DESK_MODE_ROOM) return;
     prompt = desk_interact_prompt(state, world);
     if (!prompt || prompt[0] == '\0') return;
-    if (state->nearest_npc >= 0)
-        accent = desk_actor_color(visible_cast(state),
-                                  state->nearest_npc + DESK_ACTOR_ALLY_1);
+    talk_actor = desk_interact_npc(state, world);
+    if (talk_actor >= 0)
+        accent = desk_actor_color(visible_cast(state), talk_actor);
     (void)snprintf(message, sizeof message, "ENTER  %s", prompt);
     width = 26.0f + (float)strlen(message) * 8.0f;
     if (width < 170.0f) width = 170.0f;
@@ -513,7 +528,7 @@ static void draw_interact_prompt(ki_td_soft_renderer *renderer,
 static void draw_toast(ki_td_soft_renderer *renderer, const ki_td_view *view,
                        sr_canvas *canvas, const desk_state *state)
 {
-    if (state->toast_ticks <= 0 || state->mode != DESK_MODE_ROOM) return;
+    if (state->toast_ticks <= 0) return;
     ki_td_soft_fill_rect(renderer, view, 44.0f, 10.0f, 392.0f, 23.0f,
                          UINT32_C(0x070b14), 0.86f);
     ki_td_soft_fill_rect(renderer, view, 44.0f, 10.0f, 3.0f, 23.0f,
@@ -768,6 +783,40 @@ static void draw_confirm(ki_td_soft_renderer *renderer,
                 COLOR_MUTED, 1);
 }
 
+static void draw_status(ki_td_soft_renderer *renderer,
+                        const ki_td_view *view, sr_canvas *canvas,
+                        const desk_state *state)
+{
+    kilix_ui_style outer_style;
+    uint32_t accent = desk_actor_color(visible_cast(state),
+                                       DESK_ACTOR_HERO);
+    int count = clamp_int(state->status_line_count, 0,
+                          DESK_STATUS_LINE_COUNT);
+    int height = 52 + count * 14;
+    int top = (DESK_LOGICAL_HEIGHT - height) / 2;
+    int line;
+    ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
+                         (float)DESK_LOGICAL_WIDTH,
+                         (float)DESK_LOGICAL_HEIGHT,
+                         UINT32_C(0x02040a), 0.55f);
+    base_style(&outer_style, accent);
+    outer_style.border_color = COLOR_GOLD;
+    outer_style.padding = 8;
+    kilix_ui_draw_panel(renderer, view,
+                        (ki_td_rect){120, top, 240, height},
+                        &outer_style, NULL);
+    ki_td_soft_fill_rect(renderer, view, 123.0f, (float)top + 3.0f,
+                         234.0f, 3.0f, accent, 1.0f);
+    center_text(canvas, view, 240.0f, (float)top + 10.0f, "NOTICE BOARD",
+                COLOR_INK, text_scale(view));
+    for (line = 0; line < count; ++line)
+        small_text(canvas, view, 134.0f, (float)(top + 30 + line * 14),
+                   state->status_lines[line],
+                   line == 0 ? COLOR_GOLD : COLOR_INK);
+    center_text(canvas, view, 240.0f, (float)(top + height - 15),
+                "ENTER CLOSE", COLOR_MUTED, 1);
+}
+
 static void wizard_frame(ki_td_soft_renderer *renderer,
                          const ki_td_view *view, sr_canvas *canvas,
                          uint32_t accent, const char *title, int step,
@@ -827,24 +876,25 @@ static void draw_wizard_cast(ki_td_soft_renderer *renderer,
         uint32_t accent = desk_actor_color(cast, DESK_ACTOR_HERO);
         bool active = index == (int)cursor;
         int x = 40 + index * 101;
-        char line[28];
+        char line[16];
         ki_td_rgba8 portrait = {0};
         wizard_panel(renderer, view, x, accent, active);
         if (portrait_image(graphics, cast, DESK_ACTOR_HERO, &portrait))
             kilix_ui_draw_portrait(renderer, view,
                                    (ki_td_rect){x + 17, 82, 64, 64},
                                    &portrait, active ? 1.0f : 0.72f);
-        (void)snprintf(line, sizeof line, "%.22s", desk_cast_name(cast));
-        small_text(canvas, view, (float)x + 6.0f, 150.0f, line,
+        /* A 98px panel fits ~14 small glyphs; longer titles describe the
+         * active cast below the row instead of overflowing the grid. */
+        (void)snprintf(line, sizeof line, "%.14s", desk_cast_name(cast));
+        small_text(canvas, view, (float)x + 6.0f, 152.0f, line,
                    active ? accent : COLOR_INK);
-        (void)snprintf(line, sizeof line, "%.22s",
-                       desk_cast_subtitle(cast));
-        small_text(canvas, view, (float)x + 6.0f, 160.0f, line,
-                   COLOR_MUTED);
-        (void)snprintf(line, sizeof line, "%.22s",
-                       desk_cast_house_name(cast));
-        small_text(canvas, view, (float)x + 6.0f, 170.0f, line, COLOR_GOLD);
     }
+    center_text(canvas, view, 240.0f, 172.0f, desk_cast_name(cursor),
+                desk_actor_color(cursor, DESK_ACTOR_HERO), 1);
+    center_text(canvas, view, 240.0f, 184.0f, desk_cast_subtitle(cursor),
+                COLOR_MUTED, 1);
+    center_text(canvas, view, 240.0f, 196.0f,
+                desk_cast_house_name(cursor), COLOR_GOLD, 1);
 }
 
 static void draw_wizard_actor(ki_td_soft_renderer *renderer,
@@ -969,7 +1019,7 @@ static void draw_wizard_outfit(ki_td_soft_renderer *renderer,
     if (cell_ok)
         draw_foot_anchored(renderer, view, &cell, 350.0f, 218.0f,
                            preview_size, preview_size, 1.0f);
-    small_text(canvas, view, 314.0f, 224.0f, "OUTFIT PREVIEW",
+    small_text(canvas, view, 308.0f, 64.0f, "OUTFIT PREVIEW",
                COLOR_MUTED);
 }
 
@@ -1092,6 +1142,8 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
     canvas = ki_td_soft_canvas(renderer);
     if (state->mode == DESK_MODE_WIZARD) {
         draw_wizard(renderer, &view, canvas, state, graphics);
+        /* Wizard feedback (ally gate, empty-name nudge) arrives as toasts. */
+        draw_toast(renderer, &view, canvas, state);
         return ki_td_soft_pack_rgba(renderer) != NULL;
     }
     {
@@ -1111,5 +1163,7 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
         draw_pause(renderer, &view, canvas, state);
     else if (state->mode == DESK_MODE_CONFIRM)
         draw_confirm(renderer, &view, canvas, state);
+    else if (state->mode == DESK_MODE_STATUS)
+        draw_status(renderer, &view, canvas, state);
     return ki_td_soft_pack_rgba(renderer) != NULL;
 }

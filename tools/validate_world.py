@@ -65,10 +65,37 @@ def point_in_rect(x, y, rect):
             and rect["y"] <= y <= rect["y"] + rect["h"])
 
 
+def check_c_parser_subset(text):
+    """Reject JSON constructs src/rooms.c's parser does not accept, so a file
+    that passes this validator can never be refused by the binary."""
+    in_string = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == "\\":
+                if i + 1 >= len(text) or text[i + 1] not in '"\\/nt':
+                    fail(f"offset {i}: escape \\{text[i + 1:i + 2]} is not "
+                         "supported by the C parser")
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "eE" and i > 0 and (text[i - 1].isdigit()
+                                       or text[i - 1] == "."):
+            fail(f"offset {i}: exponent notation is not supported by "
+                 "the C parser")
+        i += 1
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "assets/world/world.json"
     with open(path, encoding="utf-8") as handle:
-        world = json.load(handle)
+        text = handle.read()
+    check_c_parser_subset(text)
+    world = json.loads(text)
 
     if world.get("world") != 1:
         fail("unsupported schema version (want world: 1)")
@@ -127,6 +154,12 @@ def main():
                 if point_in_rect(sx, sy, rect):
                     fail(f"{rid}.doors[{i}]: spawn inside "
                          f"'{to}' obstacle [{j}]")
+            # Door triggers fire on position alone: a spawn inside any of the
+            # destination's door rects would teleport an idle player.
+            for j, dest_door in enumerate(dest.get("doors", [])):
+                if point_in_rect(sx, sy, dest_door.get("rect", {})):
+                    fail(f"{rid}.doors[{i}]: spawn inside "
+                         f"'{to}' door [{j}]")
             reachable.add(to)
 
         objects = room.get("objects", [])

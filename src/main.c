@@ -11,11 +11,18 @@
 
 /* Text is captured per frame so wizard NAME entry never drops keystrokes
  * when a frame runs multiple simulation steps. */
+#include <limits.h>
+
 #define DESK_TEXT_QUEUE_CAPACITY 8
 
 typedef struct desk_key_input {
     int move_x;
     int move_y;
+    /* Edge-triggered menu deltas: set on key PRESS only and cleared by
+     * consume_edge_input, so cursors step once per keystroke while held
+     * movement stays level-triggered for the room (land's menu_delta). */
+    int menu_x;
+    int menu_y;
     bool enter_pressed;
     bool space_pressed;
     bool cancel_pressed;
@@ -95,17 +102,26 @@ static bool poll_input(desk_key_input *input, bool *quit_requested)
 
     while (kittyts_next_key_event(&terminal_session, &event)) {
         uint32_t movement_key = normalize_movement_key(event.key);
+        bool pressed = event.action == KITTYKB_ACTION_PRESS;
         if (movement_key != KITTYKB_KEY_NONE &&
             event.action != KITTYKB_ACTION_RELEASE)
             last_movement_key = movement_key;
-        if (event.action != KITTYKB_ACTION_PRESS) continue;
+        if (pressed && movement_key != KITTYKB_KEY_NONE) {
+            if (movement_key == KITTYKB_KEY_UP) input->menu_y = -1;
+            else if (movement_key == KITTYKB_KEY_DOWN) input->menu_y = 1;
+            else if (movement_key == KITTYKB_KEY_LEFT) input->menu_x = -1;
+            else input->menu_x = 1;
+        }
+        /* Auto-repeat reaches only the text field; every other edge stays
+         * press-only for land parity. */
+        if (!pressed && event.action != KITTYKB_ACTION_REPEAT) continue;
         if (event_letter(&event, 'c') &&
             (event.modifiers & KITTYKB_MOD_CTRL) != 0u) {
-            *quit_requested = true;
+            if (pressed) *quit_requested = true;
         } else if (event.key == KITTYKB_KEY_ESCAPE) {
-            input->cancel_pressed = true;
+            if (pressed) input->cancel_pressed = true;
         } else if (event.key == KITTYKB_KEY_ENTER) {
-            input->enter_pressed = true;
+            if (pressed) input->enter_pressed = true;
         } else if (event.key == KITTYKB_KEY_BACKSPACE) {
             input->backspace_count++;
         } else if ((event.modifiers &
@@ -114,7 +130,8 @@ static bool poll_input(desk_key_input *input, bool *quit_requested)
             uint32_t codepoint = event.text_length > 0u ?
                 event.text[0] :
                 (event.shifted_key != 0u ? event.shifted_key : event.key);
-            if (codepoint == (uint32_t)' ') input->space_pressed = true;
+            if (codepoint == (uint32_t)' ' && pressed)
+                input->space_pressed = true;
             if (codepoint >= 32u && codepoint <= 126u &&
                 input->text_count < DESK_TEXT_QUEUE_CAPACITY)
                 input->text[input->text_count++] = codepoint;
@@ -142,6 +159,8 @@ static void merge_pending_input(desk_key_input *pending,
     int index;
     pending->move_x = current->move_x;
     pending->move_y = current->move_y;
+    if (current->menu_x != 0) pending->menu_x = current->menu_x;
+    if (current->menu_y != 0) pending->menu_y = current->menu_y;
     pending->enter_pressed = pending->enter_pressed ||
                              current->enter_pressed;
     pending->space_pressed = pending->space_pressed ||
@@ -157,6 +176,8 @@ static void merge_pending_input(desk_key_input *pending,
 
 static void consume_edge_input(desk_key_input *input)
 {
+    input->menu_x = 0;
+    input->menu_y = 0;
     input->enter_pressed = false;
     input->space_pressed = false;
     input->cancel_pressed = false;
@@ -253,6 +274,9 @@ static bool sync_graphics(desk_graphics *graphics, const desk_world *world,
         if (!desk_graphics_load_plates(graphics, asset_root(), world, style))
             return false;
         *loaded_style = (int)style;
+        /* A style change always invalidates the recolored cells, even when
+         * the mode transition that caused it did not mark them dirty. */
+        state->outfit_dirty = true;
     }
     if (state->outfit_dirty) {
         if (!desk_graphics_set_outfit(graphics, style,
@@ -678,14 +702,18 @@ typedef struct render_fixture {
 static bool fixture_open(render_fixture *fixture, const char *directory)
 {
     char error[DESK_ERROR_CAPACITY];
+    char resolved[PATH_MAX];
     (void)memset(fixture, 0, sizeof *fixture);
     fixture->loaded_style = -1;
     if (!directory || !ensure_directory(directory)) return false;
     /* Keep the fixture deterministic and self-contained: the profile store
-     * points into DIR, where no record exists, so desk_init always opens the
-     * first-run wizard and nothing is written outside DIR. */
-    if (setenv("KILIX_LAND_DESKTOP_CONFIG_HOME", directory, 1) != 0)
+     * points into DIR (as an absolute path, which the store requires) and
+     * any record a previous run left there is removed, so desk_init always
+     * opens the first-run wizard and nothing is written outside DIR. */
+    if (!realpath(directory, resolved) ||
+        setenv("KILIX_LAND_DESKTOP_CONFIG_HOME", resolved, 1) != 0)
         return false;
+    if (!desk_profile_reset()) return false;
     if (!load_world(&fixture->world, error, sizeof error)) {
         (void)fprintf(stderr, "FAIL render world: %s\n", error);
         return false;
@@ -1029,8 +1057,13 @@ static int run_interactive(void)
             else if (pending_input.enter_pressed ||
                      (!name_entry && pending_input.space_pressed))
                 (void)desk_interact(&state, &world);
-            desk_update(&state, &world, pending_input.move_x,
-                        pending_input.move_y, DESK_TICK_SECONDS);
+            /* The room walks on held keys; menus step on key presses. */
+            if (state.mode == DESK_MODE_ROOM)
+                desk_update(&state, &world, pending_input.move_x,
+                            pending_input.move_y, DESK_TICK_SECONDS);
+            else
+                desk_update(&state, &world, pending_input.menu_x,
+                            pending_input.menu_y, DESK_TICK_SECONDS);
             {
                 desk_audio_event events[4];
                 int event_count = desk_take_audio_events(&state, events);
@@ -1045,8 +1078,19 @@ static int run_interactive(void)
                 break;
             }
             (void)desk_launcher_service(&launcher, &state);
-            if (state.profile_dirty && desk_profile_save(&state.profile))
-                state.profile_dirty = false;
+            {
+                /* A persistently failing save (unwritable config dir, full
+                 * disk) must not retry at 60 Hz. */
+                static int save_retry_ticks;
+                if (save_retry_ticks > 0) {
+                    save_retry_ticks--;
+                } else if (state.profile_dirty) {
+                    if (desk_profile_save(&state.profile))
+                        state.profile_dirty = false;
+                    else
+                        save_retry_ticks = 5 * DESK_SIMULATION_HZ;
+                }
+            }
             desk_audio_update(&audio, DESK_TICK_SECONDS);
             consume_edge_input(&pending_input);
             if (state.quit_requested) {
@@ -1083,8 +1127,18 @@ static int run_interactive(void)
     }
 
 done:
-    if (!failed && state.mode == DESK_MODE_ROOM)
+    if (!failed && state.mode == DESK_MODE_ROOM) {
+        /* Ordinary walking never syncs the profile position; refresh it so
+         * an abrupt exit resumes where the player actually stood. */
+        if (state.room >= 0 && state.room < world.room_count) {
+            (void)snprintf(state.profile.last_room,
+                           sizeof state.profile.last_room, "%s",
+                           world.rooms[state.room].id);
+            state.profile.last_x = state.player_x;
+            state.profile.last_y = state.player_y;
+        }
         (void)desk_profile_save(&state.profile);
+    }
     ki_td_soft_renderer_destroy(&renderer);
     kittyts_stop(&terminal_session);
     kilix_game_signals_restore(&signals);
@@ -1093,13 +1147,90 @@ done:
     return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
+static int style_index(const char *name)
+{
+    static const char *const ids[DESK_CAST_COUNT] = {
+        "legend", "chumrunner", "fantasy", "pleb-bound"
+    };
+    int index;
+    for (index = 0; index < DESK_CAST_COUNT; ++index)
+        if (strcmp(ids[index], name) == 0) return index;
+    return -1;
+}
+
+/* Review workflow (IMPLEMENTATION.md section 13): render one frame of an
+ * arbitrary room in an arbitrary style to PATH as a P6 PPM. */
+static int screenshot(const char *path, const char *room_id,
+                      const char *style_name)
+{
+    char config_dir[1024];
+    render_fixture fixture;
+    desk_state state;
+    int style = style_name ? style_index(style_name) : 0;
+    int room = -1;
+    int step;
+    bool success;
+    if (style < 0) {
+        (void)fprintf(stderr, "FAIL screenshot unknown style '%s'\n",
+                      style_name);
+        return EXIT_FAILURE;
+    }
+    if (!make_temp_config(config_dir, sizeof config_dir)) {
+        (void)fprintf(stderr, "FAIL screenshot temp config\n");
+        return EXIT_FAILURE;
+    }
+    success = fixture_open(&fixture, config_dir);
+    if (success) {
+        desk_init(&state, &fixture.world);
+        for (step = 0; step < style; ++step)
+            desk_update(&state, &fixture.world, 0, 1, DESK_TICK_SECONDS);
+        success = state.mode == DESK_MODE_WIZARD &&
+                  state.wizard_cast_cursor == style &&
+                  complete_wizard(&state, &fixture.world);
+    }
+    if (success && room_id) {
+        room = desk_world_room_index(&fixture.world, room_id);
+        if (room < 0) {
+            (void)fprintf(stderr, "FAIL screenshot unknown room '%s'\n",
+                          room_id);
+            success = false;
+        }
+        if (success) state.room = room;
+    }
+    if (success) {
+        const desk_room *scene = &fixture.world.rooms[state.room];
+        state.player_x = scene->walk.x + scene->walk.w * 0.5f;
+        state.player_y = scene->walk.y + scene->walk.h * 0.5f;
+        state.facing = DESK_FACING_DOWN;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
+        state.toast_ticks = 0;
+        success = sync_graphics(&fixture.graphics, &fixture.world, &state,
+                                &fixture.loaded_style) &&
+                  desk_render(&fixture.renderer, &state, &fixture.world,
+                              &fixture.graphics) &&
+                  sr_write_ppm(ki_td_soft_canvas(&fixture.renderer), path);
+        if (success)
+            (void)printf("PASS screenshot room=%s style=%s file=%s\n",
+                         fixture.world.rooms[state.room].id,
+                         style_name ? style_name : "legend", path);
+    }
+    fixture_close(&fixture);
+    if (!remove_tree(config_dir) && success) {
+        (void)fprintf(stderr, "FAIL screenshot temp cleanup\n");
+        success = false;
+    }
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 static void usage(const char *program)
 {
     (void)fprintf(stderr,
         "usage: %s [--selftest | --audio-test | --graphics-test | "
         "--world-test | --profile-test | --wizard-render-test DIR | "
         "--room-render-test DIR | --outfit-render-test DIR | "
-        "--walk-render-test DIR | --version]\n",
+        "--walk-render-test DIR | "
+        "--screenshot PATH [--room ID] [--style STYLE] | --version]\n",
         program);
 }
 
@@ -1123,6 +1254,21 @@ int main(int argc, char **argv)
         return outfit_render_test(argv[2]);
     if (argc == 3 && strcmp(argv[1], "--walk-render-test") == 0)
         return walk_render_test(argv[2]);
+    if (argc >= 3 && strcmp(argv[1], "--screenshot") == 0) {
+        const char *room = NULL;
+        const char *style = NULL;
+        int argument = 3;
+        while (argument + 1 < argc) {
+            if (strcmp(argv[argument], "--room") == 0)
+                room = argv[argument + 1];
+            else if (strcmp(argv[argument], "--style") == 0)
+                style = argv[argument + 1];
+            else
+                break;
+            argument += 2;
+        }
+        if (argument == argc) return screenshot(argv[2], room, style);
+    }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         (void)printf("kilix-land-desktop 0.1.0\n");
         return EXIT_SUCCESS;

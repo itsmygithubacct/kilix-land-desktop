@@ -613,6 +613,9 @@ static void rotate_painted_pixels(uint8_t *pixels, size_t pixel_count,
         if (pixel[3] < UINT8_C(8)) continue;
         hsv = rgb_to_hsv(pixel[0], pixel[1], pixel[2]);
         if (hsv.saturation <= DESK_MIN_GARMENT_SATURATION) continue;
+        /* Faces and hair share the warm hue band with several garments;
+         * only saturated non-skin pixels belong to the outfit. */
+        if (near_skin_tone(hsv)) continue;
         offset = hue_offset(hsv.hue, garment_hue);
         if (offset < -DESK_GARMENT_HUE_WINDOW ||
             offset > DESK_GARMENT_HUE_WINDOW)
@@ -893,9 +896,12 @@ bool desk_graphics_load_plates(desk_graphics *graphics, const char *asset_root,
         if (kilix_asset_image_load_png(&image, path, &limits) !=
             KILIX_ASSET_OK)
             continue;
+        /* The plate contract is exactly 1280x720 (IMPLEMENTATION.md section
+         * 9): a wrong-size cook is a pipeline mistake, and rendering it
+         * scaled would hide that. Fall back procedurally instead. */
         if (!kilix_asset_image_is_valid(&image) ||
-            image.width > (uint32_t)INT_MAX ||
-            image.height > (uint32_t)INT_MAX) {
+            image.width != (uint32_t)DESK_PLATE_WIDTH ||
+            image.height != (uint32_t)DESK_PLATE_HEIGHT) {
             kilix_asset_image_clear(&image);
             continue;
         }
@@ -999,7 +1005,7 @@ bool desk_graphics_set_outfit(desk_graphics *graphics, desk_cast cast,
                 }
             }
         } else if (measure_garment_hue(&graphics->outfit_cells[0],
-                                       DESK_MIN_GARMENT_SATURATION, false,
+                                       DESK_MIN_GARMENT_SATURATION, true,
                                        &garment_hue)) {
             hsv_color swatch_hsv = rgb_to_hsv((uint8_t)(swatch >> 16),
                                               (uint8_t)(swatch >> 8),
@@ -1014,8 +1020,15 @@ bool desk_graphics_set_outfit(desk_graphics *graphics, desk_cast cast,
     graphics->outfit_index = outfit;
     graphics->outfit_columns = columns;
     graphics->outfit_rows = rows;
+    /* outfit_ready must be set before the rebuild so hero_cell serves the
+     * recolored cells to it, but a failed rebuild would leave motion cells
+     * mixing old and new outfits — withdraw the flag in that case. */
     graphics->outfit_ready = true;
-    return rebuild_motion_cells(graphics);
+    if (!rebuild_motion_cells(graphics)) {
+        graphics->outfit_ready = false;
+        return false;
+    }
+    return true;
 }
 
 bool desk_graphics_hero_cell(const desk_graphics *graphics, desk_cast cast,

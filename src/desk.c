@@ -522,20 +522,25 @@ static void commit_wizard(desk_state *state, const desk_world *world)
     state->profile.schema = DESK_PROFILE_SCHEMA;
     state->profile.cast = (desk_cast)state->wizard_cast_cursor;
     state->profile.actor = (desk_actor)state->wizard_actor_cursor;
+    state->profile.style = (uint32_t)state->wizard_cast_cursor;
     state->profile.outfit = (uint32_t)state->wizard_outfit_cursor;
     (void)snprintf(state->profile.name, sizeof state->profile.name, "%s",
                    state->wizard_name);
     state->profile.first_run_done = true;
-    if (world && world->room_count > 0 && world->start_room >= 0 &&
-        world->start_room < world->room_count &&
+    /* A rename or recolor keeps the player where they stand; only a new
+     * character (first run or cast change) moves into the new house. */
+    if (cast_changed && world && world->room_count > 0 &&
+        world->start_room >= 0 && world->start_room < world->room_count &&
         world->room_count <= DESK_MAX_ROOMS) {
         state->room = world->start_room;
         room = &world->rooms[world->start_room];
         state->player_x = room->walk.x + room->walk.w * 0.5f;
         state->player_y = room->walk.y + room->walk.h * 0.5f;
-        (void)snprintf(state->profile.last_room,
-                       sizeof state->profile.last_room, "%s", room->id);
     }
+    if (world && state->room >= 0 && state->room < world->room_count)
+        (void)snprintf(state->profile.last_room,
+                       sizeof state->profile.last_room, "%s",
+                       world->rooms[state->room].id);
     state->profile.last_x = state->player_x;
     state->profile.last_y = state->player_y;
     state->profile_dirty = true;
@@ -549,6 +554,7 @@ static void commit_wizard(desk_state *state, const desk_world *world)
     state->dialogue_beat = 0;
     state->dialogue_age = 0;
     if (cast_changed) state->talked_mask = 0u;
+    state->profile.talked_mask = state->talked_mask;
     set_toast(state, desk_cast_house_name(state->profile.cast));
     queue_audio(state, DESK_AUDIO_UI_CONFIRM);
     update_nearest(state, world);
@@ -575,6 +581,7 @@ void desk_init(desk_state *state, const desk_world *world)
         state->player_y = room->walk.y + room->walk.h * 0.5f;
     }
     if (desk_profile_load(&state->profile) && state->profile.first_run_done) {
+        state->talked_mask = state->profile.talked_mask;
         room_index = world ?
             desk_world_room_index(world, state->profile.last_room) : -1;
         if (room_index < 0 || !world || room_index >= world->room_count) {
@@ -703,6 +710,54 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
     update_nearest(state, world);
 }
 
+/* One trimmed line from a /proc-style fact file; no subprocesses. */
+static bool read_fact_line(const char *path, char *line, size_t size)
+{
+    FILE *handle = fopen(path, "r");
+    size_t length;
+    if (!handle) return false;
+    if (!fgets(line, (int)size, handle)) {
+        (void)fclose(handle);
+        return false;
+    }
+    (void)fclose(handle);
+    length = strcspn(line, "\n");
+    line[length] = '\0';
+    return line[0] != '\0';
+}
+
+static void open_status_board(desk_state *state, const desk_world *world)
+{
+    char value[DESK_STATUS_LINE_CAPACITY];
+    double uptime = 0.0;
+    int count = 0;
+    (void)snprintf(state->status_lines[count++], DESK_STATUS_LINE_CAPACITY,
+                   "%s of %s", state->profile.name,
+                   desk_cast_house_name(state->profile.cast));
+    (void)snprintf(state->status_lines[count++], DESK_STATUS_LINE_CAPACITY,
+                   "kilix-land-desktop 0.1.0 // %d rooms",
+                   world->room_count);
+    if (read_fact_line("/proc/sys/kernel/hostname", value, sizeof value))
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY, "host %.56s", value);
+    if (read_fact_line("/proc/uptime", value, sizeof value) &&
+        sscanf(value, "%lf", &uptime) == 1 && uptime >= 0.0) {
+        long minutes = (long)(uptime / 60.0);
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY, "up %ldd %ldh %ldm",
+                       minutes / (24L * 60L), (minutes / 60L) % 24L,
+                       minutes % 60L);
+    }
+    if (read_fact_line("/proc/loadavg", value, sizeof value)) {
+        value[strcspn(value, " ")] = '\0';
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY, "load %.56s", value);
+    }
+    state->status_line_count = count;
+    state->mode = DESK_MODE_STATUS;
+    state->player_moving = false;
+}
+
 static bool interact_room(desk_state *state, const desk_world *world,
                           const desk_room *room)
 {
@@ -735,14 +790,10 @@ static bool interact_room(desk_state *state, const desk_world *world,
         state->player_moving = false;
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return true;
-    case DESK_TARGET_STATUS_BOARD: {
-        char message[DESK_TOAST_CAPACITY];
-        (void)snprintf(message, sizeof message, "%s // %d rooms // tick %llu",
-                       state->profile.name, world->room_count,
-                       (unsigned long long)state->simulation_tick);
-        set_toast(state, message);
+    case DESK_TARGET_STATUS_BOARD:
+        open_status_board(state, world);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return true;
-    }
     case DESK_TARGET_GATE_LOCKED:
         set_toast(state, "The street is quiet today.");
         return true;
@@ -781,6 +832,8 @@ static bool interact_dialogue(desk_state *state)
         uint32_t bit = UINT32_C(1) <<
                        (unsigned int)state->conversation_npc;
         state->talked_mask |= bit;
+        state->profile.talked_mask = state->talked_mask;
+        state->profile_dirty = true;
         state->mode = DESK_MODE_ROOM;
         state->conversation_npc = -1;
         state->dialogue_beat = 0;
@@ -901,6 +954,11 @@ bool desk_interact(desk_state *state, const desk_world *world)
         return interact_pause(state, world);
     case DESK_MODE_CONFIRM:
         return interact_confirm(state, world);
+    case DESK_MODE_STATUS:
+        state->mode = DESK_MODE_ROOM;
+        update_nearest(state, world);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
     }
     return false;
 }
@@ -926,6 +984,7 @@ void desk_cancel(desk_state *state, const desk_world *world)
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         return;
     case DESK_MODE_PAUSE:
+    case DESK_MODE_STATUS:
         state->mode = DESK_MODE_ROOM;
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         update_nearest(state, world);
@@ -946,6 +1005,9 @@ void desk_cancel(desk_state *state, const desk_world *world)
         case DESK_WIZARD_CAST:
             if (state->wizard_editing_existing) {
                 state->mode = DESK_MODE_ROOM;
+                /* Cursor browsing recolored the live graphics; force a
+                 * re-apply from the untouched profile. */
+                state->outfit_dirty = true;
                 queue_audio(state, DESK_AUDIO_UI_MOVE);
                 update_nearest(state, world);
             }
@@ -1041,8 +1103,23 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         state->player_y > room->walk.y + room->walk.h)
         return validate_fail(error, error_size, "player outside walk rect");
     if ((int)state->mode < (int)DESK_MODE_WIZARD ||
-        (int)state->mode > (int)DESK_MODE_CONFIRM)
+        (int)state->mode > (int)DESK_MODE_STATUS)
         return validate_fail(error, error_size, "mode out of range");
+    if (state->status_line_count < 0 ||
+        state->status_line_count > DESK_STATUS_LINE_COUNT)
+        return validate_fail(error, error_size,
+                             "status line count out of range");
+    if (state->mode == DESK_MODE_STATUS) {
+        int line;
+        if (state->status_line_count == 0)
+            return validate_fail(error, error_size,
+                                 "status mode without status lines");
+        for (line = 0; line < state->status_line_count; ++line)
+            if (!memchr(state->status_lines[line], '\0',
+                        DESK_STATUS_LINE_CAPACITY))
+                return validate_fail(error, error_size,
+                                     "status line not NUL-terminated");
+    }
     if ((int)state->wizard_step < (int)DESK_WIZARD_CAST ||
         (int)state->wizard_step > (int)DESK_WIZARD_CONFIRM)
         return validate_fail(error, error_size, "wizard step out of range");
@@ -1187,6 +1264,17 @@ size_t desk_dialogue_visible_chars(const desk_state *state)
     return visible < length ? visible : length;
 }
 
+/* Actor id behind the current talk prompt, or -1 when the prompt (if any)
+ * targets an object — the render accent must match this exact decision. */
+int desk_interact_npc(const desk_state *state, const desk_world *world)
+{
+    const desk_room *room;
+    if (!state || !world || state->mode != DESK_MODE_ROOM) return -1;
+    room = current_room(state, world);
+    if (!room || !npc_selected(state, room)) return -1;
+    return room->npcs[state->nearest_npc].actor;
+}
+
 const char *desk_interact_prompt(const desk_state *state,
                                  const desk_world *world)
 {
@@ -1208,7 +1296,8 @@ const char *desk_interact_prompt(const desk_state *state,
 }
 
 _Static_assert(DESK_PROFILE_PAYLOAD_SIZE >=
-                   4u + 1u + 1u + 4u + (unsigned int)DESK_NAME_CAPACITY +
+                   4u + 1u + 1u + 1u + 4u + 4u +
+                   (unsigned int)DESK_NAME_CAPACITY +
                    (unsigned int)DESK_ID_CAPACITY + 4u + 4u + 1u,
                "profile payload too small for the v1 record");
 
@@ -1227,6 +1316,18 @@ static bool profile_store_open(kilixstate_store *store)
     options.max_payload = DESK_PROFILE_MAX_PAYLOAD;
     override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
     if (override_dir && override_dir[0] != '\0') {
+        /* kilixstate rejects relative absolute_paths anyway; surface the
+         * misconfiguration once instead of silently losing persistence. */
+        if (override_dir[0] != '/') {
+            static bool warned = false;
+            if (!warned) {
+                (void)fprintf(stderr, "kilix-land-desktop: "
+                              "KILIX_LAND_DESKTOP_CONFIG_HOME must be an "
+                              "absolute path; profile persistence is off\n");
+                warned = true;
+            }
+            return false;
+        }
         written = snprintf(absolute, sizeof absolute, "%s/%s", override_dir,
                            DESK_PROFILE_FILENAME);
         if (written < 0 || (size_t)written >= sizeof absolute) return false;
@@ -1246,7 +1347,9 @@ static bool profile_decode_v1(kilixstate_reader *reader, void *context)
     desk_profile *profile = context;
     uint8_t cast = 0u;
     uint8_t actor = 0u;
+    uint8_t style = 0u;
     uint32_t outfit = 0u;
+    uint32_t talked_mask = 0u;
     uint32_t x_bits = 0u;
     uint32_t y_bits = 0u;
     char name[DESK_NAME_CAPACITY];
@@ -1256,7 +1359,9 @@ static bool profile_decode_v1(kilixstate_reader *reader, void *context)
     float last_y;
     if (!profile || !kilixstate_read_u8(reader, &cast) ||
         !kilixstate_read_u8(reader, &actor) ||
+        !kilixstate_read_u8(reader, &style) ||
         !kilixstate_read_u32(reader, &outfit) ||
+        !kilixstate_read_u32(reader, &talked_mask) ||
         !kilixstate_read_bytes(reader, name, sizeof name) ||
         !kilixstate_read_bytes(reader, last_room, sizeof last_room) ||
         !kilixstate_read_u32(reader, &x_bits) ||
@@ -1264,6 +1369,7 @@ static bool profile_decode_v1(kilixstate_reader *reader, void *context)
         !kilixstate_read_bool(reader, &first_run_done))
         return false;
     if (cast >= DESK_CAST_COUNT || actor >= DESK_ACTOR_COUNT ||
+        style >= DESK_CAST_COUNT ||
         outfit >= (uint32_t)DESK_OUTFIT_COUNT ||
         !memchr(name, '\0', sizeof name) ||
         !memchr(last_room, '\0', sizeof last_room))
@@ -1274,7 +1380,9 @@ static bool profile_decode_v1(kilixstate_reader *reader, void *context)
     profile->schema = DESK_PROFILE_SCHEMA;
     profile->cast = (desk_cast)cast;
     profile->actor = (desk_actor)actor;
+    profile->style = style;
     profile->outfit = outfit;
+    profile->talked_mask = talked_mask;
     (void)memcpy(profile->name, name, sizeof profile->name);
     (void)memcpy(profile->last_room, last_room, sizeof profile->last_room);
     profile->last_x = last_x;
@@ -1323,6 +1431,7 @@ bool desk_profile_save(const desk_profile *profile)
     if (!profile || !cast_valid(profile->cast) ||
         (int)profile->actor < 0 ||
         (int)profile->actor >= DESK_ACTOR_COUNT ||
+        profile->style >= (uint32_t)DESK_CAST_COUNT ||
         profile->outfit >= (uint32_t)DESK_OUTFIT_COUNT ||
         !memchr(profile->name, '\0', sizeof profile->name) ||
         !memchr(profile->last_room, '\0', sizeof profile->last_room) ||
@@ -1338,7 +1447,9 @@ bool desk_profile_save(const desk_profile *profile)
     ok = kilixstate_write_u32(&writer, (uint32_t)DESK_PROFILE_SCHEMA) &&
          kilixstate_write_u8(&writer, (uint8_t)profile->cast) &&
          kilixstate_write_u8(&writer, (uint8_t)profile->actor) &&
+         kilixstate_write_u8(&writer, (uint8_t)profile->style) &&
          kilixstate_write_u32(&writer, profile->outfit) &&
+         kilixstate_write_u32(&writer, profile->talked_mask) &&
          kilixstate_write_bytes(&writer, name, sizeof name) &&
          kilixstate_write_bytes(&writer, last_room, sizeof last_room) &&
          kilixstate_write_u32(&writer, x_bits) &&
