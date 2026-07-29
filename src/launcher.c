@@ -40,7 +40,8 @@ static const target_entry target_table[DESK_TARGET_COUNT] = {
     [DESK_TARGET_WARDROBE] = { "wardrobe", "Wardrobe" },
     [DESK_TARGET_BED] = { "bed", "Bed" },
     [DESK_TARGET_STATUS_BOARD] = { "status-board", "Status board" },
-    [DESK_TARGET_GATE_LOCKED] = { "gate-locked", "Locked gate" }
+    [DESK_TARGET_GATE_LOCKED] = { "gate-locked", "Locked gate" },
+    [DESK_TARGET_WALK_EDITOR] = { "walk-editor", "Walk editor" }
 };
 
 desk_target desk_target_from_string(const char *name)
@@ -68,7 +69,9 @@ const char *desk_target_label(desk_target target)
 
 bool desk_target_is_external(desk_target target)
 {
-    return target >= DESK_TARGET_TERMINAL && target <= DESK_TARGET_MAINTENANCE;
+    return (target >= DESK_TARGET_TERMINAL &&
+            target <= DESK_TARGET_MAINTENANCE) ||
+           target == DESK_TARGET_WALK_EDITOR;
 }
 
 void desk_launcher_init(desk_launcher *launcher)
@@ -503,6 +506,25 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
             access(resolved, R_OK) == 0) {
             command[command_count++] = "python3";
             command[command_count++] = resolved;
+        }
+        break;
+    }
+    case DESK_TARGET_WALK_EDITOR: {
+        static const char *const style_directories[DESK_CAST_COUNT] = {
+            "legend", "chumrunner", "fantasy", "pleb-bound"
+        };
+        const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
+        int written;
+        if (!root || root[0] == '\0') root = ".";
+        written = snprintf(resolved, sizeof resolved,
+                           "%s/tools/walk_editor.py", root);
+        if (written > 0 && (size_t)written < sizeof resolved &&
+            access(resolved, R_OK) == 0) {
+            command[command_count++] = "python3";
+            command[command_count++] = resolved;
+            command[command_count++] = "--style";
+            command[command_count++] =
+                style_directories[state->profile.cast];
         }
         break;
     }

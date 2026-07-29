@@ -60,6 +60,7 @@ test: parity-check $(BIN)
 	$(PYTHON) tools/validate_world.py assets/world/world.json
 	$(PYTHON) tools/validate_visual.py
 	$(PYTHON) tools/land_config.py --check
+	$(PYTHON) tools/walk_editor.py --selftest
 	./$(BIN) --selftest
 	./$(BIN) --audio-test
 	./$(BIN) --graphics-test

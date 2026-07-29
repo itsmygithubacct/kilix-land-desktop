@@ -715,12 +715,20 @@ static void draw_dialogue(ki_td_soft_renderer *renderer,
 static void draw_pause(ki_td_soft_renderer *renderer, const ki_td_view *view,
                        sr_canvas *canvas, const desk_state *state)
 {
-    static const char *const items[3] = {"RESUME", "CHARACTER", "QUIT"};
+    const char *items[4];
     kilix_ui_style outer_style;
     kilix_ui_style list_style;
     kilix_ui_focus focus;
     uint32_t accent = desk_actor_color(visible_cast(state),
                                        DESK_ACTOR_HERO);
+    int count = desk_pause_item_count(state);
+    int index;
+    int panel_height;
+    if (count < 1) count = 1;
+    if (count > 4) count = 4;
+    for (index = 0; index < count; ++index)
+        items[index] = desk_pause_item(state, index);
+    panel_height = 48 + count * 20;
     ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
                          (float)DESK_LOGICAL_WIDTH,
                          (float)DESK_LOGICAL_HEIGHT,
@@ -732,17 +740,23 @@ static void draw_pause(ki_td_soft_renderer *renderer, const ki_td_view *view,
     list_style.border_color = COLOR_PANEL_LIGHT;
     list_style.row_height = 20;
     list_style.padding = 5;
-    kilix_ui_focus_init(&focus, 3u, 3u);
-    focus.selected = clamp_cursor(state->pause_cursor, 3u);
-    kilix_ui_draw_panel(renderer, view, (ki_td_rect){172, 84, 136, 108},
+    kilix_ui_focus_init(&focus, (uint32_t)count, (uint32_t)count);
+    focus.selected = clamp_cursor(state->pause_cursor, (uint32_t)count);
+    kilix_ui_draw_panel(renderer, view,
+                        (ki_td_rect){172, 84, 136, panel_height},
                         &outer_style, NULL);
     ki_td_soft_fill_rect(renderer, view, 175.0f, 87.0f, 130.0f, 3.0f,
                          accent, 1.0f);
-    center_text(canvas, view, 240.0f, 94.0f, "PAUSED", COLOR_INK,
+    center_text(canvas, view, 240.0f, 94.0f,
+                state->pause_debug ? "DEBUG" : "PAUSED", COLOR_INK,
                 text_scale(view));
-    kilix_ui_draw_list(renderer, view, (ki_td_rect){184, 108, 112, 70},
-                       &list_style, NULL, &focus, items, NULL, 3u);
-    center_text(canvas, view, 240.0f, 181.0f, "ESC RESUME", COLOR_MUTED, 1);
+    kilix_ui_draw_list(renderer, view,
+                       (ki_td_rect){184, 108, 112, count * 20 + 10},
+                       &list_style, NULL, &focus, items, NULL,
+                       (size_t)count);
+    center_text(canvas, view, 240.0f, (float)(84 + panel_height - 11),
+                state->pause_debug ? "ESC BACK" : "ESC RESUME",
+                COLOR_MUTED, 1);
 }
 
 static void draw_confirm(ki_td_soft_renderer *renderer,

@@ -631,9 +631,41 @@ static int selftest_body(void)
         (void)fprintf(stderr, "FAIL selftest pause open: %s\n", error);
         return EXIT_FAILURE;
     }
+    /* No desktop.conf in the temp config home, so the Debug entry is
+     * present: walk into the submenu and back out, then reach QUIT by
+     * label rather than by a hard-coded index. */
+    if (desk_pause_item_count(&state) != 4 ||
+        strcmp(desk_pause_item(&state, 2), "DEBUG") != 0) {
+        (void)fprintf(stderr, "FAIL selftest pause debug entry missing\n");
+        return EXIT_FAILURE;
+    }
     desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
     desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
-    if (state.pause_cursor != 2 || !desk_interact(&state, &world) ||
+    if (!desk_interact(&state, &world) || !state.pause_debug ||
+        desk_pause_item_count(&state) != 2 ||
+        strcmp(desk_pause_item(&state, 0), "WALK EDITOR") != 0 ||
+        !desk_validate(&state, &world, error, sizeof error)) {
+        (void)fprintf(stderr, "FAIL selftest debug submenu: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+    if (!desk_interact(&state, &world) || state.pause_debug ||
+        state.mode != DESK_MODE_PAUSE) {
+        (void)fprintf(stderr, "FAIL selftest debug back\n");
+        return EXIT_FAILURE;
+    }
+    desk_cancel(&state, &world);
+    desk_cancel(&state, &world);
+    if (state.mode != DESK_MODE_PAUSE) {
+        (void)fprintf(stderr, "FAIL selftest pause reopen\n");
+        return EXIT_FAILURE;
+    }
+    while (state.pause_cursor < desk_pause_item_count(&state) - 1 &&
+           strcmp(desk_pause_item(&state, state.pause_cursor),
+                  "QUIT") != 0)
+        desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+    if (strcmp(desk_pause_item(&state, state.pause_cursor), "QUIT") != 0 ||
+        !desk_interact(&state, &world) ||
         state.mode != DESK_MODE_CONFIRM ||
         state.confirm != DESK_CONFIRM_QUIT || state.confirm_cursor != 1 ||
         !desk_validate(&state, &world, error, sizeof error)) {

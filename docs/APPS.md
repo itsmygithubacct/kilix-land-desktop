@@ -72,3 +72,23 @@ open in the file-manager candidate table at that path. Deleting the line
 | `gate-locked` | gate (yard) | toast — the street extension point |
 
 Dialogue with housemate NPCs is proximity + interact, also fully in-process.
+
+## Debug menu
+
+The pause menu (Esc) grows a **DEBUG** entry whose submenu holds the
+walkable-space editor: `tools/walk_editor.py` opens in a tab showing the
+current style's plate on a 6px grid, walkable cells tinted translucent
+white, doors/objects/NPCs/spawns marked. Left mouse paints walkable, right
+paints blocked; `s` decomposes the paint into the world.json model (walk
+bounding rect + up to 24 exact-cover obstacle rects), rewrites the file,
+and runs the validator immediately.
+
+The entry is controlled by `<config-home>/desktop.conf`
+(`~/.local/gpu_terminal/kilix-land-desktop/desktop.conf`):
+
+```
+debug_menu = off
+```
+
+Absent file or key means enabled. The flag is re-read every time the pause
+menu opens.

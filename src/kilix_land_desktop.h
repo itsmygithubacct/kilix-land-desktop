@@ -40,7 +40,7 @@
 #define DESK_MAX_ROOMS 16
 #define DESK_MAX_OBJECTS_PER_ROOM 12
 #define DESK_MAX_DOORS_PER_ROOM 4
-#define DESK_MAX_OBSTACLES_PER_ROOM 8
+#define DESK_MAX_OBSTACLES_PER_ROOM 24
 #define DESK_MAX_NPCS_PER_ROOM 3
 
 #define DESK_INTERACT_RADIUS 72.0f
@@ -142,9 +142,11 @@ typedef enum desk_target {
     DESK_TARGET_WARDROBE = 12,
     DESK_TARGET_BED = 13,
     DESK_TARGET_STATUS_BOARD = 14,
-    DESK_TARGET_GATE_LOCKED = 15
+    DESK_TARGET_GATE_LOCKED = 15,
+    /* external, debug menu only (never placed in world.json) */
+    DESK_TARGET_WALK_EDITOR = 16
 } desk_target;
-#define DESK_TARGET_COUNT 16
+#define DESK_TARGET_COUNT 17
 
 typedef struct desk_rect {
     float x;
@@ -238,6 +240,8 @@ typedef struct desk_state {
     desk_confirm confirm;
     int confirm_cursor;
     int pause_cursor;
+    bool debug_menu;  /* desktop.conf debug_menu flag, read at pause open */
+    bool pause_debug; /* inside the Debug submenu */
     char status_lines[DESK_STATUS_LINE_COUNT][DESK_STATUS_LINE_CAPACITY];
     int status_line_count;
     char toast[DESK_TOAST_CAPACITY];
@@ -318,6 +322,8 @@ size_t desk_dialogue_visible_chars(const desk_state *state);
 const char *desk_interact_prompt(const desk_state *state,
                                  const desk_world *world);
 int desk_interact_npc(const desk_state *state, const desk_world *world);
+int desk_pause_item_count(const desk_state *state);
+const char *desk_pause_item(const desk_state *state, int index);
 
 bool desk_profile_load(desk_profile *profile);
 bool desk_profile_save(const desk_profile *profile);

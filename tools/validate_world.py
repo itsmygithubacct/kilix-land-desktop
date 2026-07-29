@@ -14,7 +14,7 @@ LOGICAL_HEIGHT = 270
 MAX_ROOMS = 16
 MAX_OBJECTS = 12
 MAX_DOORS = 4
-MAX_OBSTACLES = 8
+MAX_OBSTACLES = 24
 MAX_NPCS = 3
 ID_CAPACITY = 24
 LABEL_CAPACITY = 40
@@ -24,7 +24,7 @@ PROMPT_CAPACITY = 48
 TARGETS = {
     "terminal", "coding-agents", "files", "manuals", "models", "games",
     "music", "voice", "trash", "mailbox", "maintenance",
-    "wardrobe", "bed", "status-board", "gate-locked",
+    "wardrobe", "bed", "status-board", "gate-locked", "walk-editor",
 }
 
 

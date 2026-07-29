@@ -696,7 +696,8 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
         update_wizard_cursors(state, move_x, move_y);
     } else if (state->mode == DESK_MODE_PAUSE) {
         delta = move_y != 0 ? move_y : move_x;
-        if (move_cursor(&state->pause_cursor, delta, 3))
+        if (move_cursor(&state->pause_cursor, delta,
+                        desk_pause_item_count(state)))
             queue_audio(state, DESK_AUDIO_UI_MOVE);
     } else if (state->mode == DESK_MODE_CONFIRM) {
         delta = move_y != 0 ? move_y : move_x;
@@ -896,25 +897,104 @@ static bool interact_wizard(desk_state *state, const desk_world *world)
     return false;
 }
 
+/* The Debug entry is governed by desktop.conf in the config home; absent
+ * file or key means enabled — it is a debug DESKTOP, after all. */
+static bool debug_menu_enabled(void)
+{
+    char path[512];
+    char line[128];
+    const char *override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    FILE *handle;
+    int written;
+    bool enabled = true;
+    if (override_dir && override_dir[0] == '/')
+        written = snprintf(path, sizeof path, "%s/desktop.conf",
+                           override_dir);
+    else if (home && home[0] == '/')
+        written = snprintf(path, sizeof path,
+                           "%s/.local/gpu_terminal/kilix-land-desktop/"
+                           "desktop.conf", home);
+    else
+        return true;
+    if (written < 0 || (size_t)written >= sizeof path) return true;
+    handle = fopen(path, "r");
+    if (!handle) return true;
+    while (fgets(line, (int)sizeof line, handle)) {
+        char *cursor = line;
+        while (*cursor == ' ' || *cursor == '\t') ++cursor;
+        if (strncmp(cursor, "debug_menu", 10u) != 0) continue;
+        cursor += 10u;
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '=')
+            ++cursor;
+        enabled = !(strncmp(cursor, "off", 3u) == 0 || *cursor == '0');
+        break;
+    }
+    (void)fclose(handle);
+    return enabled;
+}
+
+int desk_pause_item_count(const desk_state *state)
+{
+    if (!state) return 0;
+    if (state->pause_debug) return 2;
+    return state->debug_menu ? 4 : 3;
+}
+
+const char *desk_pause_item(const desk_state *state, int index)
+{
+    static const char *const base[3] = { "RESUME", "CHARACTER", "QUIT" };
+    static const char *const with_debug[4] = {
+        "RESUME", "CHARACTER", "DEBUG", "QUIT"
+    };
+    static const char *const debug_items[2] = { "WALK EDITOR", "BACK" };
+    if (!state || index < 0 || index >= desk_pause_item_count(state))
+        return "";
+    if (state->pause_debug) return debug_items[index];
+    return state->debug_menu ? with_debug[index] : base[index];
+}
+
 static bool interact_pause(desk_state *state, const desk_world *world)
 {
-    switch (state->pause_cursor) {
-    case 0:
+    const char *item = desk_pause_item(state, state->pause_cursor);
+    if (strcmp(item, "RESUME") == 0) {
         state->mode = DESK_MODE_ROOM;
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         update_nearest(state, world);
         return true;
-    case 1:
+    }
+    if (strcmp(item, "CHARACTER") == 0) {
         open_wizard_from_profile(state);
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return true;
-    default:
-        state->mode = DESK_MODE_CONFIRM;
-        state->confirm = DESK_CONFIRM_QUIT;
-        state->confirm_cursor = 1;
-        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    }
+    if (strcmp(item, "DEBUG") == 0) {
+        state->pause_debug = true;
+        state->pause_cursor = 0;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
         return true;
     }
+    if (strcmp(item, "WALK EDITOR") == 0) {
+        state->pending_launch = DESK_TARGET_WALK_EDITOR;
+        (void)memset(state->pending_launch_object, 0,
+                     sizeof state->pending_launch_object);
+        state->pause_debug = false;
+        state->mode = DESK_MODE_ROOM;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        update_nearest(state, world);
+        return true;
+    }
+    if (strcmp(item, "BACK") == 0) {
+        state->pause_debug = false;
+        state->pause_cursor = 0;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
+    state->mode = DESK_MODE_CONFIRM;
+    state->confirm = DESK_CONFIRM_QUIT;
+    state->confirm_cursor = 1;
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    return true;
 }
 
 static bool interact_confirm(desk_state *state, const desk_world *world)
@@ -981,12 +1061,24 @@ void desk_cancel(desk_state *state, const desk_world *world)
     case DESK_MODE_ROOM:
         state->mode = DESK_MODE_PAUSE;
         state->pause_cursor = 0;
+        state->pause_debug = false;
+        state->debug_menu = debug_menu_enabled();
         state->player_moving = false;
         state->nearest_object = -1;
         state->nearest_npc = -1;
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         return;
     case DESK_MODE_PAUSE:
+        if (state->pause_debug) {
+            state->pause_debug = false;
+            state->pause_cursor = 0;
+            queue_audio(state, DESK_AUDIO_UI_MOVE);
+            return;
+        }
+        state->mode = DESK_MODE_ROOM;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        update_nearest(state, world);
+        return;
     case DESK_MODE_STATUS:
         state->mode = DESK_MODE_ROOM;
         queue_audio(state, DESK_AUDIO_UI_MOVE);
@@ -1146,7 +1238,7 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         state->wizard_confirm_cursor > 1)
         return validate_fail(error, error_size,
                              "wizard confirm cursor out of range");
-    if (state->pause_cursor < 0 || state->pause_cursor > 2)
+    if (state->pause_cursor < 0 || state->pause_cursor > 3)
         return validate_fail(error, error_size, "pause cursor out of range");
     if (state->confirm_cursor < 0 || state->confirm_cursor > 1)
         return validate_fail(error, error_size, "confirm cursor out of range");
