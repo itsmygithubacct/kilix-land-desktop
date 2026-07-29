@@ -1,0 +1,4 @@
+/build/
+/kilix-land-desktop
+*.o
+__pycache__/
