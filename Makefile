@@ -76,6 +76,7 @@ test: parity-check $(BIN)
 	$(PYTHON) tools/validate_audio.py --plan
 	$(PYTHON) tools/land_config.py --check
 	$(PYTHON) tools/walk_editor.py --selftest
+	$(PYTHON) tools/test_walk_editor.py --quick
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 	./$(BIN) --selftest
 	./$(BIN) --audio-test

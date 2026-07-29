@@ -25,11 +25,13 @@ import fcntl
 import io
 import json
 import os
+import re
 import select
 import struct
 import subprocess
 import sys
 import termios
+import time
 import tty
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -152,28 +154,48 @@ def selftest():
     return 0
 
 
-def compose(world, room, grid, style, show_grid=True):
-    """-> PNG bytes of plate + overlay at 960x540 (PIL only here)."""
-    from PIL import Image, ImageDraw
+_PLATE_CACHE = {}
+# grid byte 0 -> alpha 0, any nonzero -> the walkable tint alpha (78)
+_WALK_ALPHA = bytes(0 if value == 0 else 78 for value in range(256))
+
+
+def load_plate(style, plate):
+    """Plate already resized to display size, cached per (root, style,
+    plate) so a repaint never re-reads and re-LANCZOSes the PNG."""
+    from PIL import Image
     root = os.environ.get("KILIX_LAND_DESKTOP_ASSETS") or REPO
-    plate_path = os.path.join(root, "assets/graphics/rooms", style,
-                              room["plate"] + ".png")
-    try:
-        base = Image.open(plate_path).convert("RGB").resize(
-            (DISPLAY_W, DISPLAY_H), Image.LANCZOS)
-    except OSError:
-        base = Image.new("RGB", (DISPLAY_W, DISPLAY_H), (28, 30, 38))
-    base = base.convert("RGBA")
+    key = (root, style, plate)
+    cached = _PLATE_CACHE.get(key)
+    if cached is None:
+        path = os.path.join(root, "assets/graphics/rooms", style,
+                            plate + ".png")
+        try:
+            cached = Image.open(path).convert("RGB").resize(
+                (DISPLAY_W, DISPLAY_H), Image.LANCZOS).convert("RGBA")
+        except OSError:
+            cached = Image.new("RGBA", (DISPLAY_W, DISPLAY_H),
+                               (28, 30, 38, 255))
+        _PLATE_CACHE[key] = cached
+    return cached
+
+
+def compose(world, room, grid, style, show_grid=True):
+    """-> PNG bytes of plate + overlay at 960x540 (PIL only here).
+
+    The walkable tint is one COLSxROWS alpha mask scaled with NEAREST and
+    alpha_composited once — not one rectangle per cell — so repainting
+    mid-drag stays well under 100ms."""
+    from PIL import Image, ImageDraw
+    base = load_plate(style, room["plate"])
+    walk_alpha = Image.frombytes(
+        "L", (COLS, ROWS), bytes(grid).translate(_WALK_ALPHA)).resize(
+        (DISPLAY_W, DISPLAY_H), Image.NEAREST)
+    walk_tint = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (255, 255, 255, 0))
+    walk_tint.putalpha(walk_alpha)
+    frame = Image.alpha_composite(base, walk_tint)
     overlay = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     cell_px = CELL * SCALE
-    for cy in range(ROWS):
-        for cx in range(COLS):
-            if grid[cy * COLS + cx]:
-                draw.rectangle([cx * cell_px, cy * cell_px,
-                                (cx + 1) * cell_px - 1,
-                                (cy + 1) * cell_px - 1],
-                               fill=(255, 255, 255, 78))
     if show_grid:
         for cx in range(COLS + 1):
             draw.line([cx * cell_px, 0, cx * cell_px, DISPLAY_H],
@@ -199,9 +221,9 @@ def compose(world, room, grid, style, show_grid=True):
     for x, y in incoming_spawns(world, room["id"]):
         x, y = x * SCALE, y * SCALE
         draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(90, 230, 120, 230))
-    frame = Image.alpha_composite(base, overlay).convert("RGB")
+    frame = Image.alpha_composite(frame, overlay).convert("RGB")
     buffer = io.BytesIO()
-    frame.save(buffer, format="PNG")
+    frame.save(buffer, format="PNG", compress_level=1)
     return buffer.getvalue()
 
 
@@ -235,6 +257,12 @@ class Terminal:
     def __enter__(self):
         tty.setcbreak(self.fd)
         self.write("\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?1016h")
+        # DECRQM: did the terminal actually grant pixel reports?  The reply
+        # (\x1b[?1016;Ps$y, Ps 1 or 3 = set) is consumed by parse_events in
+        # the event loop; until it says otherwise we assume pixel coords,
+        # which is what kitty/kilix grants.  A terminal that answers "reset"
+        # drops us to SGR cell coordinates (1006) transparently.
+        self.write("\x1b[?1016$p")
         return self
 
     def __exit__(self, *_):
@@ -267,39 +295,96 @@ class Terminal:
             self.write(f"\x1b[{row};1H\x1b[2K" + line[: self.cols - 1])
 
     def logical_from_pixels(self, px, py):
-        x = (px - 1) / (self.image_cols * self.cell_w) * LOGICAL_W
-        y = (py - 1) / (self.image_rows * self.cell_h) * LOGICAL_H
+        """Mode 1016: kitty reports 0-based pixels relative to the cell
+        content area — the same box TIOCGWINSZ's xpix/ypix describes, so
+        window padding cancels out and no offset correction is needed
+        (1-based would be an xterm-ism kitty does not follow)."""
+        x = px / (self.image_cols * self.cell_w) * LOGICAL_W
+        y = py / (self.image_rows * self.cell_h) * LOGICAL_H
         if 0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H:
             return x, y
         return None
 
+    def logical_from_cells(self, col, row):
+        """Mode 1006 fallback: 1-based cell coordinates; use the center of
+        the reported cell so painting still lands where the cursor is."""
+        return self.logical_from_pixels((col - 0.5) * self.cell_w,
+                                        (row - 0.5) * self.cell_h)
+
+
+MODE_REPORT = re.compile(rb"\x1b\[\?(\d+);(\d+)\$y")
+STRING_INTRODUCERS = (0x5d, 0x50, 0x5f, 0x5e, 0x58)  # OSC DCS APC PM SOS
+RUNAWAY = 4096              # unterminated-sequence cap before we drop it
+
 
 def parse_events(data):
-    """-> (mouse events [(button, pressed_or_drag, px, py)], key list)."""
-    mice, keys = [], []
-    index = 0
-    while index < len(data):
-        if data.startswith(b"\x1b[<", index):
-            end_m = data.find(b"M", index)
-            end_r = data.find(b"m", index)
-            candidates = [e for e in (end_m, end_r) if e != -1]
-            if not candidates:
-                break
-            end = min(candidates)
-            body = data[index + 3:end]
-            try:
-                button, px, py = (int(part) for part in body.split(b";"))
-            except ValueError:
-                index = end + 1
-                continue
-            mice.append((button, data[end:end + 1] == b"M", px, py))
-            index = end + 1
-        elif data[index] == 0x1b:
-            index += 1
-        else:
+    """-> (mouse events [(button, pressed_or_drag, px, py)], key list,
+    mode reports [(mode, status)], unconsumed tail bytes).
+
+    Never drops a split escape sequence: any incomplete trailing sequence
+    (bare ESC, partial CSI like \\x1b[<0;17, unterminated OSC/DCS/APC) is
+    returned as the tail, which the caller MUST prepend to its next read.
+    The pty broker delivers relay-sized packets, so 1016's per-pixel drag
+    reports routinely split mid-sequence — the old parser threw the prefix
+    away and the orphaned coordinate digits leaked into the key stream,
+    where '1'-'5' switched rooms and wiped unsaved painting.  Non-mouse
+    escape sequences (including the DECRQM reply) are consumed whole so
+    their bytes can never reach the key path."""
+    mice, keys, reports = [], [], []
+    index, length = 0, len(data)
+    while index < length:
+        if data[index] != 0x1b:
             keys.append(data[index])
             index += 1
-    return mice, keys
+            continue
+        if index + 1 >= length:
+            break                                   # bare trailing ESC
+        kind = data[index + 1]
+        if kind == 0x5b:                            # CSI
+            scan = index + 2
+            while scan < length and 0x20 <= data[scan] <= 0x3f:
+                scan += 1
+            if scan >= length:                      # split mid-sequence
+                if length - index > RUNAWAY:
+                    index = length                  # runaway; drop it
+                break
+            if not 0x40 <= data[scan] <= 0x7e:      # malformed; resync
+                index = scan
+                continue
+            sequence = data[index:scan + 1]
+            index = scan + 1
+            if sequence.startswith(b"\x1b[<") and sequence[-1:] in (b"M",
+                                                                    b"m"):
+                try:
+                    button, px, py = (int(part) for part in
+                                      sequence[3:-1].split(b";"))
+                except ValueError:
+                    continue
+                mice.append((button, sequence[-1:] == b"M", px, py))
+            else:
+                match = MODE_REPORT.fullmatch(sequence)
+                if match:
+                    reports.append((int(match.group(1)),
+                                    int(match.group(2))))
+        elif kind in STRING_INTRODUCERS:            # terminated by ST
+            stop = data.find(b"\x1b\\", index + 2)
+            if kind == 0x5d:                        # OSC: BEL also ends it
+                bel = data.find(b"\x07", index + 2)
+                if bel != -1 and (stop == -1 or bel < stop):
+                    index = bel + 1
+                    continue
+            if stop == -1:
+                if length - index > RUNAWAY:
+                    index = length                  # runaway; drop it
+                break
+            index = stop + 2
+        elif kind == 0x4f:                          # SS3: one final byte
+            if index + 2 >= length:
+                break
+            index += 3
+        else:                                       # two-byte escape
+            index += 2
+    return mice, keys, reports, data[index:]
 
 
 def run_editor(initial_room, initial_style):
@@ -315,18 +400,25 @@ def run_editor(initial_room, initial_style):
     show_grid = True
     message = "left paint · right block"
     paint_value = None
+    pixel_mouse = True          # until a DECRQM reply says otherwise
+    mouse_note = "mouse: no input yet"
 
     with Terminal() as terminal:
-        def repaint():
+        def status_lines():
             room = rooms[room_index]
-            terminal.show_image(compose(world, room, grid,
-                                        STYLES[style_index], show_grid))
             state_flag = "*" if dirty else " "
-            terminal.status(
-                f"walk-editor  {room['id']} ({STYLES[style_index]}){state_flag}"
-                f"  walkable {sum(grid)}/{COLS * ROWS} cells",
+            unit = "" if pixel_mouse else " [cell coords]"
+            return (
+                f"walk-editor  {room['id']} ({STYLES[style_index]})"
+                f"{state_flag}  walkable {sum(grid)}/{COLS * ROWS} cells"
+                f"   {mouse_note}{unit}",
                 "1-5/n/p room · t style · g grid · s save · u undo · "
                 f"r reload · q quit   {message}")
+
+        def repaint():
+            terminal.show_image(compose(world, rooms[room_index], grid,
+                                        STYLES[style_index], show_grid))
+            terminal.status(*status_lines())
 
         def switch_room(new_index):
             nonlocal room_index, grid, dirty, undo_stack
@@ -336,41 +428,74 @@ def run_editor(initial_room, initial_style):
             dirty = False
 
         repaint()
+        last_draw = time.monotonic()
+        pending = b""               # incomplete escape tail, carried over
+        need_image = need_status = False
         while True:
-            ready, _, _ = select.select([terminal.fd], [], [], 0.5)
-            if not ready:
-                continue
-            data = os.read(terminal.fd, 65536)
-            mice, keys = parse_events(data)
-            changed = False
+            timeout = 0.05 if (need_image or need_status) else 0.5
+            ready, _, _ = select.select([terminal.fd], [], [], timeout)
+            if ready:
+                try:
+                    data = os.read(terminal.fd, 65536)
+                except OSError:
+                    return 0        # pty gone
+                if not data:
+                    return 0        # EOF
+                mice, keys, reports, pending = parse_events(pending + data)
+            else:
+                mice, keys, reports = [], [], []
+            for mode, value in reports:
+                if mode == 1016:
+                    pixel_mouse = value in (1, 3)
+                    need_status = True
             for button, active, px, py in mice:
-                if not active:
+                need_status = True
+                if button & 256:            # kitty window-leave (cb 288)
+                    mouse_note = f"mouse: {px},{py} leave"
+                    continue
+                if button & (64 | 128):     # wheel / extra buttons
+                    mouse_note = f"mouse: {px},{py} wheel/aux"
+                    continue
+                if not active:              # release ends the gesture
                     paint_value = None
+                    mouse_note = f"mouse: {px},{py} release"
                     continue
                 base_button = button & 3
                 motion = bool(button & 32)
-                point = terminal.logical_from_pixels(px, py)
+                point = (terminal.logical_from_pixels(px, py) if pixel_mouse
+                         else terminal.logical_from_cells(px, py))
                 if point is None:
+                    mouse_note = f"mouse: {px},{py} outside image"
                     continue
                 cx, cy = int(point[0] // CELL), int(point[1] // CELL)
                 if not (0 <= cx < COLS and 0 <= cy < ROWS):
+                    mouse_note = f"mouse: {px},{py} outside grid"
                     continue
-                if not motion:
-                    undo_stack.append(bytes(grid))
-                    del undo_stack[:-64]
+                if base_button in (0, 2) and (not motion
+                                              or paint_value is None):
+                    # A press starts a gesture.  A drag whose press never
+                    # arrived still carries the held button in its low
+                    # bits, so adopt it: one lost press must not kill the
+                    # whole gesture.
+                    if paint_value is None:
+                        undo_stack.append(bytes(grid))
+                        del undo_stack[:-64]
                     paint_value = 1 if base_button == 0 else 0
                 if paint_value is None:
+                    mouse_note = f"mouse: {px},{py} cell {cx},{cy} idle"
                     continue
+                action = "paint" if paint_value else "block"
+                mouse_note = f"mouse: {px},{py} cell {cx},{cy} {action}"
                 if grid[cy * COLS + cx] != paint_value:
                     grid[cy * COLS + cx] = paint_value
                     dirty = True
-                    changed = True
+                    need_image = True
             for key in keys:
                 char = chr(key) if 32 <= key < 127 else ""
                 if char == "q":
                     if dirty and message != "unsaved changes - q again":
                         message = "unsaved changes - q again"
-                        changed = True
+                        need_image = True
                         break
                     return 0
                 if char == "s":
@@ -417,9 +542,19 @@ def run_editor(initial_room, initial_style):
                     rooms = world["rooms"]
                     switch_room(room_index)
                     message = "reloaded"
-                changed = True
-            if changed:
-                repaint()
+                need_image = True
+            # Coalesce repaints: during a 1016 drag kitty reports every
+            # pixel of motion, so redraw at most ~30fps while input is
+            # still streaming and flush immediately once it pauses.
+            now = time.monotonic()
+            if (need_image or need_status) and (not ready
+                                                or now - last_draw >= 0.03):
+                if need_image:
+                    repaint()
+                else:
+                    terminal.status(*status_lines())
+                last_draw = now
+                need_image = need_status = False
 
 
 def main():
