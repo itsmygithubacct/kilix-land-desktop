@@ -85,10 +85,10 @@ def pixel_for_cell(cx, cy):
     """SGR-1016 pixel coords whose editor-side mapping lands in (cx, cy)."""
     box_w, box_h = image_box()
     lx, ly = cx * W.CELL + W.CELL / 2, cy * W.CELL + W.CELL / 2
-    px = int(round(1 + lx / W.LOGICAL_W * box_w))
-    py = int(round(1 + ly / W.LOGICAL_H * box_h))
-    x = (px - 1) / box_w * W.LOGICAL_W          # editor's inverse mapping
-    y = (py - 1) / box_h * W.LOGICAL_H
+    px = int(round(lx / W.LOGICAL_W * box_w))
+    py = int(round(ly / W.LOGICAL_H * box_h))
+    x = px / box_w * W.LOGICAL_W                 # editor's inverse mapping
+    y = py / box_h * W.LOGICAL_H
     if int(x // W.CELL) != cx or int(y // W.CELL) != cy:
         raise AssertionError(f"pixel mapping drifted for cell ({cx},{cy})")
     return px, py
