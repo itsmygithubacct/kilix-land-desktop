@@ -58,6 +58,7 @@ parity-check:
 
 test: parity-check $(BIN)
 	$(PYTHON) tools/validate_world.py assets/world/world.json
+	$(PYTHON) tools/validate_visual.py
 	$(PYTHON) tools/land_config.py --check
 	./$(BIN) --selftest
 	./$(BIN) --audio-test
