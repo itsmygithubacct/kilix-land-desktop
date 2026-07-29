@@ -1,0 +1,135 @@
+{
+  "world": 1,
+  "start": "bedroom",
+  "rooms": [
+    {
+      "id": "bedroom",
+      "name": "Bedroom",
+      "plate": "bedroom",
+      "walk": { "x": 24, "y": 180, "w": 436, "h": 72 },
+      "obstacles": [],
+      "doors": [
+        { "rect": { "x": 452, "y": 180, "w": 8, "h": 72 },
+          "to": "living", "spawn": { "x": 44, "y": 216 } }
+      ],
+      "objects": [
+        { "id": "bed", "prompt": "Turn in for the day",
+          "rect": { "x": 44, "y": 168, "w": 76, "h": 48 }, "target": "bed" },
+        { "id": "wardrobe", "prompt": "Change your look",
+          "rect": { "x": 330, "y": 162, "w": 52, "h": 54 },
+          "target": "wardrobe" }
+      ],
+      "npcs": []
+    },
+    {
+      "id": "living",
+      "name": "Living Room",
+      "plate": "living",
+      "walk": { "x": 24, "y": 180, "w": 436, "h": 72 },
+      "obstacles": [
+        { "x": 215, "y": 208, "w": 50, "h": 20 }
+      ],
+      "doors": [
+        { "rect": { "x": 24, "y": 180, "w": 8, "h": 72 },
+          "to": "bedroom", "spawn": { "x": 440, "y": 216 } },
+        { "rect": { "x": 452, "y": 180, "w": 8, "h": 72 },
+          "to": "study", "spawn": { "x": 44, "y": 216 } },
+        { "rect": { "x": 210, "y": 180, "w": 60, "h": 8 },
+          "to": "kitchen", "spawn": { "x": 240, "y": 238 } },
+        { "rect": { "x": 210, "y": 244, "w": 60, "h": 8 },
+          "to": "yard", "spawn": { "x": 240, "y": 192 } }
+      ],
+      "objects": [
+        { "id": "tv", "prompt": "Switch on the TV",
+          "rect": { "x": 148, "y": 148, "w": 62, "h": 44 },
+          "target": "games" },
+        { "id": "stereo", "prompt": "Put a record on",
+          "rect": { "x": 300, "y": 154, "w": 44, "h": 38 },
+          "target": "music" },
+        { "id": "phone", "prompt": "Pick up the phone",
+          "rect": { "x": 396, "y": 158, "w": 26, "h": 34 },
+          "target": "voice" }
+      ],
+      "npcs": [
+        { "actor": 1, "x": 120, "y": 200 },
+        { "actor": 2, "x": 320, "y": 232 },
+        { "actor": 3, "x": 408, "y": 204 }
+      ]
+    },
+    {
+      "id": "study",
+      "name": "Study",
+      "plate": "study",
+      "walk": { "x": 24, "y": 180, "w": 436, "h": 72 },
+      "obstacles": [],
+      "doors": [
+        { "rect": { "x": 24, "y": 180, "w": 8, "h": 72 },
+          "to": "living", "spawn": { "x": 440, "y": 216 } }
+      ],
+      "objects": [
+        { "id": "computer", "prompt": "Use the computer",
+          "rect": { "x": 322, "y": 148, "w": 70, "h": 46 },
+          "target": "terminal" },
+        { "id": "dev-rig", "prompt": "Wake the coding agents",
+          "rect": { "x": 404, "y": 154, "w": 42, "h": 40 },
+          "target": "coding-agents" },
+        { "id": "filing-cabinet", "prompt": "Open the filing cabinet",
+          "rect": { "x": 52, "y": 152, "w": 40, "h": 46 },
+          "target": "files" },
+        { "id": "bookshelf", "prompt": "Browse the bookshelf",
+          "rect": { "x": 110, "y": 138, "w": 72, "h": 58 },
+          "target": "manuals" },
+        { "id": "model-shelf", "prompt": "Study the model shelf",
+          "rect": { "x": 226, "y": 144, "w": 52, "h": 48 },
+          "target": "models" }
+      ],
+      "npcs": []
+    },
+    {
+      "id": "kitchen",
+      "name": "Kitchen",
+      "plate": "kitchen",
+      "walk": { "x": 24, "y": 180, "w": 436, "h": 72 },
+      "obstacles": [
+        { "x": 230, "y": 202, "w": 60, "h": 24 }
+      ],
+      "doors": [
+        { "rect": { "x": 210, "y": 244, "w": 60, "h": 8 },
+          "to": "living", "spawn": { "x": 240, "y": 192 } }
+      ],
+      "objects": [
+        { "id": "notice-board", "prompt": "Check the notice board",
+          "rect": { "x": 200, "y": 138, "w": 62, "h": 42 },
+          "target": "status-board" },
+        { "id": "trash-can", "prompt": "Take out the trash",
+          "rect": { "x": 56, "y": 168, "w": 30, "h": 36 },
+          "target": "trash" }
+      ],
+      "npcs": []
+    },
+    {
+      "id": "yard",
+      "name": "Yard",
+      "plate": "yard",
+      "outdoor": true,
+      "walk": { "x": 24, "y": 180, "w": 436, "h": 72 },
+      "obstacles": [],
+      "doors": [
+        { "rect": { "x": 210, "y": 180, "w": 60, "h": 8 },
+          "to": "living", "spawn": { "x": 240, "y": 238 } }
+      ],
+      "objects": [
+        { "id": "mailbox", "prompt": "Check the mailbox",
+          "rect": { "x": 56, "y": 156, "w": 26, "h": 48 },
+          "target": "mailbox" },
+        { "id": "shed", "prompt": "Open the shed",
+          "rect": { "x": 344, "y": 136, "w": 84, "h": 62 },
+          "target": "maintenance" },
+        { "id": "gate", "prompt": "Try the gate",
+          "rect": { "x": 444, "y": 180, "w": 16, "h": 72 },
+          "target": "gate-locked" }
+      ],
+      "npcs": []
+    }
+  ]
+}

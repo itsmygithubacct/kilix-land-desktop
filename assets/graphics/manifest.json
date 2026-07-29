@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "game": "kilix-land-desktop",
+  "atlases": [
+    {
+      "id": "legend-player",
+      "path": "assets/graphics/casts/legend-player.png",
+      "sha256": "065f71f24064e34abca7d0827abb8f78a5390f5fc1729cfbe6c4d680ea840515",
+      "alpha_required": true,
+      "grid": {
+        "columns": 16,
+        "rows": 8,
+        "width": 1024,
+        "height": 512,
+        "cell_width": 64,
+        "cell_height": 64
+      }
+    },
+    {
+      "id": "legend-npcs",
+      "path": "assets/graphics/casts/legend-npcs.png",
+      "sha256": "a320ed306b2b3ac367a08af1b1385cde6050b5ad848c7f62872fcd0625571f4a",
+      "alpha_required": true,
+      "grid": {
+        "columns": 4,
+        "rows": 4,
+        "width": 256,
+        "height": 256,
+        "cell_width": 64,
+        "cell_height": 64
+      }
+    },
+    {
+      "id": "legend-portraits",
+      "path": "assets/graphics/casts/legend-portraits.png",
+      "sha256": "d012051efcfb26246b91243bb3676e2871d1dcaaeb7b7a267945fca98a4b0ffb",
+      "alpha_required": true,
+      "grid": {
+        "columns": 4,
+        "rows": 3,
+        "width": 384,
+        "height": 288,
+        "cell_width": 96,
+        "cell_height": 96
+      }
+    },
+    {
+      "id": "chumrunner-characters",
+      "path": "assets/graphics/casts/chumrunner-characters.png",
+      "sha256": "439e1d9acf454cf76ce14f2f426a6c1715691d2081531ae464cb7ff6ddd39cf1",
+      "alpha_required": true,
+      "grid": {
+        "columns": 8,
+        "rows": 4,
+        "width": 1776,
+        "height": 888,
+        "cell_width": 222,
+        "cell_height": 222
+      }
+    },
+    {
+      "id": "chumrunner-portraits",
+      "path": "assets/graphics/casts/chumrunner-portraits.png",
+      "sha256": "3e2791b322279e8521250a9b3e89c2bbe31a293afd1f8a8bbdf8cde3c6cc127b",
+      "alpha_required": true,
+      "grid": {
+        "columns": 4,
+        "rows": 2,
+        "width": 1776,
+        "height": 888,
+        "cell_width": 444,
+        "cell_height": 444
+      }
+    },
+    {
+      "id": "fantasy-characters",
+      "path": "assets/graphics/casts/fantasy-characters.png",
+      "sha256": "6039cf233c51ffabe0d02caad530e6c35c2060a68aa083b6c6f396e1990e57c1",
+      "alpha_required": true,
+      "grid": {
+        "columns": 8,
+        "rows": 4,
+        "width": 1776,
+        "height": 888,
+        "cell_width": 222,
+        "cell_height": 222
+      }
+    },
+    {
+      "id": "fantasy-portraits",
+      "path": "assets/graphics/casts/fantasy-portraits.png",
+      "sha256": "c28ec591d10c5aef333456bd24b32a4c42da5ad41c55b6280b5365b53769ef5b",
+      "alpha_required": true,
+      "grid": {
+        "columns": 4,
+        "rows": 2,
+        "width": 1776,
+        "height": 888,
+        "cell_width": 444,
+        "cell_height": 444
+      }
+    },
+    {
+      "id": "pleb-bound-characters",
+      "path": "assets/graphics/casts/pleb-bound-characters.png",
+      "sha256": "9431a60ead3b0bc6806d3e8ef9a018c1f25f59b79bf47c0daf022f1deeee644d",
+      "alpha_required": true,
+      "grid": {
+        "columns": 8,
+        "rows": 4,
+        "width": 1776,
+        "height": 888,
+        "cell_width": 222,
+        "cell_height": 222
+      }
+    },
+    {
+      "id": "pleb-bound-portraits",
+      "path": "assets/graphics/casts/pleb-bound-portraits.png",
+      "sha256": "fa9d7869c77cb70583f0a412003019d4085931b6f38350de1caf81cfdb513cc1",
+      "alpha_required": true,
+      "grid": {
+        "columns": 4,
+        "rows": 2,
+        "width": 1776,
+        "height": 888,
+        "cell_width": 444,
+        "cell_height": 444
+      }
+    }
+  ],
+  "bitmaps": []
+}
