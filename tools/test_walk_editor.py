@@ -19,19 +19,32 @@ of assets/world/world.json, and asserts the full interactive contract:
   saving    's' rewrites world.json so the painted cells rasterize walkable
             and the file still passes tools/validate_world.py; 'q' exits 0
 
-Four scenarios, all must pass:
+Every scenario also parses the editor's full output stream and asserts the
+flicker-free presentation contract: frames are raw zlib-deflated RGBA
+(f=32,o=z at 960x540, decoded and length-checked), the two image ids
+alternate, the previous id is deleted only AFTER the replacing a=T — never
+between two consecutive transmits, and nothing before the first frame —
+and every present sits inside a DEC 2026 synchronized update (?2026h
+before each a=T, ?2026l after it).
+
+Five scenarios, all must pass:
   clean          the whole mouse burst arrives in one read
   torture        the same bytes arrive in 3-byte fragments with 10ms gaps,
                  splitting every escape sequence across reads — what a pty
                  broker or a slow relay does in practice
   hover          the hover sweep (then press+drag+release) in one read
   hover-torture  the hover sweep through the same 3-byte fragmentation
+  drag-cadence   a ~500ms continuous fragmented paint drag: presents during
+                 the gesture stay throttled (<= duration/80ms + 2) while
+                 EVERY swept cell still ends up painted in the saved world
+                 — frame encoding must never starve input
 
 Usage:  test_walk_editor.py            verbose report with log evidence
         test_walk_editor.py --quick    one line per check, nonzero on failure
 """
 
 import argparse
+import base64
 import fcntl
 import importlib.util
 import json
@@ -47,6 +60,7 @@ import tempfile
 import termios
 import threading
 import time
+import zlib
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TOOLS)
@@ -62,6 +76,112 @@ ROWS, COLS, XPIX, YPIX = 48, 212, 1908, 960
 PAINT_CELLS = [(8, 31), (9, 31), (10, 31), (11, 31), (12, 31)]
 
 APC_TRANSMIT = b"\x1b_Ga=T"
+
+# One token per kitty graphics APC (control[;payload]) or DEC 2026 flip.
+STREAM_TOKEN = re.compile(
+    rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\|\x1b\[\?2026([hl])")
+
+
+def parse_presentation(log):
+    """Tokenize the editor's output into ordered presentation events:
+    ('sync', pos, 'h'|'l'), ('transmit', pos, {'id','keys','payload'}),
+    ('delete', pos, {'id','mode'}).  A chunked a=T (m=1 ... m=0) collapses
+    into one transmit event at the first chunk's position with the base64
+    payload joined across chunks."""
+    events = []
+    open_transmit = None
+    for match in STREAM_TOKEN.finditer(log):
+        if match.group(3) is not None:
+            events.append(("sync", match.start(), match.group(3).decode()))
+            continue
+        control = (match.group(1) or b"").decode()
+        payload = match.group(2) or b""
+        keys = dict(part.split("=", 1) for part in control.split(",")
+                    if "=" in part)
+        if keys.get("a") == "T":
+            open_transmit = {"pos": match.start(), "id": int(keys["i"]),
+                             "keys": keys, "payload": bytearray(payload)}
+            if keys.get("m", "0") != "1":
+                events.append(("transmit", open_transmit["pos"],
+                               open_transmit))
+                open_transmit = None
+        elif keys.get("a") == "d":
+            events.append(("delete", match.start(),
+                           {"id": int(keys.get("i", 0)),
+                            "mode": keys.get("d", "")}))
+        elif open_transmit is not None and "m" in keys:
+            open_transmit["payload"].extend(payload)
+            if keys["m"] != "1":
+                events.append(("transmit", open_transmit["pos"],
+                               open_transmit))
+                open_transmit = None
+    return events
+
+
+def check_presentation(log, check):
+    """Assert the flicker-free presentation contract on a session log."""
+    events = parse_presentation(log)
+    transmits = [e for e in events if e[0] == "transmit"]
+    # In-frame deletes are a=d,d=i; the exit path's d=I teardown of both
+    # ids is presentation cleanup, not part of the frame contract.
+    deletes = [(pos, info) for kind, pos, info in events
+               if kind == "delete" and info["mode"] == "i"]
+    syncs = [(pos, which) for kind, pos, which in events if kind == "sync"]
+    check("presents at least one frame", bool(transmits))
+    if not transmits:
+        return
+    keys = transmits[0][2]["keys"]
+    frame_ok = (keys.get("f") == "32" and keys.get("o") == "z"
+                and keys.get("s") == str(W.DISPLAY_W)
+                and keys.get("v") == str(W.DISPLAY_H))
+    check("frames are raw RGBA f=32,o=z at "
+          f"{W.DISPLAY_W}x{W.DISPLAY_H}", frame_ok, f"keys={keys}")
+    try:
+        raw = zlib.decompress(
+            base64.b64decode(bytes(transmits[0][2]["payload"])))
+        expected = W.DISPLAY_W * W.DISPLAY_H * 4
+        check("frame payload decodes to full RGBA byte count",
+              len(raw) == expected, f"{len(raw)} != {expected}")
+    except (ValueError, zlib.error) as error:
+        check("frame payload decodes to full RGBA byte count", False,
+              f"decode failed: {error}")
+    ids = [t[2]["id"] for t in transmits]
+    check("image ids alternate",
+          all(a != b for a, b in zip(ids, ids[1:])), f"ids={ids[:16]}")
+    check("no placement delete before the first frame",
+          not any(pos < transmits[0][1] for pos, _ in deletes))
+    order_ok, order_detail = True, ""
+    for i in range(len(transmits) - 1):
+        old_pos, old_id = transmits[i][1], transmits[i][2]["id"]
+        new_pos = transmits[i + 1][1]
+        stop = transmits[i + 2][1] if i + 2 < len(transmits) else len(log)
+        if any(old_pos < pos < new_pos and info["id"] == old_id
+               for pos, info in deletes):
+            order_ok = False
+            order_detail = (f"id {old_id} deleted BEFORE its replacement "
+                            f"(transmit #{i + 1}) — blank-gap flicker")
+            break
+        if not any(new_pos < pos < stop and info["id"] == old_id
+                   for pos, info in deletes):
+            order_ok = False
+            order_detail = (f"id {old_id} never deleted after replacement "
+                            f"transmit #{i + 1}")
+            break
+    check("previous id deleted only AFTER the new a=T", order_ok,
+          order_detail)
+    sync_ok, sync_detail = True, ""
+    for tpos in (t[1] for t in transmits):
+        before = [which for pos, which in syncs if pos < tpos]
+        after = [which for pos, which in syncs if pos > tpos]
+        if not before or before[-1] != "h":
+            sync_ok, sync_detail = \
+                False, f"transmit at {tpos} not preceded by ?2026h"
+            break
+        if not after or after[0] != "l":
+            sync_ok, sync_detail = \
+                False, f"transmit at {tpos} not followed by ?2026l"
+            break
+    check("every present wrapped in DEC 2026 h/l", sync_ok, sync_detail)
 
 
 def load_editor_module():
@@ -116,6 +236,23 @@ def mouse_burst():
 
 # Motion-only hover sweep: row 20, cells 6..15 (disjoint from PAINT_CELLS).
 HOVER_CELLS = [(cx, 20) for cx in range(6, 16)]
+
+# Drag-cadence sweep: snake through two full rows of bedroom's first
+# obstacle (x 24..120, y 180..214 → cells cx 4..19, cy 30..35), all
+# currently blocked and inside the walk bbox, so every report paints a
+# fresh cell — 32 paint actions spread across the ~500ms gesture.
+DRAG_SWEEP_CELLS = ([(cx, 32) for cx in range(4, 20)] +
+                    [(cx, 33) for cx in reversed(range(4, 20))])
+
+
+def drag_sweep_burst():
+    """-> (press+drag bytes across DRAG_SWEEP_CELLS, release bytes)."""
+    px, py = pixel_for_cell(*DRAG_SWEEP_CELLS[0])
+    out = [f"\x1b[<0;{px};{py}M"]                       # left press
+    for cell in DRAG_SWEEP_CELLS[1:]:
+        px, py = pixel_for_cell(*cell)
+        out.append(f"\x1b[<32;{px};{py}M")              # drag motion
+    return "".join(out).encode(), f"\x1b[<0;{px};{py}m".encode()
 
 
 def hover_burst():
@@ -224,6 +361,24 @@ def send_burst(session, burst, fragmented):
         session.send(burst)
 
 
+def report(label, checks, log, verbose):
+    """Print one scenario's verdict + failing (or all) checks. -> ok."""
+    ok = all(c[1] for c in checks)
+    print(f"[{'PASS' if ok else 'FAIL'}] scenario: {label}")
+    for label_, good, detail in checks:
+        if verbose or not good:
+            extra = f"  -- {detail}" if detail and not good else ""
+            print(f"    {'ok  ' if good else 'FAIL'} {label_}{extra}")
+    if verbose or not ok:
+        rooms = status_rooms(log)
+        print(f"    evidence: a=T count={log.count(APC_TRANSMIT)}, "
+              f"status rooms seen={rooms}")
+        if b"Traceback" in log:
+            tail = log[log.find(b"Traceback"):][:600]
+            print("    " + tail.decode(errors="replace"))
+    return ok
+
+
 def run_scenario(name, fragmented, verbose, hover=False):
     checks = []
 
@@ -320,25 +475,180 @@ def run_scenario(name, fragmented, verbose, hover=False):
     check("painted cells are walkable in saved world", not missing,
           f"cells never painted: {missing}")
 
-    crashed = b"Traceback" in log
-    check("no traceback", not crashed)
+    check_presentation(log, check)
+    check("no traceback", b"Traceback" not in log)
     session.cleanup()
 
-    ok = all(c[1] for c in checks)
     label = name + (" (3-byte fragments)" if fragmented else "")
-    print(f"[{'PASS' if ok else 'FAIL'}] scenario: {label}")
-    for label_, good, detail in checks:
-        if verbose or not good:
-            extra = f"  -- {detail}" if detail and not good else ""
-            print(f"    {'ok  ' if good else 'FAIL'} {label_}{extra}")
-    if verbose or not ok:
-        rooms = status_rooms(log)
-        print(f"    evidence: a=T count={log.count(APC_TRANSMIT)}, "
-              f"status rooms seen={rooms}")
-        if crashed:
-            tail = log[log.find(b"Traceback"):][:600]
-            print("    " + tail.decode(errors="replace"))
-    return ok
+    return report(label, checks, log, verbose)
+
+
+def run_drag_scenario(verbose):
+    """~500ms continuous fragmented paint drag: presents throttled to the
+    80ms drag cadence (<= duration/80ms + 2 during the gesture), yet every
+    swept cell ends up painted in the saved world — proof that frame
+    encoding never starves input processing."""
+    checks = []
+
+    def check(label, ok, detail=""):
+        checks.append((label, bool(ok), detail))
+
+    session = Session()
+    try:
+        check("transmits kitty image (a=T)",
+              session.wait_for(APC_TRANSMIT, 15) != -1)
+        check("writes status line",
+              session.wait_for(b"walk-editor  ", 5) != -1)
+        time.sleep(0.3)                  # startup repaints settle
+        burst, release = drag_sweep_burst()
+        fragments = [burst[i:i + 3] for i in range(0, len(burst), 3)]
+        pace = 0.5 / len(fragments)
+        mark = len(session.snapshot())
+        started = time.monotonic()
+        for fragment in fragments:       # continuous fragmented gesture
+            session.send(fragment)
+            time.sleep(pace)
+        duration = time.monotonic() - started
+        during = session.snapshot()[mark:]
+        presents = during.count(APC_TRANSMIT)
+        budget = int(duration / 0.080) + 2
+        check(f"drag presents throttled to 80ms cadence "
+              f"(<= {budget} in {duration * 1000:.0f}ms)",
+              presents <= budget, f"saw {presents} presents")
+        check("still presents during the drag", presents >= 1)
+        end_mark = mark + len(during)
+        session.send(release)
+        check("trailing repaint after release",
+              session.wait_for(APC_TRANSMIT, 3, start=end_mark) != -1)
+        time.sleep(0.4)                  # let the input queue drain
+        save_mark = len(session.snapshot())
+        session.send(b"s")
+        check("save reports 'validator OK'",
+              session.wait_for(b"validator OK", 15, start=save_mark) != -1)
+        session.send(b"q")
+        exited = True
+        try:
+            session.child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            exited = False
+        check("quits on q", exited)
+    finally:
+        session.close()
+        log = session.snapshot()
+
+    try:
+        with open(session.world, "rb") as handle:
+            world = json.loads(handle.read())
+        room = next(r for r in world["rooms"] if r["id"] == "bedroom")
+        grid = W.rasterize(room)
+        missing = [c for c in DRAG_SWEEP_CELLS
+                   if not grid[c[1] * W.COLS + c[0]]]
+    except (OSError, ValueError, StopIteration, KeyError) as error:
+        missing = [f"unreadable: {error}"]
+    check("every swept cell painted (input never starved)", not missing,
+          f"{len(missing)} cells never painted: {missing[:6]}")
+
+    check_presentation(log, check)
+    check("no traceback", b"Traceback" not in log)
+    session.cleanup()
+    return report("drag-cadence (~500ms fragmented)", checks, log, verbose)
+
+
+# Toggle/brush cells: (40, 38) is walkable in the shipped bedroom (in the
+# walk band, outside both obstacles); (9, 31) is blocked (inside the bed
+# obstacle) with its whole 3x3 neighborhood (8..10, 30..32) also blocked.
+TOGGLE_CELL = (40, 38)
+BRUSH_CENTER = (9, 31)
+BRUSH_FOOTPRINT = [(cx, cy) for cy in (30, 31, 32) for cx in (8, 9, 10)]
+
+
+def click_burst(cell):
+    px, py = pixel_for_cell(*cell)
+    return f"\x1b[<0;{px};{py}M\x1b[<0;{px};{py}m".encode()
+
+
+def last_walkable(log):
+    matches = re.findall(rb"walkable (\d+)/", log)
+    return int(matches[-1]) if matches else -1
+
+
+def wait_for_walkable(session, value, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if last_walkable(session.snapshot()) == value:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def run_toggle_brush_scenario(verbose):
+    """Left click TOGGLES the tile under the cursor; [/] size the brush and
+    a click paints the whole footprint with the toggled value."""
+    checks = []
+
+    def check(label, ok, detail=""):
+        checks.append((label, bool(ok), detail))
+
+    session = Session()
+    try:
+        check("transmits kitty image (a=T)",
+              session.wait_for(APC_TRANSMIT, 15) != -1)
+        check("writes status line",
+              session.wait_for(b"walk-editor  ", 5) != -1)
+        time.sleep(0.3)
+        count0 = last_walkable(session.snapshot())
+        check("initial walkable count visible", count0 > 0)
+        session.send(click_burst(TOGGLE_CELL))
+        check("click on a walkable tile clears it (toggle off)",
+              wait_for_walkable(session, count0 - 1, 5),
+              f"count stayed {last_walkable(session.snapshot())}")
+        session.send(click_burst(TOGGLE_CELL))
+        check("second click restores it (toggle on)",
+              wait_for_walkable(session, count0, 5),
+              f"count stayed {last_walkable(session.snapshot())}")
+        mark = len(session.snapshot())
+        session.send(b"]]")
+        check("]] grows the brush to 3x3",
+              session.wait_for(b"brush 3x3", 5, start=mark) != -1)
+        session.send(click_burst(BRUSH_CENTER))
+        check("3x3 click paints the full footprint (+9 walkable)",
+              wait_for_walkable(session, count0 + 9, 5),
+              f"count is {last_walkable(session.snapshot())}, "
+              f"wanted {count0 + 9}")
+        save_mark = len(session.snapshot())
+        session.send(b"s")
+        check("save reports 'validator OK'",
+              session.wait_for(b"validator OK", 15, start=save_mark) != -1)
+        session.send(b"q")
+        exited = True
+        try:
+            session.child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            exited = False
+        check("quits on q", exited)
+    finally:
+        session.close()
+        log = session.snapshot()
+
+    try:
+        with open(session.world, "rb") as handle:
+            world = json.loads(handle.read())
+        room = next(r for r in world["rooms"] if r["id"] == "bedroom")
+        grid = W.rasterize(room)
+        missing = [c for c in BRUSH_FOOTPRINT
+                   if not grid[c[1] * W.COLS + c[0]]]
+        toggled = grid[TOGGLE_CELL[1] * W.COLS + TOGGLE_CELL[0]]
+    except (OSError, ValueError, StopIteration, KeyError) as error:
+        missing = [f"unreadable: {error}"]
+        toggled = 0
+    check("saved world has the 3x3 footprint walkable", not missing,
+          f"missing {missing}")
+    check("saved world kept the double-toggled tile walkable", toggled == 1)
+
+    check_presentation(log, check)
+    check("no traceback", b"Traceback" not in log)
+    session.cleanup()
+    return report("toggle+brush", checks, log, verbose)
 
 
 def main():
@@ -351,6 +661,8 @@ def main():
     ok &= run_scenario("torture", True, verbose)
     ok &= run_scenario("hover", False, verbose, hover=True)
     ok &= run_scenario("hover-torture", True, verbose, hover=True)
+    ok &= run_drag_scenario(verbose)
+    ok &= run_toggle_brush_scenario(verbose)
     return 0 if ok else 1
 
 
