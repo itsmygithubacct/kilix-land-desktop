@@ -9,25 +9,28 @@ of assets/world/world.json, and asserts the full interactive contract:
             superset of 1002), OSC 22 crosshair pointer requested, kitty
             graphics a=T transmitted, status line written
   hovering  motion-only reports (cb 35, final 'M', NO button) sweeping
-            across cells retransmit the image (the drawn cursor tracks),
-            report hover coords in the status line, and leave the grid
-            byte-untouched: no paint/block, no dirty flag, walkable count
-            unchanged — then a normal press+drag+release still paints
+            across cells patch the displayed image with a=f frame edits
+            (the drawn cursor tracks — no full retransmit, wire bytes
+            under a hard budget), report hover coords in the status line,
+            and leave the grid byte-untouched: no paint/block, no dirty
+            flag, walkable count unchanged — then a normal
+            press+drag+release still paints
   painting  a left press + drag + release in SGR PIXEL coordinates (mode
             1016, the mode the live tab reports SET) flips the targeted grid
-            cells, the editor retransmits the image (second a=T)
+            cells, the editor patches the image (a=f edits)
   saving    's' rewrites world.json so the painted cells rasterize walkable
             and the file still passes tools/validate_world.py; 'q' exits 0
 
 Every scenario also parses the editor's full output stream and asserts the
-flicker-free presentation contract: frames are raw zlib-deflated RGBA
-(f=32,o=z at 960x540, decoded and length-checked), the two image ids
-alternate, the previous id is deleted only AFTER the replacing a=T — never
-between two consecutive transmits, and nothing before the first frame —
-and every present sits inside a DEC 2026 synchronized update (?2026h
-before each a=T, ?2026l after it).
+presentation contract: full frames are raw zlib-deflated RGBA (f=32,o=z at
+960x540, decoded and length-checked), the two image ids alternate, the
+previous id is deleted only AFTER the replacing a=T — never between two
+consecutive transmits, and nothing before the first frame; a=f edits are
+partial rects (f=32,o=z,r=1 with x,y,s,v, payload length-checked) that
+always target the image id currently on screen; and every present — full
+or edit batch — sits inside a DEC 2026 synchronized update.
 
-Five scenarios, all must pass:
+Seven scenarios, all must pass:
   clean          the whole mouse burst arrives in one read
   torture        the same bytes arrive in 3-byte fragments with 10ms gaps,
                  splitting every escape sequence across reads — what a pty
@@ -35,9 +38,16 @@ Five scenarios, all must pass:
   hover          the hover sweep (then press+drag+release) in one read
   hover-torture  the hover sweep through the same 3-byte fragmentation
   drag-cadence   a ~500ms continuous fragmented paint drag: presents during
-                 the gesture stay throttled (<= duration/80ms + 2) while
-                 EVERY swept cell still ends up painted in the saved world
-                 — frame encoding must never starve input
+                 the gesture stay throttled to the drag cadence while EVERY
+                 swept cell still ends up painted in the saved world — and
+                 the gesture is all a=f edits, never a mid-drag full frame
+  toggle+brush   left click toggles, [/] sizes the brush footprint
+  edit-coherence with KILIX_WALK_EDITOR_DEBUG_CHECKSUM=1 the editor
+                 byte-compares its patched scene cache against a fresh
+                 reference compose after every edit batch (paint + hover
+                 sequence must report coherence=ok, never DRIFT), and
+                 grid toggles / room switches still take the full-frame
+                 double-buffer delete-after-place path
 
 Usage:  test_walk_editor.py            verbose report with log evidence
         test_walk_editor.py --quick    one line per check, nonzero on failure
@@ -76,6 +86,10 @@ ROWS, COLS, XPIX, YPIX = 48, 212, 1908, 960
 PAINT_CELLS = [(8, 31), (9, 31), (10, 31), (11, 31), (12, 31)]
 
 APC_TRANSMIT = b"\x1b_Ga=T"
+APC_EDIT = b"\x1b_Ga=f"          # frame-edit load (first chunk or m= chain)
+SYNC_H = b"\x1b[?2026h"          # one bracket per present, full or edit
+# Whole a=f escape tokens (payload is base64, never contains ESC).
+EDIT_TOKEN = re.compile(rb"\x1b_Ga=f[^\x1b]*\x1b\\")
 
 # One token per kitty graphics APC (control[;payload]) or DEC 2026 flip.
 STREAM_TOKEN = re.compile(
@@ -85,11 +99,15 @@ STREAM_TOKEN = re.compile(
 def parse_presentation(log):
     """Tokenize the editor's output into ordered presentation events:
     ('sync', pos, 'h'|'l'), ('transmit', pos, {'id','keys','payload'}),
-    ('delete', pos, {'id','mode'}).  A chunked a=T (m=1 ... m=0) collapses
-    into one transmit event at the first chunk's position with the base64
-    payload joined across chunks."""
+    ('edit', pos, {'id','keys','payload'}), ('delete', pos,
+    {'id','mode'}).  A chunked a=T (m=1 ... m=0) collapses into one
+    transmit event at the first chunk's position with the base64 payload
+    joined across chunks; a chunked a=f collapses likewise (every a=f
+    chunk repeats a=f — kitty routes action-less chunks to the add path —
+    and only the first carries the rect geometry s=,v=,x=,y=)."""
     events = []
     open_transmit = None
+    open_edit = None
     for match in STREAM_TOKEN.finditer(log):
         if match.group(3) is not None:
             events.append(("sync", match.start(), match.group(3).decode()))
@@ -105,6 +123,18 @@ def parse_presentation(log):
                 events.append(("transmit", open_transmit["pos"],
                                open_transmit))
                 open_transmit = None
+        elif keys.get("a") == "f":
+            if "s" in keys:                 # first chunk: rect geometry
+                open_edit = {"pos": match.start(),
+                             "id": int(keys.get("i", 0)), "keys": keys,
+                             "payload": bytearray(payload)}
+            elif open_edit is not None:     # continuation chunk
+                open_edit["payload"].extend(payload)
+            else:
+                continue
+            if keys.get("m", "0") != "1":
+                events.append(("edit", open_edit["pos"], open_edit))
+                open_edit = None
         elif keys.get("a") == "d":
             events.append(("delete", match.start(),
                            {"id": int(keys.get("i", 0)),
@@ -126,6 +156,7 @@ def check_presentation(log, check):
     # ids is presentation cleanup, not part of the frame contract.
     deletes = [(pos, info) for kind, pos, info in events
                if kind == "delete" and info["mode"] == "i"]
+    edits = [(pos, info) for kind, pos, info in events if kind == "edit"]
     syncs = [(pos, which) for kind, pos, which in events if kind == "sync"]
     check("presents at least one frame", bool(transmits))
     if not transmits:
@@ -170,18 +201,45 @@ def check_presentation(log, check):
     check("previous id deleted only AFTER the new a=T", order_ok,
           order_detail)
     sync_ok, sync_detail = True, ""
-    for tpos in (t[1] for t in transmits):
+    for tpos in sorted([t[1] for t in transmits] + [e[0] for e in edits]):
         before = [which for pos, which in syncs if pos < tpos]
         after = [which for pos, which in syncs if pos > tpos]
         if not before or before[-1] != "h":
             sync_ok, sync_detail = \
-                False, f"transmit at {tpos} not preceded by ?2026h"
+                False, f"present at {tpos} not preceded by ?2026h"
             break
         if not after or after[0] != "l":
             sync_ok, sync_detail = \
-                False, f"transmit at {tpos} not followed by ?2026l"
+                False, f"present at {tpos} not followed by ?2026l"
             break
     check("every present wrapped in DEC 2026 h/l", sync_ok, sync_detail)
+    if edits:
+        bad = [info["keys"] for _, info in edits
+               if not (info["keys"].get("f") == "32"
+                       and info["keys"].get("o") == "z"
+                       and info["keys"].get("r") == "1"
+                       and all(k in info["keys"] for k in "xysv"))]
+        check("edits are partial-rect a=f (f=32,o=z,r=1 with x,y,s,v)",
+              not bad, f"bad keys={bad[:1]}")
+        info0 = edits[0][1]
+        try:
+            raw = zlib.decompress(
+                base64.b64decode(bytes(info0["payload"])))
+            want = int(info0["keys"].get("s", 0)) * \
+                int(info0["keys"].get("v", 0)) * 4
+            check("edit payload decodes to its rect byte count",
+                  want > 0 and len(raw) == want, f"{len(raw)} != {want}")
+        except (ValueError, zlib.error) as error:
+            check("edit payload decodes to its rect byte count", False,
+                  f"decode failed: {error}")
+
+        def shown_at(pos):
+            shown = [t[2]["id"] for t in transmits if t[1] < pos]
+            return shown[-1] if shown else None
+
+        check("edits target the displayed image id",
+              all(info["id"] == shown_at(pos) for pos, info in edits),
+              f"ids={[(pos, info['id']) for pos, info in edits[:4]]}")
 
 
 def load_editor_module():
@@ -268,7 +326,7 @@ def hover_burst():
 class Session:
     """One editor run on a pty with the live winsize, temp assets tree."""
 
-    def __init__(self):
+    def __init__(self, env_extra=None):
         self.tmp = tempfile.mkdtemp(prefix="walk_editor_test_")
         world_dir = os.path.join(self.tmp, "assets/world")
         os.makedirs(world_dir)
@@ -284,6 +342,7 @@ class Session:
         env = dict(os.environ,
                    KILIX_LAND_DESKTOP_ASSETS=self.tmp,
                    TERM="xterm-kitty")
+        env.update(env_extra or {})
         self.child = subprocess.Popen(
             [sys.executable, EDITOR], stdin=slave, stdout=slave,
             stderr=slave, env=env, start_new_session=True)
@@ -352,6 +411,22 @@ def status_rooms(log):
     return seen
 
 
+def wait_for_any(session, needles, timeout, start=0):
+    """-> earliest offset of any needle at/after start, or -1 on timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snapshot = session.snapshot()
+        hits = [i for i in (snapshot.find(needle, start)
+                            for needle in needles) if i != -1]
+        if hits:
+            return min(hits)
+        time.sleep(0.05)
+    return -1
+
+
+IMAGE_UPDATE = (APC_TRANSMIT, APC_EDIT)   # either proves a screen update
+
+
 def send_burst(session, burst, fragmented):
     if fragmented:
         for i in range(0, len(burst), 3):
@@ -372,6 +447,7 @@ def report(label, checks, log, verbose):
     if verbose or not ok:
         rooms = status_rooms(log)
         print(f"    evidence: a=T count={log.count(APC_TRANSMIT)}, "
+              f"a=f chunk count={log.count(APC_EDIT)}, "
               f"status rooms seen={rooms}")
         if b"Traceback" in log:
             tail = log[log.find(b"Traceback"):][:600]
@@ -400,7 +476,7 @@ def run_scenario(name, fragmented, verbose, hover=False):
 
         if hover:
             # Motion-only sweep with NO button press: the drawn cursor
-            # must track (image retransmit + hover status), the grid must
+            # must track (a=f image patches + hover status), the grid must
             # stay byte-identical (no paint/block notes, no dirty flag,
             # walkable count unchanged) — and painting must still work
             # afterwards (the shared paint phase below runs regardless).
@@ -409,14 +485,24 @@ def run_scenario(name, fragmented, verbose, hover=False):
             pre_counts = re.findall(rb"walkable (\d+)/",
                                     session.snapshot()[:hover_mark])
             send_burst(session, hover_burst(), fragmented)
-            hover_t = session.wait_for(APC_TRANSMIT, 6, start=hover_mark)
-            check("retransmits image on hover sweep (cursor tracks)",
+            hover_t = wait_for_any(session, IMAGE_UPDATE, 6,
+                                   start=hover_mark)
+            check("updates image on hover sweep (cursor tracks)",
                   hover_t != -1)
             last_cell = "cell {},{}".format(*HOVER_CELLS[-1]).encode()
             check("status reports final hover cell",
                   session.wait_for(last_cell, 6, start=hover_mark) != -1)
             time.sleep(0.3)              # trailing repaint + status settle
             hover_log = session.snapshot()[hover_mark:]
+            check("hover sweep is a=f edits only (no full a=T)",
+                  APC_EDIT in hover_log
+                  and APC_TRANSMIT not in hover_log)
+            wire = sum(match.end() - match.start()
+                       for match in EDIT_TOKEN.finditer(hover_log))
+            budget = 500_000 if fragmented else 100_000
+            check(f"hover sweep wire under {budget // 1000}KB "
+                  "(was ~1.5MB per cell crossed)",
+                  0 < wire <= budget, f"a=f wire bytes={wire}")
             check("hover never paints (no paint/block mouse notes)",
                   not re.search(rb"cell \d+,\d+ (paint|block)", hover_log))
             check("hover leaves grid clean (no dirty flag)",
@@ -429,8 +515,11 @@ def run_scenario(name, fragmented, verbose, hover=False):
         mark = len(session.snapshot())
         send_burst(session, mouse_burst(), fragmented)
 
-        second_t = session.wait_for(APC_TRANSMIT, 6, start=mark)
-        check("retransmits image after painting (2nd a=T)", second_t != -1)
+        second_t = wait_for_any(session, IMAGE_UPDATE, 6, start=mark)
+        check("updates image after painting (a=f edit or a=T)",
+              second_t != -1)
+        check("paint drag is patched via a=f edits",
+              session.wait_for(APC_EDIT, 6, start=mark) != -1)
 
         time.sleep(0.5)                      # let the input queue drain
         save_mark = len(session.snapshot())
@@ -485,9 +574,10 @@ def run_scenario(name, fragmented, verbose, hover=False):
 
 def run_drag_scenario(verbose):
     """~500ms continuous fragmented paint drag: presents throttled to the
-    80ms drag cadence (<= duration/80ms + 2 during the gesture), yet every
-    swept cell ends up painted in the saved world — proof that frame
-    encoding never starves input processing."""
+    drag cadence (<= duration/cadence + 2 during the gesture) and carried
+    entirely by a=f edits, yet every swept cell ends up painted in the
+    saved world — proof that frame encoding never starves input
+    processing."""
     checks = []
 
     def check(label, ok, detail=""):
@@ -510,16 +600,19 @@ def run_drag_scenario(verbose):
             time.sleep(pace)
         duration = time.monotonic() - started
         during = session.snapshot()[mark:]
-        presents = during.count(APC_TRANSMIT)
-        budget = int(duration / 0.080) + 2
-        check(f"drag presents throttled to 80ms cadence "
+        presents = during.count(SYNC_H)
+        cadence = W.DRAG_REPAINT_INTERVAL
+        budget = int(duration / cadence) + 2
+        check(f"drag presents throttled to {cadence * 1000:.0f}ms cadence "
               f"(<= {budget} in {duration * 1000:.0f}ms)",
               presents <= budget, f"saw {presents} presents")
         check("still presents during the drag", presents >= 1)
+        check("drag gesture is a=f edits only (no mid-drag full a=T)",
+              APC_EDIT in during and APC_TRANSMIT not in during)
         end_mark = mark + len(during)
         session.send(release)
         check("trailing repaint after release",
-              session.wait_for(APC_TRANSMIT, 3, start=end_mark) != -1)
+              wait_for_any(session, IMAGE_UPDATE, 3, start=end_mark) != -1)
         time.sleep(0.4)                  # let the input queue drain
         save_mark = len(session.snapshot())
         session.send(b"s")
@@ -651,6 +744,93 @@ def run_toggle_brush_scenario(verbose):
     return report("toggle+brush", checks, log, verbose)
 
 
+def run_coherence_scenario(verbose):
+    """Screen-vs-cache coherence: with KILIX_WALK_EDITOR_DEBUG_CHECKSUM=1
+    every edit-mode present byte-compares the incrementally patched scene
+    cache against a fresh reference compose_scene and reports
+    coherence=ok or coherence=DRIFT in an APC the harness greps — so any
+    drift introduced by the a=f patching is caught, not painted over.
+    Also proves whole-scene changes still take the full-frame
+    double-buffer path: grid toggles ('g' twice) and a room switch ('n')
+    must each produce an a=T (check_presentation then holds their
+    alternating ids to the delete-after-place contract), and edits after
+    those full presents must still be coherent."""
+    checks = []
+
+    def check(label, ok, detail=""):
+        checks.append((label, bool(ok), detail))
+
+    session = Session(env_extra={"KILIX_WALK_EDITOR_DEBUG_CHECKSUM": "1"})
+    try:
+        check("transmits kitty image (a=T)",
+              session.wait_for(APC_TRANSMIT, 15) != -1)
+        check("writes status line",
+              session.wait_for(b"walk-editor  ", 5) != -1)
+        time.sleep(0.3)                  # startup repaints settle
+        sweep_mark = len(session.snapshot())
+        send_burst(session, hover_burst(), False)
+        check("hover sweep patches via a=f",
+              session.wait_for(APC_EDIT, 6, start=sweep_mark) != -1)
+        paint_mark = len(session.snapshot())
+        send_burst(session, mouse_burst(), False)
+        check("paint drag patches via a=f",
+              session.wait_for(APC_EDIT, 6, start=paint_mark) != -1)
+        time.sleep(0.5)                  # trailing flush + audits settle
+        edit_log = session.snapshot()[sweep_mark:]
+        check("edit presents ran the coherence audit",
+              b"coherence=ok" in edit_log)
+        check("paint+hover edits kept cache == reference compose",
+              b"coherence=DRIFT" not in edit_log)
+        check("no full a=T during the paint+hover edit sequence",
+              APC_TRANSMIT not in edit_log)
+        toggle_mark = len(session.snapshot())
+        session.send(b"g")
+        check("grid toggle off takes the full-frame a=T path",
+              session.wait_for(APC_TRANSMIT, 5, start=toggle_mark) != -1)
+        time.sleep(0.2)
+        toggle2_mark = len(session.snapshot())
+        session.send(b"g")
+        check("grid toggle back on takes the full-frame a=T path too",
+              session.wait_for(APC_TRANSMIT, 5, start=toggle2_mark) != -1)
+        time.sleep(0.2)
+        rehover_mark = len(session.snapshot())
+        send_burst(session, hover_burst(), False)
+        check("edits resume after the full presents",
+              session.wait_for(APC_EDIT, 6, start=rehover_mark) != -1)
+        time.sleep(0.4)
+        rehover_log = session.snapshot()[rehover_mark:]
+        check("post-toggle edits still coherent (audit ok, no drift)",
+              b"coherence=ok" in rehover_log
+              and b"coherence=DRIFT" not in rehover_log)
+        switch_mark = len(session.snapshot())
+        session.send(b"n")
+        check("room switch takes the full-frame a=T path",
+              session.wait_for(APC_TRANSMIT, 5, start=switch_mark) != -1)
+        check("status line shows the switched room",
+              session.wait_for(b"walk-editor  ", 5,
+                               start=switch_mark) != -1)
+        session.send(b"q")               # room switch cleared the dirty flag
+        exited = True
+        try:
+            session.child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            exited = False
+        check("quits on q", exited)
+    finally:
+        session.close()
+        log = session.snapshot()
+
+    rooms = status_rooms(log)
+    check("room actually switched before quitting",
+          len(rooms) >= 2 and rooms[-1] != "bedroom", f"rooms={rooms}")
+    check("no cache drift anywhere in the session",
+          b"coherence=DRIFT" not in log)
+    check_presentation(log, check)
+    check("no traceback", b"Traceback" not in log)
+    session.cleanup()
+    return report("edit-coherence (checksum audit)", checks, log, verbose)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true",
@@ -663,6 +843,7 @@ def main():
     ok &= run_scenario("hover-torture", True, verbose, hover=True)
     ok &= run_drag_scenario(verbose)
     ok &= run_toggle_brush_scenario(verbose)
+    ok &= run_coherence_scenario(verbose)
     return 0 if ok else 1
 
 

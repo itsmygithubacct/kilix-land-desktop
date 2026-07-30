@@ -23,24 +23,40 @@ outline previews its full footprint.  Keys:
   [ / ]  brush size               s  save               u  undo
   r  reload from json             q  quit
 
-Presentation is flicker-free double buffering modeled on the engine's
-kitty-framebuffer presenter: each frame goes out in ONE write inside a DEC
-2026 synchronized update as raw zlib-deflated RGBA (f=32,o=z) under the
-image id NOT currently on screen; only after the replacement is placed is
-the old id deleted (a=d,d=i), so the screen never shows a blank or
-half-decoded state.  The scene (plate + walk tint + grid + markers) is
-composed once and cached; a hover repaint only re-composites the drawn
-cursor onto a copy.  Pending input is always drained before any
-composition; while a drag paints, presents are throttled to one per 80ms
-(pure hover keeps the 40ms cadence) with a trailing flush when the gesture
-ends or input goes quiet.  KILIX_WALK_EDITOR_TRACE=<path> appends a
-timestamped event trace (mouse events, paints, presents, dropped/deferred
-repaints); unset, it costs nothing.
+Presentation has two tiers.  Whole-scene changes (room/style switch, grid
+toggle, undo, reload, first frame) use flicker-free double buffering
+modeled on the engine's kitty-framebuffer presenter: the frame goes out in
+ONE write inside a DEC 2026 synchronized update as raw zlib-deflated RGBA
+(f=32,o=z) under the image id NOT currently on screen; only after the
+replacement is placed is the old id deleted (a=d,d=i), so the screen never
+shows a blank or half-decoded state.  Hover motion and painting instead
+patch ONLY the damaged rectangles of the image already on screen with
+kitty's animation frame-edit protocol (a=f,r=1 edits the root frame in
+place at x=,y= offsets; parameter names verified against kitty's
+graphics.c): the old and new cursor hairline strips, the brush-footprint
+rects, and the painted cells — a few KB on the wire instead of ~1.5 MB.
+The scene (plate + walk tint + grid + markers) is composed once and
+cached; painting a cell recomposites only that region of the cache (from
+the same layers compose_scene stacks, so the cache stays byte-identical
+to a fresh compose), and if a batch of edits would cover more than ~35%
+of the frame the full double-buffered present is used instead.  Pending
+input is always drained before any composition; while a drag paints,
+presents are throttled to one per 50ms (pure hover keeps a 33ms cadence)
+with a trailing flush when the gesture ends or input goes quiet.
+KILIX_WALK_EDITOR_TRACE=<path> appends a timestamped event trace (mouse
+events, paints, presents with mode/rects/bytes/ms, dropped/deferred
+repaints); unset, it costs nothing.  KILIX_WALK_EDITOR_DEBUG_CHECKSUM=1
+byte-compares the patched scene cache against a fresh compose_scene after
+every edit-mode present and reports coherence=ok/DRIFT (an APC the
+harness greps; kitty ignores it).
 
 Headless modes: --render OUT.png [--room ID] [--style STYLE] [--hover X,Y]
 composes one frame (optionally with the drawn cursor at logical X,Y);
 --selftest (pure stdlib, no PIL) proves rasterize -> decompose ->
-rasterize is a fixpoint for every room and stays under the obstacle cap.
+rasterize is a fixpoint for every room and stays under the obstacle cap;
+--bench times every stage of the frame pipeline on --room/--style and
+prints a table plus wire throughput at the hover/drag cadences, then
+times the a=f frame-edit path and prints a before/after summary.
 """
 
 import argparse
@@ -68,8 +84,12 @@ STYLES = ("legend", "chumrunner", "fantasy", "pleb-bound")
 DISPLAY_W, DISPLAY_H = 960, 540
 SCALE = DISPLAY_W // LOGICAL_W
 IMAGE_IDS = (77, 78)            # dual alternating kitty image ids
-REPAINT_INTERVAL = 0.040        # min seconds between presents (hover)
-DRAG_REPAINT_INTERVAL = 0.080   # present cadence while a drag paints
+REPAINT_INTERVAL = 0.033        # min seconds between presents (hover)
+DRAG_REPAINT_INTERVAL = 0.050   # present cadence while a drag paints
+# An update whose damage rects exceed this fraction of the frame area is
+# cheaper as one full double-buffered present than as a=f edits.
+EDIT_AREA_FRACTION = 0.35
+CURSOR_MARGIN = 2               # px slack around hairlines/outline damage
 
 _TRACE_PATH = os.environ.get("KILIX_WALK_EDITOR_TRACE")
 _trace_handle = None
@@ -249,22 +269,34 @@ def load_plate(style, plate):
     return cached
 
 
-def compose_scene(world, room, grid, style, show_grid=True):
-    """-> RGBA Image of plate + walk tint + grid + context markers at
-    960x540 — everything EXCEPT the drawn cursor, so the run loop caches
-    the result and rebuilds it only when paint/room/style/grid change.
+def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS):
+    """-> RGBA walkable-tint image for a cell region, NEAREST-scaled to
+    display pixels.  The display is an exact integer multiple of the cell
+    grid, so a region tint is byte-identical to the same crop of the full
+    tint — the regional recompose can never drift from compose_scene."""
+    from PIL import Image
+    if cols == COLS and rows == ROWS and not c0x and not c0y:
+        cells = bytes(grid)
+    else:
+        cells = b"".join(
+            bytes(grid[(c0y + r) * COLS + c0x:
+                       (c0y + r) * COLS + c0x + cols])
+            for r in range(rows))
+    cell_px = CELL * SCALE
+    alpha = Image.frombytes("L", (cols, rows),
+                            cells.translate(_WALK_ALPHA)).resize(
+        (cols * cell_px, rows * cell_px), Image.NEAREST)
+    tint = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
+    tint.putalpha(alpha)
+    return tint
 
-    The walkable tint is one COLSxROWS alpha mask scaled with NEAREST and
-    alpha_composited once — not one rectangle per cell — so a rebuild
-    mid-drag stays well under 100ms."""
+
+def scene_overlay(world, room, show_grid=True):
+    """-> RGBA overlay of grid lines + context markers (doors, object
+    rects, NPC anchors, incoming spawns) — the layer compose_scene stacks
+    above the tinted plate.  Cached by the run loop alongside the scene
+    so painting can recomposite single regions."""
     from PIL import Image, ImageDraw
-    base = load_plate(style, room["plate"])
-    walk_alpha = Image.frombytes(
-        "L", (COLS, ROWS), bytes(grid).translate(_WALK_ALPHA)).resize(
-        (DISPLAY_W, DISPLAY_H), Image.NEAREST)
-    walk_tint = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (255, 255, 255, 0))
-    walk_tint.putalpha(walk_alpha)
-    frame = Image.alpha_composite(base, walk_tint)
     overlay = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     cell_px = CELL * SCALE
@@ -293,7 +325,122 @@ def compose_scene(world, room, grid, style, show_grid=True):
     for x, y in incoming_spawns(world, room["id"]):
         x, y = x * SCALE, y * SCALE
         draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(90, 230, 120, 230))
-    return Image.alpha_composite(frame, overlay)
+    return overlay
+
+
+def compose_scene(world, room, grid, style, show_grid=True):
+    """-> RGBA Image of plate + walk tint + grid + context markers at
+    960x540 — everything EXCEPT the drawn cursor, so the run loop caches
+    the result and rebuilds it only when room/style/grid-toggle change.
+    This is the REFERENCE composition: recompose_cells patches the cached
+    scene from the same three layers, so after any sequence of edits the
+    cache equals what this function would produce.
+
+    The walkable tint is one COLSxROWS alpha mask scaled with NEAREST and
+    alpha_composited once — not one rectangle per cell — so a rebuild
+    mid-drag stays well under 100ms."""
+    from PIL import Image
+    base = load_plate(style, room["plate"])
+    frame = Image.alpha_composite(base, walk_tint(grid))
+    return Image.alpha_composite(frame, scene_overlay(world, room,
+                                                      show_grid))
+
+
+def recompose_cells(scene, base, overlay, grid, c0x, c0y, c1x, c1y):
+    """Recomposite one inclusive cell region of the cached scene in place
+    from the same layers compose_scene stacks (plate crop + region walk
+    tint + overlay crop) and -> the patched pixel rect (x, y, w, h).
+    Exact: crop commutes with the per-pixel alpha_composite and with the
+    integer NEAREST cell scaling, so the patched cache stays
+    byte-identical to a fresh compose_scene."""
+    from PIL import Image
+    cell_px = CELL * SCALE
+    box = (c0x * cell_px, c0y * cell_px,
+           (c1x + 1) * cell_px, (c1y + 1) * cell_px)
+    patch = Image.alpha_composite(
+        base.crop(box), walk_tint(grid, c0x, c0y,
+                                  c1x - c0x + 1, c1y - c0y + 1))
+    scene.paste(Image.alpha_composite(patch, overlay.crop(box)), box[:2])
+    return (box[0], box[1], box[2] - box[0], box[3] - box[1])
+
+
+def clamp_rect(x, y, w, h):
+    """Clip a pixel rect to the frame; -> (x, y, w, h) or None if empty."""
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(DISPLAY_W, x + w), min(DISPLAY_H, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def cursor_damage(hover, brush):
+    """-> pixel rects covering every pixel compose_cursor may touch for
+    this hover state: the full-width/height hairline strips through the
+    pointer (which also cover the dot at their intersection) and the
+    brush-footprint outline rect, each with CURSOR_MARGIN px of slack for
+    PIL's float-coordinate rounding."""
+    if hover is None:
+        return []
+    margin = CURSOR_MARGIN
+    hx, hy = int(hover[0] * SCALE), int(hover[1] * SCALE)
+    rects = [clamp_rect(0, hy - margin, DISPLAY_W, 2 * margin + 1),
+             clamp_rect(hx - margin, 0, 2 * margin + 1, DISPLAY_H)]
+    hcx, hcy = int(hover[0] // CELL), int(hover[1] // CELL)
+    if 0 <= hcx < COLS and 0 <= hcy < ROWS:
+        c0x, c0y, c1x, c1y = brush_footprint(hcx, hcy, brush)
+        cell_px = CELL * SCALE
+        rects.append(clamp_rect(
+            c0x * cell_px - margin, c0y * cell_px - margin,
+            (c1x - c0x + 1) * cell_px + 2 * margin,
+            (c1y - c0y + 1) * cell_px + 2 * margin))
+    return [rect for rect in rects if rect]
+
+
+def prune_rects(rects):
+    """Drop duplicates and rects fully contained in another (largest
+    first).  Remaining overlaps are harmless: every rect is cropped from
+    the same composed frame, so double-sent pixels are identical."""
+    kept = []
+    for rect in sorted(set(rects), key=lambda r: (-(r[2] * r[3]), r)):
+        x, y, w, h = rect
+        if not any(ox <= x and oy <= y and x + w <= ox + ow
+                   and y + h <= oy + oh for ox, oy, ow, oh in kept):
+            kept.append(rect)
+    return kept
+
+
+def edit_packet(image_id, frame, rects):
+    """-> APC string patching the given pixel rects of the DISPLAYED
+    image in place via kitty's animation frame-edit protocol: one a=f
+    load per rect editing the root frame (r=1) at x=,y= with size s=,v=,
+    payload f=32,o=z zlib-1 RGBA in 4096-char base64 chunks.  Parameter
+    names verified against kitty graphics.c/parse-graphics-command.h:
+    r= is frame_number (1 = root frame), x=/y= are x_offset/y_offset,
+    s=/v= are data_width/data_height, and every continuation chunk must
+    repeat a=f or it would be routed to the a=T add path.  The edit
+    composes onto the existing frame; our pixels are fully opaque, so the
+    default alpha-blend equals replacement (the doc'd X=1 replace key is
+    not wired to compose_mode in the kilix fork's parser, so it is not
+    relied on).  kitty then does a partial GPU texture upload of exactly
+    the edited region (update_current_frame_region)."""
+    parts = []
+    for x, y, w, h in rects:
+        payload = base64.standard_b64encode(zlib.compress(
+            frame.crop((x, y, x + w, y + h)).tobytes(), 1)).decode()
+        first = True
+        while True:
+            chunk, payload = payload[:4096], payload[4096:]
+            more = 1 if payload else 0
+            if first:
+                parts.append(f"\x1b_Ga=f,i={image_id},r=1,x={x},y={y},"
+                             f"s={w},v={h},f=32,o=z,q=2,m={more};"
+                             f"{chunk}\x1b\\")
+                first = False
+            else:
+                parts.append(f"\x1b_Ga=f,m={more},q=2;{chunk}\x1b\\")
+            if not payload:
+                break
+    return "".join(parts)
 
 
 def compose_cursor(scene, hover, brush=1):
@@ -340,6 +487,140 @@ def compose(world, room, grid, style, show_grid=True, hover=None, brush=1):
     buffer = io.BytesIO()
     frame.save(buffer, format="PNG", compress_level=1)
     return buffer.getvalue()
+
+
+def bench(room_id, style, iterations=100):
+    """--bench: time each stage of the per-frame pipeline on a real scene
+    and print a table plus wire throughput at the hover/drag cadences,
+    then time the a=f frame-edit path (one hover-cell move, one painted
+    cell) and print a before/after summary.  Measures only — changes
+    nothing about rendering."""
+    world = load_world()
+    room = next((r for r in world["rooms"] if r["id"] == room_id),
+                world["rooms"][0])
+    grid = rasterize(room)
+    hover = (LOGICAL_W / 2.0, LOGICAL_H / 2.0)
+    load_plate(style, room["plate"])            # warm the plate cache
+
+    def clock(fn):
+        """-> (mean ms, median ms, min ms, last result)."""
+        times, result = [], None
+        for _ in range(iterations):
+            start = time.perf_counter()
+            result = fn()
+            times.append((time.perf_counter() - start) * 1000.0)
+        times.sort()
+        return (sum(times) / len(times), times[len(times) // 2],
+                times[0], result)
+
+    def assemble(compressed):
+        """present()'s wire packet for one frame, minus the tty: base64
+        then the same 4096-char chunk loop, header shape, and trailing
+        placement delete."""
+        payload = base64.standard_b64encode(compressed).decode()
+        parts, first = ["\x1b[?2026h", "\x1b[H"], True
+        while payload:
+            chunk, payload = payload[:4096], payload[4096:]
+            more = 1 if payload else 0
+            if first:
+                parts.append(f"\x1b_Ga=T,f=32,s={DISPLAY_W},v={DISPLAY_H},"
+                             f"o=z,i={IMAGE_IDS[0]},c=177,r=45,q=2,"
+                             f"m={more};{chunk}\x1b\\")
+                first = False
+            else:
+                parts.append(f"\x1b_Gm={more},q=2;{chunk}\x1b\\")
+        parts.append(f"\x1b_Ga=d,d=i,i={IMAGE_IDS[1]},q=2\x1b\\")
+        parts.append("\x1b[?2026l")
+        return "".join(parts)
+
+    scene = compose_scene(world, room, grid, style)
+    rows = [("compose_scene",
+             clock(lambda: compose_scene(world, room, grid, style)))]
+    stats = clock(lambda: compose_cursor(scene, hover))
+    frame = stats[3]
+    rows.append(("compose_cursor", stats))
+    stats = clock(frame.tobytes)
+    rgba = stats[3]
+    rows.append(("tobytes", stats))
+    stats = clock(lambda: zlib.compress(rgba, 1))
+    packed = stats[3]
+    rows.append((f"zlib-1        -> {len(packed):>9,} B", stats))
+    stats = clock(lambda: assemble(packed))
+    wire = len(stats[3])
+    rows.append((f"base64+chunks -> {wire:>9,} B wire", stats))
+
+    def hover_frame():                          # scene cache HIT
+        return assemble(zlib.compress(
+            compose_cursor(scene, hover).tobytes(), 1))
+
+    def dirty_frame():                          # scene cache invalidated
+        return assemble(zlib.compress(compose_cursor(
+            compose_scene(world, room, grid, style),
+            hover).tobytes(), 1))
+
+    hover_full = clock(hover_frame)
+    rows.append(("TOTAL hover frame (full a=T)", hover_full))
+    dirty_full = clock(dirty_frame)
+    rows.append(("TOTAL paint-dirty frame (full a=T)", dirty_full))
+
+    # --- a=f frame-edit path: what one hover/paint update costs now.
+    # Damage model of the live editor: old cursor rects + new cursor
+    # rects for a one-cell pointer move; paint adds the brush footprint
+    # recomposited into the scene cache (idempotent here — the grid is
+    # unchanged, so the bench never mutates the scene it measures).
+    hover_to = (hover[0] + CELL, hover[1])
+    overlay = scene_overlay(world, room, True)
+    base = load_plate(style, room["plate"])
+
+    def hover_edit_update():
+        rects = prune_rects(cursor_damage(hover, 1)
+                            + cursor_damage(hover_to, 1))
+        return edit_packet(IMAGE_IDS[0],
+                           compose_cursor(scene, hover_to), rects), rects
+
+    def paint_edit_update():
+        cx, cy = int(hover_to[0] // CELL), int(hover_to[1] // CELL)
+        rects = [recompose_cells(scene, base, overlay, grid,
+                                 *brush_footprint(cx, cy, 1))]
+        rects = prune_rects(rects + cursor_damage(hover, 1)
+                            + cursor_damage(hover_to, 1))
+        return edit_packet(IMAGE_IDS[0],
+                           compose_cursor(scene, hover_to), rects), rects
+
+    hover_edit = clock(hover_edit_update)
+    edit_wire, edit_rects = (len(hover_edit[3][0]), len(hover_edit[3][1]))
+    rows.append((f"EDIT hover update  -> {edit_wire:>9,} B wire",
+                 hover_edit))
+    paint_edit = clock(paint_edit_update)
+    paint_wire, paint_nrects = (len(paint_edit[3][0]),
+                                len(paint_edit[3][1]))
+    rows.append((f"EDIT paint update  -> {paint_wire:>9,} B wire",
+                 paint_edit))
+
+    print(f"walk-editor bench: room={room['id']} style={style} "
+          f"{iterations} iterations/stage  "
+          f"(frame {DISPLAY_W}x{DISPLAY_H} RGBA = {len(rgba):,} B)")
+    print(f"{'stage':<38} {'mean ms':>8} {'median':>8} {'min':>8}")
+    for label, (mean, median, best, _) in rows:
+        print(f"{label:<38} {mean:>8.2f} {median:>8.2f} {best:>8.2f}")
+    for label, interval in (
+            (f"hover @{REPAINT_INTERVAL * 1000:.0f}ms", REPAINT_INTERVAL),
+            (f"drag  @{DRAG_REPAINT_INTERVAL * 1000:.0f}ms",
+             DRAG_REPAINT_INTERVAL)):
+        print(f"wire {label} full-frame: {wire / interval / 1e6:.1f} MB/s "
+              f"({wire / 1e6:.2f} MB/frame)")
+    print("before/after (median, one pointer-cell move):")
+    print(f"  hover: full {hover_full[1]:.2f} ms / {wire:,} B  ->  "
+          f"edit ({edit_rects} rects) {hover_edit[1]:.2f} ms / "
+          f"{edit_wire:,} B   "
+          f"[{hover_full[1] / hover_edit[1]:.1f}x less CPU, "
+          f"{wire / edit_wire:.1f}x less wire]")
+    print(f"  paint: full {dirty_full[1]:.2f} ms / {wire:,} B  ->  "
+          f"edit ({paint_nrects} rects) {paint_edit[1]:.2f} ms / "
+          f"{paint_wire:,} B   "
+          f"[{dirty_full[1] / paint_edit[1]:.1f}x less CPU, "
+          f"{wire / paint_wire:.1f}x less wire]")
+    return 0
 
 
 class Terminal:
@@ -435,6 +716,19 @@ class Terminal:
         self.write(packet)
         self.current_id = new_id
         return new_id, len(packet)
+
+    def edit(self, frame, rects, status_lines):
+        """Patch only the damaged rects of the image CURRENTLY on screen
+        (a=f frame edits of its root frame — see edit_packet), plus the
+        status lines, all inside one DEC 2026 synchronized update and one
+        write.  No placement changes hands: kitty updates the texture
+        region in place, so there is nothing to delete and no flicker
+        window.  -> bytes written."""
+        packet = ("\x1b[?2026h" + edit_packet(self.current_id, frame,
+                                              rects)
+                  + self.status_text(*status_lines) + "\x1b[?2026l")
+        self.write(packet)
+        return len(packet)
 
     def status_text(self, *lines):
         parts = []
@@ -558,7 +852,12 @@ def run_editor(initial_room, initial_style):
     hover = None                # logical (x, y) floats, or None
     hover_cell = None           # (cx, cy) the drawn cursor highlights
     scene_cache = None          # composed scene WITHOUT the cursor
+    overlay_cache = None        # grid+markers layer, for region recompose
+    presented_hover = None      # hover state as last PRESENTED on screen
+    presented_brush = 1         # brush size as last presented
+    paint_rects = []            # cache regions patched but not yet sent
     last_present = None         # monotonic time of last present (trace)
+    debug_checksum = bool(os.environ.get("KILIX_WALK_EDITOR_DEBUG_CHECKSUM"))
 
     with Terminal() as terminal:
         def status_lines():
@@ -579,18 +878,60 @@ def run_editor(initial_room, initial_style):
                 f"u undo · r reload · q quit   {message}")
 
         def repaint():
-            nonlocal scene_cache, last_present
-            if scene_cache is None:
-                scene_cache = compose_scene(world, rooms[room_index], grid,
-                                            STYLES[style_index], show_grid)
-            frame = compose_cursor(scene_cache, hover, brush)
-            image_id, wrote = terminal.present(frame.tobytes(),
-                                               status_lines())
+            """One screen update.  When the scene cache is valid and an
+            image is already on screen, patch only the damaged rects (old
+            + new cursor, painted cells) with a=f edits; whole-scene
+            changes — or damage beyond EDIT_AREA_FRACTION of the frame —
+            take the double-buffered full present unchanged."""
+            nonlocal scene_cache, overlay_cache, last_present
+            nonlocal presented_hover, presented_brush, paint_rects
+            started = time.perf_counter()
+            mode, rects = "full", []
+            if scene_cache is not None and terminal.current_id is not None:
+                rects = prune_rects(
+                    cursor_damage(presented_hover, presented_brush)
+                    + cursor_damage(hover, brush) + paint_rects)
+                if sum(w * h for _, _, w, h in rects) <= \
+                        EDIT_AREA_FRACTION * DISPLAY_W * DISPLAY_H:
+                    mode = "edit"
+            if mode == "edit":
+                if rects:
+                    frame = compose_cursor(scene_cache, hover, brush)
+                    wrote = terminal.edit(frame, rects, status_lines())
+                else:
+                    terminal.status(*status_lines())
+                    wrote = 0
+                if debug_checksum:
+                    reference = compose_scene(world, rooms[room_index],
+                                              grid, STYLES[style_index],
+                                              show_grid)
+                    verdict = ("ok" if reference.tobytes()
+                               == scene_cache.tobytes() else "DRIFT")
+                    terminal.write(f"\x1b_Kwalk-editor coherence={verdict}"
+                                   f" rects={len(rects)}\x1b\\")
+                    if TRACE:
+                        TRACE(f"coherence {verdict}")
+            else:
+                if scene_cache is None:
+                    scene_cache = compose_scene(world, rooms[room_index],
+                                                grid, STYLES[style_index],
+                                                show_grid)
+                    overlay_cache = scene_overlay(world, rooms[room_index],
+                                                  show_grid)
+                frame = compose_cursor(scene_cache, hover, brush)
+                _, wrote = terminal.present(frame.tobytes(),
+                                            status_lines())
+            presented_hover, presented_brush = hover, brush
+            paint_rects = []
             if TRACE:
                 now = time.monotonic()
                 gap = ("first" if last_present is None else
                        f"{(now - last_present) * 1000:.1f}ms")
-                TRACE(f"present id={image_id} bytes={wrote} since={gap}")
+                TRACE(f"present mode={mode} "
+                      f"rects={len(rects) if mode == 'edit' else 'all'} "
+                      f"bytes={wrote} "
+                      f"ms={(time.perf_counter() - started) * 1000:.1f} "
+                      f"since={gap}")
                 last_present = now
 
         def note(text):
@@ -621,11 +962,13 @@ def run_editor(initial_room, initial_style):
 
         def switch_room(new_index):
             nonlocal room_index, grid, dirty, undo_stack, scene_cache
+            nonlocal overlay_cache
             room_index = new_index % len(rooms)
             grid = rasterize(rooms[room_index])
             undo_stack = []
             dirty = False
             scene_cache = None
+            overlay_cache = None
 
         repaint()
         last_draw = time.monotonic()
@@ -728,7 +1071,19 @@ def run_editor(initial_room, initial_style):
                 if apply_brush(grid, cx, cy, paint_value, brush):
                     dirty = True
                     need_image = True
-                    scene_cache = None
+                    if scene_cache is not None and \
+                            overlay_cache is not None:
+                        # Recomposite ONLY the painted footprint into the
+                        # cached scene (kept authoritative) and queue the
+                        # rect for the next a=f edit batch.
+                        paint_rects.append(recompose_cells(
+                            scene_cache,
+                            load_plate(STYLES[style_index],
+                                       rooms[room_index]["plate"]),
+                            overlay_cache, grid,
+                            *brush_footprint(cx, cy, brush)))
+                    else:
+                        scene_cache = None
                     if TRACE:
                         TRACE(f"paint cell={cx},{cy} value={paint_value} "
                               f"brush={brush}")
@@ -795,8 +1150,8 @@ def run_editor(initial_room, initial_style):
                     message = "reloaded"
                 need_image = True
             # Coalesce repaints: in 1003+1016 kitty reports every pixel of
-            # motion, so presents are throttled — one per 40ms for hover,
-            # one per 80ms while a drag paints.  A suppressed frame is not
+            # motion, so presents are throttled — one per 33ms for hover,
+            # one per 50ms while a drag paints.  A suppressed frame is not
             # lost — need_image stays set and the shortened select timeout
             # above delivers the trailing repaint once the gesture ends or
             # input goes quiet.  Status-only updates are a few bytes, so
@@ -830,9 +1185,14 @@ def main():
                         choices=range(1, BRUSH_MAX + 1),
                         help="with --render: hover footprint size")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--bench", action="store_true",
+                        help="time the frame pipeline on --room/--style "
+                             "and print a table (no tty needed)")
     arguments = parser.parse_args()
     if arguments.selftest:
         return selftest()
+    if arguments.bench:
+        return bench(arguments.room, arguments.style)
     if arguments.render:
         hover = None
         if arguments.hover:
