@@ -7,17 +7,26 @@ capacity constants in lockstep with src/kilix_land_desktop.h.
 """
 
 import json
+import os
 import sys
 
 LOGICAL_WIDTH = 480
 LOGICAL_HEIGHT = 270
+PLATE_WIDTH = 1280
+PLATE_HEIGHT = 720
 MAX_ROOMS = 16
 MAX_OBJECTS = 12
 MAX_DOORS = 4
 MAX_OBSTACLES = 64
 MAX_NPCS = 3
-MAX_OCCLUDERS = 12
-OCCLUDER_BASELINE_TOLERANCE = 0.001
+MAX_WALKBEHINDS = 15
+STYLES = ("legend", "chumrunner", "fantasy", "pleb-bound")
+# Keys parse_room() in src/rooms.c accepts; anything else is rejected there,
+# so reject it here too (e.g. a stale pre-walk-behind "occluders" array).
+ROOM_KEYS = {
+    "id", "name", "plate", "outdoor", "walk", "obstacles", "doors",
+    "objects", "npcs", "walkbehinds",
+}
 ID_CAPACITY = 24
 LABEL_CAPACITY = 40
 PROMPT_CAPACITY = 48
@@ -67,6 +76,40 @@ def point_in_rect(x, y, rect):
             and rect["y"] <= y <= rect["y"] + rect["h"])
 
 
+# Set by main() from the world.json location: <root>/assets/graphics/rooms.
+ROOMS_DIR = None
+
+
+def check_behind_masks(room, declared_ids):
+    """Validate every style's <plate>-behind.png that exists: exactly
+    plate-sized, 8-bit grayscale (the only mask form the engine's PNG
+    decoder accepts), and every pixel value in {0} | declared ids."""
+    if ROOMS_DIR is None:
+        return
+    rid = room["id"]
+    allowed = {0} | declared_ids
+    for style in STYLES:
+        path = os.path.join(ROOMS_DIR, style,
+                            f"{room['plate']}-behind.png")
+        if not os.path.exists(path):
+            continue
+        from PIL import Image
+        label = f"{rid}: {style}/{room['plate']}-behind.png"
+        with Image.open(path) as image:
+            if image.size != (PLATE_WIDTH, PLATE_HEIGHT):
+                fail(f"{label}: size {image.size[0]}x{image.size[1]} is "
+                     f"not plate-sized {PLATE_WIDTH}x{PLATE_HEIGHT}")
+            if image.mode != "L":
+                fail(f"{label}: mode '{image.mode}' is not 8-bit "
+                     "grayscale 'L' (the engine decodes only grayscale "
+                     "masks)")
+            values = set(image.getdata())
+        stray = values - allowed
+        if stray:
+            fail(f"{label}: mask values {sorted(stray)} are not in "
+                 f"{{0}} | declared ids {sorted(declared_ids)}")
+
+
 def check_c_parser_subset(text):
     """Reject JSON constructs src/rooms.c's parser does not accept, so a file
     that passes this validator can never be refused by the binary."""
@@ -93,7 +136,11 @@ def check_c_parser_subset(text):
 
 
 def main():
+    global ROOMS_DIR
     path = sys.argv[1] if len(sys.argv) > 1 else "assets/world/world.json"
+    root = os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(path))))
+    ROOMS_DIR = os.path.join(root, "assets", "graphics", "rooms")
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     check_c_parser_subset(text)
@@ -121,6 +168,9 @@ def main():
     reachable = set()
     for room in rooms:
         rid = room["id"]
+        unknown = set(room) - ROOM_KEYS
+        if unknown:
+            fail(f"{rid}: unknown keys {', '.join(sorted(unknown))}")
         check_string(room.get("name"), f"{rid}.name", LABEL_CAPACITY)
         check_string(room.get("plate"), f"{rid}.plate", LABEL_CAPACITY)
         walk = room.get("walk")
@@ -197,26 +247,31 @@ def main():
             if not (0 <= x <= LOGICAL_WIDTH and 0 <= y <= LOGICAL_HEIGHT):
                 fail(f"{rid}.npcs[{i}]: position off the logical canvas")
 
-        occluders = room.get("occluders", [])
-        if len(occluders) > MAX_OCCLUDERS:
-            fail(f"{rid}: more than {MAX_OCCLUDERS} occluders")
-        for i, occluder in enumerate(occluders):
-            unknown = set(occluder) - {"rect", "baseline"}
+        walkbehinds = room.get("walkbehinds", [])
+        if len(walkbehinds) > MAX_WALKBEHINDS:
+            fail(f"{rid}: more than {MAX_WALKBEHINDS} walkbehinds")
+        seen_walkbehind_ids = set()
+        for i, walkbehind in enumerate(walkbehinds):
+            unknown = set(walkbehind) - {"id", "baseline"}
             if unknown:
-                fail(f"{rid}.occluders[{i}]: unknown keys "
+                fail(f"{rid}.walkbehinds[{i}]: unknown keys "
                      f"{', '.join(sorted(unknown))}")
-            rect = occluder.get("rect")
-            if not isinstance(rect, dict):
-                fail(f"{rid}.occluders[{i}]: missing rect")
-            check_rect(rect, f"{rid}.occluders[{i}].rect")
-            baseline = occluder.get("baseline", rect["y"] + rect["h"])
-            if not isinstance(baseline, (int, float)):
-                fail(f"{rid}.occluders[{i}]: baseline must be a number")
-            if not (rect["y"] - OCCLUDER_BASELINE_TOLERANCE
-                    <= baseline
-                    <= rect["y"] + rect["h"] + OCCLUDER_BASELINE_TOLERANCE):
-                fail(f"{rid}.occluders[{i}]: baseline {baseline} "
-                     "outside its rect")
+            wid = walkbehind.get("id")
+            if not isinstance(wid, int) or isinstance(wid, bool) \
+                    or not 1 <= wid <= MAX_WALKBEHINDS:
+                fail(f"{rid}.walkbehinds[{i}]: id must be an integer "
+                     f"1..{MAX_WALKBEHINDS}")
+            if wid in seen_walkbehind_ids:
+                fail(f"{rid}: duplicate walkbehind id {wid}")
+            seen_walkbehind_ids.add(wid)
+            baseline = walkbehind.get("baseline")
+            if not isinstance(baseline, (int, float)) \
+                    or isinstance(baseline, bool):
+                fail(f"{rid}.walkbehinds[{i}]: baseline must be a number")
+            if not 0 <= baseline <= LOGICAL_HEIGHT:
+                fail(f"{rid}.walkbehinds[{i}]: baseline {baseline} off "
+                     "the logical canvas")
+        check_behind_masks(room, seen_walkbehind_ids)
 
     unreachable = [room["id"] for room in rooms
                    if room["id"] != start and room["id"] not in reachable]

@@ -15,7 +15,6 @@
 #include <string.h>
 
 #define DESK_WORLD_FILE_CAPACITY (256u * 1024u)
-#define DESK_OCCLUDER_BASELINE_TOLERANCE 0.001f
 
 typedef struct world_parser {
     const char *text;
@@ -509,7 +508,7 @@ static bool parse_npc(world_parser *p, desk_npc *npc)
     return true;
 }
 
-static bool parse_occluder(world_parser *p, desk_occluder *occluder)
+static bool parse_walkbehind(world_parser *p, desk_walkbehind *walkbehind)
 {
     bool first = true;
     unsigned seen = 0u;
@@ -527,23 +526,38 @@ static bool parse_occluder(world_parser *p, desk_occluder *occluder)
             return false;
         if (step == 0)
             break;
-        if (strcmp(key, "rect") == 0) {
-            if (!claim_key(p, &seen, 1u << 0, key) ||
-                !parse_rect_value(p, &occluder->rect))
+        if (strcmp(key, "id") == 0) {
+            float value = 0.0f;
+            size_t value_offset;
+            int id;
+
+            if (!claim_key(p, &seen, 1u << 0, key))
                 return false;
+            skip_ws(p);
+            value_offset = p->offset;
+            if (!parse_number(p, &value))
+                return false;
+            if (value < -16777216.0f || value > 16777216.0f)
+                return fail_at(p, value_offset,
+                               "walkbehind id out of range");
+            id = (int)value;
+            if ((float)id != value)
+                return fail_at(p, value_offset,
+                               "walkbehind id must be an integer");
+            walkbehind->id = id;
         } else if (strcmp(key, "baseline") == 0) {
             if (!claim_key(p, &seen, 1u << 1, key) ||
-                !parse_number(p, &occluder->baseline))
+                !parse_number(p, &walkbehind->baseline))
                 return false;
         } else {
-            return fail_at(p, p->key_offset, "unknown key '%s' in occluder",
-                           key);
+            return fail_at(p, p->key_offset,
+                           "unknown key '%s' in walkbehind", key);
         }
     }
     if ((seen & (1u << 0)) == 0u)
-        return fail_at(p, start, "occluder missing 'rect'");
+        return fail_at(p, start, "walkbehind missing 'id'");
     if ((seen & (1u << 1)) == 0u)
-        occluder->baseline = occluder->rect.y + occluder->rect.h;
+        return fail_at(p, start, "walkbehind missing 'baseline'");
     return true;
 }
 
@@ -568,10 +582,10 @@ static bool parse_npc_element(world_parser *p, desk_room *room, int index)
     return parse_npc(p, &room->npcs[index]);
 }
 
-static bool parse_occluder_element(world_parser *p, desk_room *room,
-                                   int index)
+static bool parse_walkbehind_element(world_parser *p, desk_room *room,
+                                     int index)
 {
-    return parse_occluder(p, &room->occluders[index]);
+    return parse_walkbehind(p, &room->walkbehinds[index]);
 }
 
 static bool parse_array(world_parser *p, desk_room *room, int *count,
@@ -670,11 +684,11 @@ static bool parse_room(world_parser *p, desk_room *room)
                              DESK_MAX_NPCS_PER_ROOM, "npcs",
                              parse_npc_element))
                 return false;
-        } else if (strcmp(key, "occluders") == 0) {
+        } else if (strcmp(key, "walkbehinds") == 0) {
             if (!claim_key(p, &seen, 1u << 9, key) ||
-                !parse_array(p, room, &room->occluder_count,
-                             DESK_MAX_OCCLUDERS_PER_ROOM, "occluders",
-                             parse_occluder_element))
+                !parse_array(p, room, &room->walkbehind_count,
+                             DESK_MAX_WALKBEHINDS_PER_ROOM, "walkbehinds",
+                             parse_walkbehind_element))
                 return false;
         } else {
             return fail_at(p, p->key_offset, "unknown key '%s' in room",
@@ -1009,24 +1023,30 @@ bool desk_world_validate(const desk_world *world, char *error,
                              room->id, i);
         }
 
-        if (room->occluder_count < 0 ||
-            room->occluder_count > DESK_MAX_OCCLUDERS_PER_ROOM)
-            return vfail(error, error_size, "%s: more than %d occluders",
-                         room->id, DESK_MAX_OCCLUDERS_PER_ROOM);
-        for (i = 0; i < room->occluder_count; ++i) {
-            const desk_occluder *occluder = &room->occluders[i];
+        if (room->walkbehind_count < 0 ||
+            room->walkbehind_count > DESK_MAX_WALKBEHINDS_PER_ROOM)
+            return vfail(error, error_size, "%s: more than %d walkbehinds",
+                         room->id, DESK_MAX_WALKBEHINDS_PER_ROOM);
+        for (i = 0; i < room->walkbehind_count; ++i) {
+            const desk_walkbehind *walkbehind = &room->walkbehinds[i];
+            int j;
 
-            (void)snprintf(label, sizeof label, "%s.occluders[%d].rect",
-                           room->id, i);
-            if (!check_rect(&occluder->rect, label, error, error_size))
-                return false;
-            if (occluder->baseline < occluder->rect.y -
-                    DESK_OCCLUDER_BASELINE_TOLERANCE ||
-                occluder->baseline > occluder->rect.y + occluder->rect.h +
-                    DESK_OCCLUDER_BASELINE_TOLERANCE)
+            if (walkbehind->id < 1 ||
+                walkbehind->id > DESK_MAX_WALKBEHINDS_PER_ROOM)
                 return vfail(error, error_size,
-                             "%s.occluders[%d]: baseline %g outside its rect",
-                             room->id, i, (double)occluder->baseline);
+                             "%s.walkbehinds[%d]: id must be 1..%d",
+                             room->id, i, DESK_MAX_WALKBEHINDS_PER_ROOM);
+            for (j = 0; j < i; ++j)
+                if (room->walkbehinds[j].id == walkbehind->id)
+                    return vfail(error, error_size,
+                                 "%s: duplicate walkbehind id %d",
+                                 room->id, walkbehind->id);
+            if (walkbehind->baseline < 0.0f ||
+                walkbehind->baseline > (float)DESK_LOGICAL_HEIGHT)
+                return vfail(error, error_size,
+                             "%s.walkbehinds[%d]: baseline %g off the "
+                             "logical canvas", room->id, i,
+                             (double)walkbehind->baseline);
         }
     }
 

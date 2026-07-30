@@ -153,11 +153,41 @@ static int standard_walk_phase(const desk_state *state)
     return clip_frame(state->simulation_tick, durations, 4);
 }
 
+/* Logical-space bbox of everything an entity draw touched (sprite plus
+ * ground shadow), fed to the walk-behind re-composite. */
+typedef struct desk_bounds {
+    float x0;
+    float y0;
+    float x1;
+    float y1;
+    bool any;
+} desk_bounds;
+
+static void bounds_add(desk_bounds *bounds, float x, float y, float w,
+                       float h)
+{
+    if (!bounds) return;
+    if (!bounds->any) {
+        bounds->x0 = x;
+        bounds->y0 = y;
+        bounds->x1 = x + w;
+        bounds->y1 = y + h;
+        bounds->any = true;
+        return;
+    }
+    if (x < bounds->x0) bounds->x0 = x;
+    if (y < bounds->y0) bounds->y0 = y;
+    if (x + w > bounds->x1) bounds->x1 = x + w;
+    if (y + h > bounds->y1) bounds->y1 = y + h;
+}
+
 static void draw_shadow(ki_td_soft_renderer *renderer, const ki_td_view *view,
-                        float x, float y, float radius)
+                        float x, float y, float radius, desk_bounds *bounds)
 {
     ki_td_soft_fill_ellipse(renderer, view, x, y, radius, radius * 0.29f,
                             UINT32_C(0x02040a), 0.52f);
+    bounds_add(bounds, x - radius, y - radius * 0.29f, radius * 2.0f,
+               radius * 0.58f);
 }
 
 static bool sprite_anchor(const ki_td_rgba8 *image, float *anchor_x,
@@ -207,7 +237,8 @@ static void draw_foot_anchored(ki_td_soft_renderer *renderer,
                                const ki_td_view *view,
                                const ki_td_rgba8 *image,
                                float foot_x, float foot_y,
-                               int width, int height, float alpha)
+                               int width, int height, float alpha,
+                               desk_bounds *bounds)
 {
     float anchor_x;
     float anchor_y;
@@ -220,6 +251,8 @@ static void draw_foot_anchored(ki_td_soft_renderer *renderer,
                             foot_x - anchor_x * scale_x,
                             foot_y - anchor_y * scale_y,
                             image, width, height, alpha);
+    bounds_add(bounds, foot_x - anchor_x * scale_x,
+               foot_y - anchor_y * scale_y, (float)width, (float)height);
 }
 
 static bool legend_player_cell(const desk_state *state,
@@ -284,28 +317,29 @@ static bool standard_player_cell(const desk_state *state,
 
 static void draw_player(ki_td_soft_renderer *renderer, const ki_td_view *view,
                         const desk_state *state,
-                        const desk_graphics *graphics)
+                        const desk_graphics *graphics, desk_bounds *bounds)
 {
     desk_cast cast = visible_cast(state);
     ki_td_rgba8 cell;
-    draw_shadow(renderer, view, state->player_x, state->player_y, 18.0f);
+    draw_shadow(renderer, view, state->player_x, state->player_y, 18.0f,
+                bounds);
     if (cast == DESK_CAST_LEGEND) {
         if (legend_player_cell(state, graphics, &cell))
             draw_foot_anchored(renderer, view, &cell,
                                state->player_x, state->player_y,
                                LEGEND_PLAYER_RENDER_SIZE,
-                               LEGEND_PLAYER_RENDER_SIZE, 1.0f);
+                               LEGEND_PLAYER_RENDER_SIZE, 1.0f, bounds);
     } else if (standard_player_cell(state, graphics, cast, &cell)) {
         draw_foot_anchored(renderer, view, &cell,
                            state->player_x, state->player_y,
                            STANDARD_PLAYER_RENDER_SIZE,
-                           STANDARD_PLAYER_RENDER_SIZE, 1.0f);
+                           STANDARD_PLAYER_RENDER_SIZE, 1.0f, bounds);
     }
 }
 
 static void draw_npc(ki_td_soft_renderer *renderer, const ki_td_view *view,
                      const desk_state *state, const desk_graphics *graphics,
-                     const desk_npc *npc)
+                     const desk_npc *npc, desk_bounds *bounds)
 {
     desk_cast cast = visible_cast(state);
     float bob = (state->simulation_tick / 32u +
@@ -314,18 +348,24 @@ static void draw_npc(ki_td_soft_renderer *renderer, const ki_td_view *view,
     ki_td_rgba8 cell;
     if (npc->actor < DESK_ACTOR_ALLY_1 || npc->actor > DESK_ACTOR_ALLY_3)
         return;
-    draw_shadow(renderer, view, npc->x, npc->y - 1.0f, 21.0f);
+    draw_shadow(renderer, view, npc->x, npc->y - 1.0f, 21.0f, bounds);
     if (cast == DESK_CAST_LEGEND) {
         if (desk_graphics_cell(graphics, DESK_GRAPHIC_LEGEND_NPCS,
-                               npc->actor - DESK_ACTOR_ALLY_1, 0, &cell))
+                               npc->actor - DESK_ACTOR_ALLY_1, 0, &cell)) {
             ki_td_soft_rgba_pixel_art(renderer, view, npc->x - 32.0f,
                                       npc->y - 60.0f + bob, &cell, 1.0f);
+            bounds_add(bounds, npc->x - 32.0f, npc->y - 60.0f + bob,
+                       (float)cell.width, (float)cell.height);
+        }
     } else if (desk_graphics_cell(graphics, character_graphic(cast), 0,
                                   npc->actor, &cell)) {
         ki_td_soft_rgba_resized(renderer, view, npc->x - 46.0f,
                                 npc->y - 87.0f + bob, &cell,
                                 STANDARD_PLAYER_RENDER_SIZE,
                                 STANDARD_PLAYER_RENDER_SIZE, 1.0f);
+        bounds_add(bounds, npc->x - 46.0f, npc->y - 87.0f + bob,
+                   (float)STANDARD_PLAYER_RENDER_SIZE,
+                   (float)STANDARD_PLAYER_RENDER_SIZE);
     }
 }
 
@@ -334,43 +374,68 @@ static int room_npc_count(const desk_room *room)
     return clamp_int(room->npc_count, 0, DESK_MAX_NPCS_PER_ROOM);
 }
 
-/* 480 logical columns sample the 1280 plate columns at exactly 8/3 (and 270
- * rows the 720 plate rows), so every 3-logical-pixel step lands on a whole
- * plate pixel. Occluder redraws snap outward to that grid: the subview blit
- * then samples the same plate pixels at the same screen positions as the
- * full-plate backdrop blit and is pixel-identical to it. */
-#define OCCLUDER_SNAP_GRID 3
-
-static void draw_occluder(ki_td_soft_renderer *renderer,
-                          const ki_td_view *view, const ki_td_rgba8 *plate,
-                          const desk_occluder *occluder)
+/* Walk-behind re-composite (AGS's DrawOverCharSprite adapted to the plate
+ * pipeline): after an entity draws, every logical pixel inside its bbox
+ * whose plate-mask region has a baseline strictly greater than the entity's
+ * feet y re-blits the plate pixel over the sprite. 480 logical columns
+ * sample the 1280 plate columns at xx * 1280 / 480 (and 270 rows the 720
+ * plate rows) — the exact mapping the full-plate backdrop blit uses — and
+ * the 1x1 ki_td_soft_rgba_resized call lands on the same screen block the
+ * backdrop produced for that logical pixel, so the re-composite is
+ * pixel-identical to the backdrop at any view scale. Cost stays O(bbox). */
+static void apply_walkbehinds(ki_td_soft_renderer *renderer,
+                              const ki_td_view *view,
+                              const ki_td_rgba8 *plate, const uint8_t *mask,
+                              const desk_room *room, float feet_y,
+                              const desk_bounds *bounds)
 {
-    ki_td_rgba8 subview;
-    int x0 = (int)occluder->rect.x;
-    int y0 = (int)occluder->rect.y;
-    int x1 = (int)(occluder->rect.x + occluder->rect.w);
-    int y1 = (int)(occluder->rect.y + occluder->rect.h);
-    if ((float)x1 < occluder->rect.x + occluder->rect.w) x1++;
-    if ((float)y1 < occluder->rect.y + occluder->rect.h) y1++;
-    x0 -= x0 % OCCLUDER_SNAP_GRID;
-    y0 -= y0 % OCCLUDER_SNAP_GRID;
-    x1 += (OCCLUDER_SNAP_GRID - x1 % OCCLUDER_SNAP_GRID) %
-          OCCLUDER_SNAP_GRID;
-    y1 += (OCCLUDER_SNAP_GRID - y1 % OCCLUDER_SNAP_GRID) %
-          OCCLUDER_SNAP_GRID;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > DESK_LOGICAL_WIDTH) x1 = DESK_LOGICAL_WIDTH;
-    if (y1 > DESK_LOGICAL_HEIGHT) y1 = DESK_LOGICAL_HEIGHT;
-    if (x1 <= x0 || y1 <= y0) return;
-    subview = ki_td_rgba8_subimage(
-        plate, x0 * DESK_PLATE_WIDTH / DESK_LOGICAL_WIDTH,
-        y0 * DESK_PLATE_HEIGHT / DESK_LOGICAL_HEIGHT,
-        (x1 - x0) * DESK_PLATE_WIDTH / DESK_LOGICAL_WIDTH,
-        (y1 - y0) * DESK_PLATE_HEIGHT / DESK_LOGICAL_HEIGHT);
-    if (!ki_td_rgba8_is_valid(&subview)) return;
-    ki_td_soft_rgba_resized(renderer, view, (float)x0, (float)y0, &subview,
-                            x1 - x0, y1 - y0, 1.0f);
+    bool covered[DESK_MAX_WALKBEHINDS_PER_ROOM + 1] = {false};
+    bool any = false;
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+    int index;
+    int ly;
+
+    if (!bounds || !bounds->any || !mask) return;
+    for (index = 0; index < room->walkbehind_count &&
+                    index < DESK_MAX_WALKBEHINDS_PER_ROOM; ++index) {
+        const desk_walkbehind *walkbehind = &room->walkbehinds[index];
+
+        if (walkbehind->id >= 1 &&
+            walkbehind->id <= DESK_MAX_WALKBEHINDS_PER_ROOM &&
+            walkbehind->baseline > feet_y) {
+            covered[walkbehind->id] = true;
+            any = true;
+        }
+    }
+    if (!any) return;
+    x0 = bounds->x0 <= 0.0f ? 0 : (int)bounds->x0;
+    y0 = bounds->y0 <= 0.0f ? 0 : (int)bounds->y0;
+    x1 = bounds->x1 >= (float)DESK_LOGICAL_WIDTH ?
+         DESK_LOGICAL_WIDTH : (int)bounds->x1 + 1;
+    y1 = bounds->y1 >= (float)DESK_LOGICAL_HEIGHT ?
+         DESK_LOGICAL_HEIGHT : (int)bounds->y1 + 1;
+    for (ly = y0; ly < y1; ++ly) {
+        const uint8_t *mask_row =
+            mask + (size_t)(ly * DESK_PLATE_HEIGHT / DESK_LOGICAL_HEIGHT) *
+                       (size_t)DESK_PLATE_WIDTH;
+        int lx;
+
+        for (lx = x0; lx < x1; ++lx) {
+            int plate_x = lx * DESK_PLATE_WIDTH / DESK_LOGICAL_WIDTH;
+            ki_td_rgba8 source;
+
+            if (!covered[mask_row[plate_x]]) continue;
+            source = ki_td_rgba8_subimage(
+                plate, plate_x,
+                ly * DESK_PLATE_HEIGHT / DESK_LOGICAL_HEIGHT, 1, 1);
+            if (!ki_td_rgba8_is_valid(&source)) continue;
+            ki_td_soft_rgba_resized(renderer, view, (float)lx, (float)ly,
+                                    &source, 1, 1, 1.0f);
+        }
+    }
 }
 
 static void draw_actors(ki_td_soft_renderer *renderer, const ki_td_view *view,
@@ -378,67 +443,55 @@ static void draw_actors(ki_td_soft_renderer *renderer, const ki_td_view *view,
                         const desk_graphics *graphics, const desk_room *room,
                         int room_index)
 {
-    enum { ACTOR_DRAW_CAPACITY = DESK_MAX_NPCS_PER_ROOM + 1 +
-                                 DESK_MAX_OCCLUDERS_PER_ROOM };
+    enum { ACTOR_DRAW_CAPACITY = DESK_MAX_NPCS_PER_ROOM + 1 };
     int order[ACTOR_DRAW_CAPACITY];
-    /* 0 = entity, 1 = occluder: at equal depth the occluder draws after the
-     * entity, so an entity standing exactly on the baseline is covered. */
-    int kind[ACTOR_DRAW_CAPACITY];
     float depth[ACTOR_DRAW_CAPACITY];
     ki_td_rgba8 plate;
+    const uint8_t *mask = NULL;
     int npc_count = room_npc_count(room);
-    int occluder_count = 0;
     int count = 0;
     int left;
     int npc;
-    int occluder;
-    /* Occluders re-blit plate art; the procedural fallback has none. */
+    /* Walk-behinds re-blit plate art; the procedural fallback has none. */
     if (desk_graphics_plate(graphics, room_index, &plate))
-        occluder_count = clamp_int(room->occluder_count, 0,
-                                   DESK_MAX_OCCLUDERS_PER_ROOM);
+        mask = desk_graphics_behind_mask(graphics, room_index);
     for (npc = 0; npc < npc_count; ++npc) {
         order[count] = npc;
         depth[count] = room->npcs[npc].y;
-        kind[count] = 0;
         ++count;
     }
     order[count] = -1;
     depth[count] = state->player_y;
-    kind[count] = 0;
     ++count;
-    for (occluder = 0; occluder < occluder_count; ++occluder) {
-        order[count] = occluder;
-        depth[count] = room->occluders[occluder].baseline;
-        kind[count] = 1;
-        ++count;
-    }
     for (left = 0; left < count - 1; ++left) {
         int right;
         for (right = left + 1; right < count; ++right) {
-            if (depth[right] < depth[left] ||
-                (depth[right] == depth[left] &&
-                 kind[right] < kind[left])) {
+            if (depth[right] < depth[left]) {
                 int swap_order = order[left];
-                int swap_kind = kind[left];
                 float swap_depth = depth[left];
                 order[left] = order[right];
                 depth[left] = depth[right];
-                kind[left] = kind[right];
                 order[right] = swap_order;
                 depth[right] = swap_depth;
-                kind[right] = swap_kind;
             }
         }
     }
     for (left = 0; left < count; ++left) {
-        if (kind[left] != 0)
-            draw_occluder(renderer, view, &plate,
-                          &room->occluders[order[left]]);
-        else if (order[left] < 0)
-            draw_player(renderer, view, state, graphics);
-        else
+        desk_bounds bounds = {0.0f, 0.0f, 0.0f, 0.0f, false};
+        float feet_y;
+
+        if (order[left] < 0) {
+            draw_player(renderer, view, state, graphics,
+                        mask ? &bounds : NULL);
+            feet_y = state->player_y;
+        } else {
             draw_npc(renderer, view, state, graphics,
-                     &room->npcs[order[left]]);
+                     &room->npcs[order[left]], mask ? &bounds : NULL);
+            feet_y = room->npcs[order[left]].y;
+        }
+        if (mask)
+            apply_walkbehinds(renderer, view, &plate, mask, room, feet_y,
+                              &bounds);
     }
 }
 
@@ -1097,10 +1150,10 @@ static void draw_wizard_outfit(ki_td_soft_renderer *renderer,
                                 0, &cell) :
         desk_graphics_hero_cell(graphics, cast, 0, 0, &cell);
     draw_shadow(renderer, view, 350.0f, 218.0f,
-                cast == DESK_CAST_LEGEND ? 26.0f : 30.0f);
+                cast == DESK_CAST_LEGEND ? 26.0f : 30.0f, NULL);
     if (cell_ok)
         draw_foot_anchored(renderer, view, &cell, 350.0f, 218.0f,
-                           preview_size, preview_size, 1.0f);
+                           preview_size, preview_size, 1.0f, NULL);
     small_text(canvas, view, 308.0f, 64.0f, "OUTFIT PREVIEW",
                COLOR_MUTED);
 }

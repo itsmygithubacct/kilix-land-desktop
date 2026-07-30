@@ -791,8 +791,10 @@ void desk_graphics_shutdown(desk_graphics *graphics)
 {
     int index;
     if (!graphics) return;
-    for (index = 0; index < DESK_MAX_ROOMS; ++index)
+    for (index = 0; index < DESK_MAX_ROOMS; ++index) {
         free(graphics->plate_pixels[index]);
+        free(graphics->behind_masks[index]);
+    }
     free(graphics->outfit_pixels);
     free(graphics->legend_opposite_step_pixels);
     free(graphics->hero_motion_pixels);
@@ -849,6 +851,61 @@ bool desk_graphics_cell(const desk_graphics *graphics, desk_graphic graphic,
     return ki_td_rgba8_is_valid(image);
 }
 
+/* Walk-behind mask: rooms/<style>/<plate>-behind.png, exactly plate-sized,
+ * one region id per pixel (0 = none, 1..15 = region). The cook writes 8-bit
+ * grayscale, which the kilix-assets decoder expands to RGBA with R = the
+ * authored value, so the reduction takes the red channel; out-of-range
+ * values (>= 16) reduce to 0, mirroring AGS validate_mask. A missing or
+ * malformed mask is not an error — the room just has no walk-behinds. */
+static uint8_t *load_behind_mask(const kilix_asset_locator *locator,
+                                 const kilix_asset_limits *limits,
+                                 const char *style_directory,
+                                 const char *plate)
+{
+    char relative[96];
+    char path[1024];
+    kilix_asset_image image = {0};
+    uint8_t *mask;
+    int written;
+    int y;
+
+    written = snprintf(relative, sizeof relative,
+                       "assets/graphics/rooms/%s/%s-behind.png",
+                       style_directory, plate);
+    if (written < 0 || (size_t)written >= sizeof relative ||
+        !kilix_asset_path_is_safe(relative))
+        return NULL;
+    if (kilix_asset_resolve(locator, relative, path, sizeof path) !=
+        KILIX_ASSET_OK)
+        return NULL;
+    if (kilix_asset_image_load_png(&image, path, limits) != KILIX_ASSET_OK)
+        return NULL;
+    if (!kilix_asset_image_is_valid(&image) ||
+        image.width != (uint32_t)DESK_PLATE_WIDTH ||
+        image.height != (uint32_t)DESK_PLATE_HEIGHT) {
+        kilix_asset_image_clear(&image);
+        return NULL;
+    }
+    mask = malloc((size_t)DESK_PLATE_WIDTH * (size_t)DESK_PLATE_HEIGHT);
+    if (!mask) {
+        kilix_asset_image_clear(&image);
+        return NULL;
+    }
+    for (y = 0; y < DESK_PLATE_HEIGHT; ++y) {
+        const uint8_t *row = image.pixels + (size_t)y * image.stride;
+        uint8_t *out = mask + (size_t)y * (size_t)DESK_PLATE_WIDTH;
+        int x;
+
+        for (x = 0; x < DESK_PLATE_WIDTH; ++x) {
+            uint8_t value = row[(size_t)x * 4u];
+
+            out[x] = value < UINT8_C(16) ? value : UINT8_C(0);
+        }
+    }
+    kilix_asset_image_clear(&image);
+    return mask;
+}
+
 bool desk_graphics_load_plates(desk_graphics *graphics, const char *asset_root,
                                const desk_world *world, desk_cast style)
 {
@@ -867,6 +924,8 @@ bool desk_graphics_load_plates(desk_graphics *graphics, const char *asset_root,
         graphics->plate_pixels[room] = NULL;
         graphics->plates[room] = (ki_td_rgba8){0};
         graphics->plate_loaded[room] = false;
+        free(graphics->behind_masks[room]);
+        graphics->behind_masks[room] = NULL;
     }
     make_locator(&locator, asset_root);
     make_limits(&limits);
@@ -925,7 +984,11 @@ bool desk_graphics_load_plates(desk_graphics *graphics, const char *asset_root,
             free(pixels);
             graphics->plate_pixels[room] = NULL;
             graphics->plates[room] = (ki_td_rgba8){0};
+            continue;
         }
+        graphics->behind_masks[room] =
+            load_behind_mask(&locator, &limits, STYLE_DIRECTORIES[style],
+                             world->rooms[room].plate);
     }
     return true;
 }
@@ -939,6 +1002,15 @@ bool desk_graphics_plate(const desk_graphics *graphics, int room,
         return false;
     *image = graphics->plates[room];
     return ki_td_rgba8_is_valid(image);
+}
+
+const uint8_t *desk_graphics_behind_mask(const desk_graphics *graphics,
+                                         int room)
+{
+    if (!graphics || room < 0 || room >= DESK_MAX_ROOMS ||
+        !graphics->plate_loaded[room])
+        return NULL;
+    return graphics->behind_masks[room];
 }
 
 bool desk_graphics_set_outfit(desk_graphics *graphics, desk_cast cast,

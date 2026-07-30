@@ -143,6 +143,10 @@ def png_info(path: Path) -> tuple[int, int, int, int] | str:
 def validate_inventory(directory: Path, errors: list[str]) -> None:
     wanted = {"PROMPTS.md", "manifest.json"}
     wanted.update(f"{key}.png" for key in expected_keys())
+    # Walk-behind masks are optional per room+style; their content contract
+    # (plate-sized, grayscale, values in {0} | declared ids) is enforced by
+    # tools/validate_world.py, which knows the declared region ids.
+    optional = {f"{key}-behind.png" for key in expected_keys()}
     try:
         actual = {
             path.relative_to(directory).as_posix()
@@ -154,7 +158,7 @@ def validate_inventory(directory: Path, errors: list[str]) -> None:
         return
     for missing in sorted(wanted - actual):
         errors.append(f"missing file: {missing}")
-    for unexpected in sorted(actual - wanted):
+    for unexpected in sorted(actual - wanted - optional):
         errors.append(f"unexpected file: {unexpected}")
 
 

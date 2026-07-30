@@ -126,14 +126,9 @@
         }
       ],
       "npcs": [],
-      "occluders": [
+      "walkbehinds": [
         {
-          "rect": {
-            "x": 48,
-            "y": 138,
-            "w": 159,
-            "h": 96
-          },
+          "id": 1,
           "baseline": 228
         }
       ]
@@ -346,14 +341,9 @@
           "y": 204
         }
       ],
-      "occluders": [
+      "walkbehinds": [
         {
-          "rect": {
-            "x": 213,
-            "y": 177,
-            "w": 57,
-            "h": 48
-          },
+          "id": 1,
           "baseline": 216
         }
       ]
@@ -628,14 +618,9 @@
         }
       ],
       "npcs": [],
-      "occluders": [
+      "walkbehinds": [
         {
-          "rect": {
-            "x": 231,
-            "y": 108,
-            "w": 120,
-            "h": 69
-          },
+          "id": 1,
           "baseline": 177
         }
       ]
@@ -770,23 +755,14 @@
         }
       ],
       "npcs": [],
-      "occluders": [
+      "walkbehinds": [
         {
-          "rect": {
-            "x": 21,
-            "y": 108,
-            "w": 63,
-            "h": 84
-          }
+          "id": 1,
+          "baseline": 189
         },
         {
-          "rect": {
-            "x": 270,
-            "y": 33,
-            "w": 138,
-            "h": 159
-          },
-          "baseline": 189
+          "id": 2,
+          "baseline": 192
         }
       ]
     }

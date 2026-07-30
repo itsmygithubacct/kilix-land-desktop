@@ -350,7 +350,7 @@ static int world_test(void)
     int objects = 0;
     int doors = 0;
     int npcs = 0;
-    int occluders = 0;
+    int walkbehinds = 0;
     int room;
     if (!world_path(path, sizeof path)) {
         (void)fprintf(stderr, "FAIL world path too long\n");
@@ -365,12 +365,12 @@ static int world_test(void)
         objects += world.rooms[room].object_count;
         doors += world.rooms[room].door_count;
         npcs += world.rooms[room].npc_count;
-        occluders += world.rooms[room].occluder_count;
+        walkbehinds += world.rooms[room].walkbehind_count;
     }
     (void)printf(
-        "PASS world rooms=%d objects=%d doors=%d npcs=%d occluders=%d "
+        "PASS world rooms=%d objects=%d doors=%d npcs=%d walkbehinds=%d "
         "start=%s\n",
-        world.room_count, objects, doors, npcs, occluders,
+        world.room_count, objects, doors, npcs, walkbehinds,
         world.rooms[world.start_room].id);
     return EXIT_SUCCESS;
 }
@@ -478,47 +478,50 @@ static int selftest_body(void)
         return EXIT_FAILURE;
     }
 
-    /* Occluder validation round: a baseline outside its rect, a rect off
-     * the canvas and a count over the cap must each be rejected, and the
-     * restored world must validate clean again. */
+    /* Walk-behind validation round: an out-of-range id, a duplicate id, a
+     * baseline off the logical canvas and a count over the cap must each
+     * be rejected, and the restored world must validate clean again. */
     {
         desk_room *scene = &world.rooms[0];
-        int saved_count = scene->occluder_count;
-        desk_occluder *probe;
-        if (saved_count < 0 ||
-            saved_count >= DESK_MAX_OCCLUDERS_PER_ROOM) {
-            (void)fprintf(stderr, "FAIL selftest occluder probe slot\n");
+        int saved_count = scene->walkbehind_count;
+        desk_walkbehind *probe;
+        if (saved_count < 1 ||
+            saved_count >= DESK_MAX_WALKBEHINDS_PER_ROOM) {
+            (void)fprintf(stderr, "FAIL selftest walkbehind probe slot\n");
             return EXIT_FAILURE;
         }
-        probe = &scene->occluders[saved_count];
-        probe->rect.x = 12.0f;
-        probe->rect.y = 60.0f;
-        probe->rect.w = 24.0f;
-        probe->rect.h = 24.0f;
-        probe->baseline = 30.0f; /* above the rect top */
-        scene->occluder_count = saved_count + 1;
+        probe = &scene->walkbehinds[saved_count];
+        probe->id = 0; /* below the 1..15 range */
+        probe->baseline = 100.0f;
+        scene->walkbehind_count = saved_count + 1;
         if (desk_world_validate(&world, error, sizeof error)) {
             (void)fprintf(stderr,
-                          "FAIL selftest bad occluder baseline accepted\n");
+                          "FAIL selftest bad walkbehind id accepted\n");
             return EXIT_FAILURE;
         }
-        probe->baseline = 84.0f; /* the rect bottom: valid */
-        probe->rect.x = (float)DESK_LOGICAL_WIDTH - 12.0f; /* off canvas */
+        probe->id = scene->walkbehinds[0].id; /* duplicate */
         if (desk_world_validate(&world, error, sizeof error)) {
             (void)fprintf(stderr,
-                          "FAIL selftest bad occluder rect accepted\n");
+                          "FAIL selftest duplicate walkbehind id accepted\n");
             return EXIT_FAILURE;
         }
-        probe->rect.x = 12.0f;
-        scene->occluder_count = DESK_MAX_OCCLUDERS_PER_ROOM + 1;
+        probe->id = DESK_MAX_WALKBEHINDS_PER_ROOM; /* free id: valid */
+        probe->baseline = (float)DESK_LOGICAL_HEIGHT + 30.0f;
         if (desk_world_validate(&world, error, sizeof error)) {
             (void)fprintf(stderr,
-                          "FAIL selftest occluder count cap ignored\n");
+                          "FAIL selftest bad walkbehind baseline accepted\n");
             return EXIT_FAILURE;
         }
-        scene->occluder_count = saved_count;
+        probe->baseline = 100.0f;
+        scene->walkbehind_count = DESK_MAX_WALKBEHINDS_PER_ROOM + 1;
+        if (desk_world_validate(&world, error, sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest walkbehind count cap ignored\n");
+            return EXIT_FAILURE;
+        }
+        scene->walkbehind_count = saved_count;
         if (!desk_world_validate(&world, error, sizeof error)) {
-            (void)fprintf(stderr, "FAIL selftest occluder restore: %s\n",
+            (void)fprintf(stderr, "FAIL selftest walkbehind restore: %s\n",
                           error);
             return EXIT_FAILURE;
         }
@@ -772,7 +775,7 @@ static int selftest_body(void)
     (void)printf(
         "PASS selftest rooms=%d wizard=cast-actor-name-outfit-confirm "
         "door=bedroom->living launch=games dialogue=reveal-advance-close "
-        "pause=quit-confirm occluders=bad-rejected targets=%d\n",
+        "pause=quit-confirm walkbehinds=bad-rejected targets=%d\n",
         world.room_count, DESK_TARGET_COUNT - 1);
     return EXIT_SUCCESS;
 }
@@ -907,12 +910,35 @@ static int wizard_render_test(const char *directory)
     return EXIT_SUCCESS;
 }
 
+/* Logical x centroid of the mask pixels carrying the region id, or a
+ * negative value when the mask (or the id) is absent. */
+static float behind_region_center_x(const uint8_t *mask, int id)
+{
+    uint64_t total = 0u;
+    uint64_t count = 0u;
+    int y;
+    if (!mask || id < 1 || id > DESK_MAX_WALKBEHINDS_PER_ROOM)
+        return -1.0f;
+    for (y = 0; y < DESK_PLATE_HEIGHT; ++y) {
+        const uint8_t *row = mask + (size_t)y * (size_t)DESK_PLATE_WIDTH;
+        int x;
+        for (x = 0; x < DESK_PLATE_WIDTH; ++x)
+            if (row[x] == (uint8_t)id) {
+                total += (uint64_t)(unsigned int)x;
+                ++count;
+            }
+    }
+    if (count == 0u) return -1.0f;
+    return (float)((double)total / (double)count) *
+           (float)DESK_LOGICAL_WIDTH / (float)DESK_PLATE_WIDTH;
+}
+
 static int room_render_test(const char *directory)
 {
     render_fixture fixture;
     desk_state state;
     bool success;
-    int occluded = 0;
+    int behind = 0;
     int room;
     if (!fixture_open(&fixture, directory)) return EXIT_FAILURE;
     desk_init(&state, &fixture.world);
@@ -930,31 +956,40 @@ static int room_render_test(const char *directory)
         desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
         state.toast_ticks = 0;
         success = fixture_snapshot(&fixture, &state, directory, scene->id);
-        if (success && scene->occluder_count > 0) {
-            /* Occlusion proof: feet just above the first occluder's
-             * baseline put the player behind the furniture, so the plate
-             * subregion must redraw over the sprite. No desk_update here:
-             * the behind position may lie outside the walk rect and a tick
-             * would clamp it back inside. */
-            const desk_occluder *occluder = &scene->occluders[0];
+        if (success && scene->walkbehind_count > 0) {
+            /* Walk-behind proof: feet just above the first region's
+             * baseline, horizontally centered on the region's mask
+             * pixels, put the player behind the furniture, so the mask's
+             * plate pixels must re-blit over the sprite. No desk_update
+             * here: the behind position may lie outside the walk rect and
+             * a tick would clamp it back inside. The snapshot above ran
+             * sync_graphics, so the legend masks are loaded. */
+            const desk_walkbehind *walkbehind = &scene->walkbehinds[0];
+            float center_x = behind_region_center_x(
+                desk_graphics_behind_mask(&fixture.graphics, room),
+                walkbehind->id);
             char name[DESK_ID_CAPACITY + 12];
-            int written = snprintf(name, sizeof name, "%s-occluded",
+            int written = snprintf(name, sizeof name, "%s-behind",
                                    scene->id);
-            state.player_x = occluder->rect.x + occluder->rect.w * 0.5f;
-            state.player_y = occluder->baseline - 2.0f;
-            state.nearest_object = -1;
-            state.nearest_npc = -1;
-            success = written >= 0 && (size_t)written < sizeof name &&
-                      fixture_snapshot(&fixture, &state, directory, name);
-            if (success) ++occluded;
+            if (center_x >= 0.0f) {
+                state.player_x = center_x;
+                state.player_y = walkbehind->baseline - 2.0f;
+                state.nearest_object = -1;
+                state.nearest_npc = -1;
+                success = written >= 0 &&
+                          (size_t)written < sizeof name &&
+                          fixture_snapshot(&fixture, &state, directory,
+                                           name);
+                if (success) ++behind;
+            }
         }
     }
     fixture_close(&fixture);
     if (!success) return EXIT_FAILURE;
     (void)printf(
-        "PASS render scene=rooms cast=legend files=%d occluded=%d "
+        "PASS render scene=rooms cast=legend files=%d behind=%d "
         "size=%dx%d directory=%s\n",
-        fixture.world.room_count + occluded, occluded, DESK_LOGICAL_WIDTH,
+        fixture.world.room_count + behind, behind, DESK_LOGICAL_WIDTH,
         DESK_LOGICAL_HEIGHT, directory);
     return EXIT_SUCCESS;
 }

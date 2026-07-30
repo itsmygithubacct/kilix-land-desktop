@@ -42,7 +42,7 @@
 #define DESK_MAX_DOORS_PER_ROOM 4
 #define DESK_MAX_OBSTACLES_PER_ROOM 64
 #define DESK_MAX_NPCS_PER_ROOM 3
-#define DESK_MAX_OCCLUDERS_PER_ROOM 12
+#define DESK_MAX_WALKBEHINDS_PER_ROOM 15
 
 #define DESK_INTERACT_RADIUS 72.0f
 #define DESK_DOOR_COOLDOWN_TICKS 30
@@ -177,16 +177,18 @@ typedef struct desk_npc {
     float y;
 } desk_npc;
 
-/* Furniture depth mask: rect bounds the furniture's plate art in logical
- * coordinates, baseline is the y where the furniture meets the floor. An
- * entity whose feet y is less than baseline is behind the furniture, so the
- * plate subregion for rect redraws over it (painter's algorithm, keyed by
- * baseline; ties draw the occluder after the entity). Rooms rendering the
- * procedural fallback (no plate) skip occluders entirely. */
-typedef struct desk_occluder {
-    desk_rect rect;
-    float baseline; /* defaults to the rect bottom when not authored */
-} desk_occluder;
+/* Walk-behind region (the AGS model): a per-style plate-sized mask image
+ * rooms/<style>/<plate>-behind.png marks each plate pixel with a region id
+ * (0 = none, 1..15 = region). The ids and their baselines are shared across
+ * styles and declared here. An entity whose feet y is strictly less than a
+ * region's baseline is behind it: after that entity draws, the plate pixels
+ * inside its bbox whose mask value maps to such a region re-blit over the
+ * sprite (per-pixel silhouette). Rooms rendering the procedural fallback
+ * (no plate) skip walk-behinds entirely. */
+typedef struct desk_walkbehind {
+    int id;         /* 1..15, unique within the room */
+    float baseline; /* logical y where the furniture meets the floor */
+} desk_walkbehind;
 
 typedef struct desk_room {
     char id[DESK_ID_CAPACITY];
@@ -202,8 +204,8 @@ typedef struct desk_room {
     int object_count;
     desk_npc npcs[DESK_MAX_NPCS_PER_ROOM];
     int npc_count;
-    desk_occluder occluders[DESK_MAX_OCCLUDERS_PER_ROOM];
-    int occluder_count;
+    desk_walkbehind walkbehinds[DESK_MAX_WALKBEHINDS_PER_ROOM];
+    int walkbehind_count;
 } desk_room;
 
 typedef struct desk_world {
@@ -277,6 +279,9 @@ typedef struct desk_graphics {
     uint8_t *plate_pixels[DESK_MAX_ROOMS];
     ki_td_rgba8 plates[DESK_MAX_ROOMS];
     bool plate_loaded[DESK_MAX_ROOMS];
+    /* plate-sized walk-behind masks (one byte per plate pixel, 0 = none,
+     * 1..15 = region id); NULL when the room+style has no mask */
+    uint8_t *behind_masks[DESK_MAX_ROOMS];
     /* outfit-recolored hero cells for the active (cast, outfit) */
     desk_cast outfit_cast;
     int outfit_index;
@@ -364,6 +369,8 @@ bool desk_graphics_load_plates(desk_graphics *graphics, const char *asset_root,
                                const desk_world *world, desk_cast style);
 bool desk_graphics_plate(const desk_graphics *graphics, int room,
                          ki_td_rgba8 *image);
+const uint8_t *desk_graphics_behind_mask(const desk_graphics *graphics,
+                                         int room);
 bool desk_graphics_set_outfit(desk_graphics *graphics, desk_cast cast,
                               int outfit);
 bool desk_graphics_hero_cell(const desk_graphics *graphics, desk_cast cast,

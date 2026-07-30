@@ -21,26 +21,30 @@ always a block brush.  The brush covers 1x1 up to 5x5 cells and the hover
 outline previews its full footprint.  Keys:
   1-5 / n / p  switch room        t  cycle style        g  toggle grid
   [ / ]  brush size               s  save               u  undo
-  r  reload from json             q  quit               o  occluder layer
+  r  reload from json             q  quit               o  walk-behind mode
 
-The 'o' key toggles between WALK mode (everything above) and OCCLUDER
-mode, which authors the room's draw-over furniture rects ("occluders":
-[{"rect", "baseline"}] in world.json — an entity whose feet y is less
-than baseline draws BEHIND the furniture).  In occluder mode the walk
-tint stays visible but dimmer, existing occluders render as cyan
-outlines with a bright tick line at their baseline, and:
-  left-drag   rubber-bands a NEW occluder (live snapped coords in the
-              status line; on release the rect snaps outward to the 6px
-              grid and baseline defaults to the rect bottom)
-  right-click inside an existing occluder deletes it
-  [ / ]       nudge the baseline of the occluder under the cursor
-              down/up by 6px, clamped to its rect (brush keys only
-              apply in walk mode, so the reuse cannot conflict)
-'s' always saves BOTH layers: the painted grid decomposes into
-walk+obstacles, the room's occluders ride along in the same world.json
-rewrite (spawn repair unchanged), and the save verdict reports both.
-In walk mode (and --render) occluders show as thin cyan outlines so
-the furniture context is never invisible.
+Walk-behind mode ('o', the AGS model): edits the ACTIVE style's
+assets/graphics/rooms/<style>/<room>-behind.png mask per-pixel at plate
+resolution (1280x720; value 0 = no walk-behind, 1..15 = region id;
+missing file = empty).  Regions are tinted translucent distinct hues
+over the plate, the selected one brighter, with each declared baseline
+drawn as a bright tick line.  A left click magic-wands the plate colors
+under the cursor into the current region: a 4-connected flood over
+pixels within the wand tolerance (Euclidean RGB; [ / ] adjust it, shown
+in the status) of the clicked pixel's color.  Right-drag erases mask
+pixels with the brush footprint, 1-9 select the region id, 'b' sets the
+selected region's baseline to the cursor y, and x/Del clears the
+selected region outright.  's' saves BOTH layers: the walk decompose as
+before, plus the active style's mask PNG and the room's "walkbehinds"
+id+baseline declarations in world.json (ids appearing in no style's
+mask are dropped; wanded ids without a baseline are declared inert at
+0, AGS's unset-baseline behavior — set them with 'b').  Mask damage
+rides the same damage-rect presentation below: wand/erase patches are
+recomposited into the cached scene and sent as a=f edits, and a wand
+that floods a large area falls back to the full double-buffered present
+via the same area-fraction rule.  (Batch mask generation lives in
+tools/generate_behind_masks.py; this mode is for touch-ups and hand
+authoring.)
 
 Presentation has two tiers.  Whole-scene changes (room/style switch, grid
 toggle, undo, reload, first frame) use flicker-free double buffering
@@ -70,9 +74,12 @@ every edit-mode present and reports coherence=ok/DRIFT (an APC the
 harness greps; kitty ignores it).
 
 Headless modes: --render OUT.png [--room ID] [--style STYLE] [--hover X,Y]
-composes one frame (optionally with the drawn cursor at logical X,Y);
+[--behind [--region N]] composes one frame (optionally with the drawn
+cursor at logical X,Y; --behind renders walk-behind mode with the mask
+tints and baselines instead of the walk layer);
 --selftest (pure stdlib, no PIL) proves rasterize -> decompose ->
-rasterize is a fixpoint for every room and stays under the obstacle cap;
+rasterize is a fixpoint for every room and stays under the obstacle cap,
+and exercises the wand/erase/clear mask core on a synthetic plate;
 --bench times every stage of the frame pipeline on --room/--style and
 prints a table plus wire throughput at the hover/drag cadences, then
 times the a=f frame-edit path and prints a before/after summary.
@@ -99,7 +106,6 @@ LOGICAL_W, LOGICAL_H = 480, 270
 CELL = 6
 COLS, ROWS = LOGICAL_W // CELL, LOGICAL_H // CELL
 MAX_OBSTACLES = 64
-MAX_OCCLUDERS = 12              # DESK_MAX_OCCLUDERS_PER_ROOM
 STYLES = ("legend", "chumrunner", "fantasy", "pleb-bound")
 DISPLAY_W, DISPLAY_H = 960, 540
 SCALE = DISPLAY_W // LOGICAL_W
@@ -260,36 +266,6 @@ def _point_in_rect(px, py, rect):
             rect["y"] <= py <= rect["y"] + rect["h"])
 
 
-def snap_occluder_rect(a, b):
-    """Snap the rubber band spanned by logical points a and b OUTWARD to
-    the 6px cell grid, clamped to the canvas, never smaller than one
-    cell.  -> {"x","y","w","h"} with int values."""
-    x0, x1 = sorted((a[0], b[0]))
-    y0, y1 = sorted((a[1], b[1]))
-    sx0 = max(0, int(x0 // CELL) * CELL)
-    sy0 = max(0, int(y0 // CELL) * CELL)
-    sx1 = min(LOGICAL_W, int(-(-x1 // CELL)) * CELL)
-    sy1 = min(LOGICAL_H, int(-(-y1 // CELL)) * CELL)
-    if sx1 <= sx0:
-        sx1 = min(LOGICAL_W, sx0 + CELL)
-        sx0 = sx1 - CELL
-    if sy1 <= sy0:
-        sy1 = min(LOGICAL_H, sy0 + CELL)
-        sy0 = sy1 - CELL
-    return {"x": sx0, "y": sy0, "w": sx1 - sx0, "h": sy1 - sy0}
-
-
-def occluder_at(room, point):
-    """Topmost (last-listed) occluder whose rect contains the logical
-    point, or None — the one a right-click deletes and [/] nudge."""
-    if point is None:
-        return None
-    for occluder in reversed(room.get("occluders", [])):
-        if _point_in_rect(point[0], point[1], occluder["rect"]):
-            return occluder
-    return None
-
-
 def repair_spawns(world):
     """Painting can strand a door spawn inside freshly blocked space (or a
     repositioned walk bbox).  Nudge every invalid spawn to the nearest
@@ -347,6 +323,266 @@ def incoming_spawns(world, room_id):
     return points
 
 
+# --------------------------------------------------------------------------
+# Walk-behind mask core (AGS model).  The mask is a plate-resolution byte
+# map: 0 = no walk-behind, 1..15 = region id; the engine re-blits plate
+# pixels of a region over any entity whose feet y is strictly less than the
+# region's baseline.  wand_fill/erase_rect/clear_region operate on packed
+# bytes so --selftest can exercise them without PIL.
+
+PLATE_W, PLATE_H = 1280, 720
+PLATE_CELL = CELL * PLATE_W // LOGICAL_W    # plate px per grid cell (16)
+MAX_REGIONS = 15
+TOLERANCE_DEFAULT = 32
+TOLERANCE_MIN, TOLERANCE_MAX, TOLERANCE_STEP = 4, 120, 4
+
+
+def _region_colors():
+    """15 distinct hues (golden-angle spaced so neighbors contrast)."""
+    import colorsys
+    colors = []
+    for index in range(1, MAX_REGIONS + 1):
+        red, green, blue = colorsys.hsv_to_rgb((index * 0.618034) % 1.0,
+                                               0.85, 1.0)
+        colors.append((int(red * 255), int(green * 255), int(blue * 255)))
+    return colors
+
+
+REGION_COLORS = _region_colors()
+
+
+def region_color(region):
+    return REGION_COLORS[(region - 1) % MAX_REGIONS]
+
+
+def wand_fill(plate, mask, x, y, tolerance, region,
+              width=PLATE_W, height=PLATE_H):
+    """Magic wand: 4-connected flood from (x, y) over plate pixels whose
+    RGB is within `tolerance` (Euclidean) of the clicked pixel's color,
+    stamping `region` into the mask.  plate is packed RGB bytes, mask a
+    width*height bytearray, both mutated in place (mask only).
+    -> (changed px, exclusive bbox of changed px or None,
+    {region id: px count delta})."""
+    seed = y * width + x
+    offset = 3 * seed
+    r0, g0, b0 = plate[offset], plate[offset + 1], plate[offset + 2]
+    tolerance_sq = tolerance * tolerance
+    total = width * height
+    visited = bytearray(total)
+    visited[seed] = 1
+    stack = [seed]
+    changed = 0
+    delta = {}
+    min_x = max_x = x
+    min_y = max_y = y
+    while stack:
+        index = stack.pop()
+        old = mask[index]
+        if old != region:
+            mask[index] = region
+            changed += 1
+            if old:
+                delta[old] = delta.get(old, 0) - 1
+            delta[region] = delta.get(region, 0) + 1
+            bx, by = index % width, index // width
+            if bx < min_x:
+                min_x = bx
+            elif bx > max_x:
+                max_x = bx
+            if by < min_y:
+                min_y = by
+            elif by > max_y:
+                max_y = by
+        column = index % width
+        for neighbor in ((index - 1 if column else -1),
+                         (index + 1 if column < width - 1 else -1),
+                         index - width, index + width):
+            if neighbor < 0 or neighbor >= total or visited[neighbor]:
+                continue
+            offset = 3 * neighbor
+            dr = plate[offset] - r0
+            dg = plate[offset + 1] - g0
+            db = plate[offset + 2] - b0
+            if dr * dr + dg * dg + db * db <= tolerance_sq:
+                visited[neighbor] = 1
+                stack.append(neighbor)
+    if not changed:
+        return 0, None, {}
+    return changed, (min_x, min_y, max_x + 1, max_y + 1), delta
+
+
+def erase_rect(mask, x0, y0, x1, y1, width=PLATE_W):
+    """Zero every mask pixel in [x0,x1) x [y0,y1).  -> (changed px,
+    exclusive bbox or None, {region id: px count delta})."""
+    changed = 0
+    delta = {}
+    span = x1 - x0
+    blank = bytes(span)
+    for row in range(y0, y1):
+        start = row * width + x0
+        segment = mask[start:start + span]
+        if not any(segment):
+            continue
+        for region in set(segment):
+            if region:
+                count = segment.count(region)
+                delta[region] = delta.get(region, 0) - count
+                changed += count
+        mask[start:start + span] = blank
+    if not changed:
+        return 0, None, {}
+    return changed, (x0, y0, x1, y1), delta
+
+
+def clear_region(mask, region):
+    """Zero every pixel of `region` in the mask; -> px removed."""
+    count = mask.count(region)
+    if count:
+        table = bytes(0 if value == region else value
+                      for value in range(256))
+        mask[:] = mask.translate(table)
+    return count
+
+
+def mask_counts(mask):
+    """-> {region id: px count} for the ids present in the mask."""
+    return {region: count for region in range(1, MAX_REGIONS + 1)
+            if (count := mask.count(region))}
+
+
+def behind_mask_path(style, plate):
+    root = os.environ.get("KILIX_LAND_DESKTOP_ASSETS") or REPO
+    return os.path.join(root, "assets/graphics/rooms", style,
+                        plate + "-behind.png")
+
+
+def load_behind_mask(style, plate):
+    """-> PLATE_W*PLATE_H bytearray; a missing, mis-sized, or non-L file
+    yields an all-zero mask (same as the engine's missing-file rule).
+    Values above 15 are cleared like AGS validate_mask."""
+    from PIL import Image
+    try:
+        with Image.open(behind_mask_path(style, plate)) as image:
+            if image.size != (PLATE_W, PLATE_H) or image.mode != "L":
+                return bytearray(PLATE_W * PLATE_H)
+            data = image.tobytes()
+    except OSError:
+        return bytearray(PLATE_W * PLATE_H)
+    table = bytes(value if value <= MAX_REGIONS else 0
+                  for value in range(256))
+    return bytearray(data.translate(table))
+
+
+def save_behind_mask(style, plate, mask):
+    """Write the mask as the plate-sized 8-bit grayscale PNG the engine
+    decodes; -> the path written."""
+    from PIL import Image
+    path = behind_mask_path(style, plate)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Image.frombytes("L", (PLATE_W, PLATE_H), bytes(mask)).save(path)
+    return path
+
+
+def disk_mask_ids(style, plate):
+    """Region ids present in a style's on-disk mask (empty set if the
+    file is missing/unreadable/mis-shaped)."""
+    from PIL import Image
+    try:
+        with Image.open(behind_mask_path(style, plate)) as image:
+            if image.size != (PLATE_W, PLATE_H) or image.mode != "L":
+                return set()
+            colors = image.getcolors(256) or []
+    except OSError:
+        return set()
+    return {value for _, value in colors if 1 <= value <= MAX_REGIONS}
+
+
+_PLATE_RGB_CACHE = {}
+
+
+def load_plate_rgb(style, plate):
+    """Plate-resolution packed RGB bytes for wanding, or None when the
+    plate PNG is missing or not plate-sized (wanding the flat fallback
+    would flood the whole frame — never what the author means)."""
+    from PIL import Image
+    root = os.environ.get("KILIX_LAND_DESKTOP_ASSETS") or REPO
+    key = (root, style, plate)
+    if key not in _PLATE_RGB_CACHE:
+        path = os.path.join(root, "assets/graphics/rooms", style,
+                            plate + ".png")
+        data = None
+        try:
+            with Image.open(path) as image:
+                if image.size == (PLATE_W, PLATE_H):
+                    data = image.convert("RGB").tobytes()
+        except OSError:
+            data = None
+        _PLATE_RGB_CACHE[key] = data
+    return _PLATE_RGB_CACHE[key]
+
+
+def logical_to_plate(point):
+    """Logical (x, y) floats -> nearest plate pixel, clamped."""
+    x = min(PLATE_W - 1, max(0, int(point[0] * PLATE_W / LOGICAL_W)))
+    y = min(PLATE_H - 1, max(0, int(point[1] * PLATE_H / LOGICAL_H)))
+    return x, y
+
+
+def plate_display_rect(bbox):
+    """Display-pixel damage rect covering a plate-pixel bbox under the
+    NEAREST downscale, with 2px slack for the sampling phase; None when
+    it clips away entirely."""
+    x0, y0, x1, y1 = bbox
+    dx0 = x0 * DISPLAY_W // PLATE_W - 2
+    dy0 = y0 * DISPLAY_H // PLATE_H - 2
+    dx1 = -((-x1 * DISPLAY_W) // PLATE_W) + 2
+    dy1 = -((-y1 * DISPLAY_H) // PLATE_H) + 2
+    return clamp_rect(dx0, dy0, dx1 - dx0, dy1 - dy0)
+
+
+def behind_tint(mask, selected):
+    """-> RGBA display-size overlay tinting each region its hue
+    (translucent, the selected region brighter).  Built by NEAREST-
+    downscaling the full plate-resolution mask, so a crop of the result
+    is byte-identical to the same crop of any fresh build — regional
+    recomposition cannot drift from compose_scene."""
+    from PIL import Image
+    lut_r, lut_g, lut_b, lut_a = ([0] * 256 for _ in range(4))
+    for region in range(1, MAX_REGIONS + 1):
+        red, green, blue = region_color(region)
+        lut_r[region], lut_g[region], lut_b[region] = red, green, blue
+        lut_a[region] = 150 if region == selected else 80
+    resized = Image.frombytes("L", (PLATE_W, PLATE_H),
+                              bytes(mask)).resize(
+        (DISPLAY_W, DISPLAY_H), Image.NEAREST)
+    return Image.merge("RGBA", tuple(resized.point(lut) for lut in
+                                     (lut_r, lut_g, lut_b, lut_a)))
+
+
+def behind_overlay(world, room, show_grid, selected):
+    """Grid + context markers + the walk-behind baseline tick lines,
+    drawn on ONE canvas so full and regional composition stack the same
+    three layers in the same order.  The selected region's baseline is
+    bright with an id+baseline label; others are dim."""
+    from PIL import ImageDraw
+    overlay = scene_overlay(world, room, show_grid)
+    draw = ImageDraw.Draw(overlay)
+    for entry in room.get("walkbehinds", []):
+        region, baseline = entry["id"], entry["baseline"]
+        y = int(round(baseline * SCALE))
+        color = region_color(region)
+        if region == selected:
+            draw.line([0, y, DISPLAY_W, y], fill=color + (255,), width=2)
+            draw.text((6, max(0, y - 14)),
+                      f"id{region} base {baseline:g}",
+                      fill=color + (255,))
+        else:
+            draw.line([0, y, DISPLAY_W, y], fill=color + (110,))
+            draw.text((6, max(0, y - 14)), f"id{region}",
+                      fill=color + (110,))
+    return overlay
+
+
 def selftest():
     world = load_world()
     for room in world["rooms"]:
@@ -367,16 +603,58 @@ def selftest():
                 print(f"walk-editor: {room['id']}: non-integer rect",
                       file=sys.stderr)
                 return 1
+    # Wand / erase / clear mask core on a synthetic plate (pure stdlib).
+    width, height = 32, 18
+    blob = (8, 5, 16, 11)                        # exclusive rect
+    plate = bytearray()
+    for y in range(height):
+        for x in range(width):
+            inside = blob[0] <= x < blob[2] and blob[1] <= y < blob[3]
+            plate += bytes((200, 50, 50) if inside else (10, 10, 12))
+    # A neighbor just beyond tolerance 30 (distance 40) must stay out.
+    edge = 3 * (blob[1] * width + blob[2])
+    plate[edge:edge + 3] = bytes((160, 50, 50))
+    mask = bytearray(width * height)
+    area = (blob[2] - blob[0]) * (blob[3] - blob[1])
+
+    def wand_check(label, got, want):
+        if got != want:
+            print(f"walk-editor: wand core: {label}: {got!r} != {want!r}",
+                  file=sys.stderr)
+            return False
+        return True
+
+    ok = wand_check("blob fill",
+                    wand_fill(plate, mask, 10, 6, 30, 1,
+                              width=width, height=height),
+                    (area, blob, {1: area}))
+    ok &= wand_check("tolerance edge stays out",
+                     mask[blob[1] * width + blob[2]], 0)
+    ok &= wand_check("re-wand is a no-op",
+                     wand_fill(plate, mask, 10, 6, 30, 1,
+                               width=width, height=height),
+                     (0, None, {}))
+    ok &= wand_check("re-wand into id 2",
+                     wand_fill(plate, mask, 10, 6, 30, 2,
+                               width=width, height=height),
+                     (area, blob, {1: -area, 2: area}))
+    ok &= wand_check("erase rect",
+                     erase_rect(mask, 8, 5, 12, 8, width=width),
+                     (12, (8, 5, 12, 8), {2: -12}))
+    ok &= wand_check("counts after erase", mask_counts(mask),
+                     {2: area - 12})
+    ok &= wand_check("clear region", clear_region(mask, 2), area - 12)
+    ok &= wand_check("mask empty after clear", any(mask), False)
+    if not ok:
+        return 1
     print(f"walk-editor: OK (fixpoint over {len(world['rooms'])} rooms, "
-          f"cell {CELL}px, cap {MAX_OBSTACLES})")
+          f"cell {CELL}px, cap {MAX_OBSTACLES}; wand core OK)")
     return 0
 
 
 _PLATE_CACHE = {}
-# grid byte 0 -> alpha 0, any nonzero -> the walkable tint alpha (78);
-# occluder mode dims the tint (36) so the cyan furniture rects read first.
+# grid byte 0 -> alpha 0, any nonzero -> the walkable tint alpha (78)
 _WALK_ALPHA = bytes(0 if value == 0 else 78 for value in range(256))
-_WALK_ALPHA_DIM = bytes(0 if value == 0 else 36 for value in range(256))
 
 
 def load_plate(style, plate):
@@ -399,12 +677,11 @@ def load_plate(style, plate):
     return cached
 
 
-def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS, dim=False):
+def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS):
     """-> RGBA walkable-tint image for a cell region, NEAREST-scaled to
     display pixels.  The display is an exact integer multiple of the cell
     grid, so a region tint is byte-identical to the same crop of the full
-    tint — the regional recompose can never drift from compose_scene.
-    dim=True is the occluder-mode tint (visible but quieter)."""
+    tint — the regional recompose can never drift from compose_scene."""
     from PIL import Image
     if cols == COLS and rows == ROWS and not c0x and not c0y:
         cells = bytes(grid)
@@ -415,21 +692,18 @@ def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS, dim=False):
             for r in range(rows))
     cell_px = CELL * SCALE
     alpha = Image.frombytes("L", (cols, rows),
-                            cells.translate(_WALK_ALPHA_DIM if dim
-                                            else _WALK_ALPHA)).resize(
+                            cells.translate(_WALK_ALPHA)).resize(
         (cols * cell_px, rows * cell_px), Image.NEAREST)
     tint = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
     tint.putalpha(alpha)
     return tint
 
 
-def scene_overlay(world, room, show_grid=True, mode="walk"):
+def scene_overlay(world, room, show_grid=True):
     """-> RGBA overlay of grid lines + context markers (doors, object
-    rects, NPC anchors, incoming spawns, occluder rects) — the layer
-    compose_scene stacks above the tinted plate.  Cached by the run loop
-    alongside the scene so painting can recomposite single regions.
-    Occluders draw as thin cyan outlines in walk mode; occluder mode
-    brightens them and adds the baseline tick line."""
+    rects, NPC anchors, incoming spawns) — the layer compose_scene
+    stacks above the tinted plate.  Cached by the run loop alongside the
+    scene so painting can recomposite single regions."""
     from PIL import Image, ImageDraw
     overlay = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -459,38 +733,35 @@ def scene_overlay(world, room, show_grid=True, mode="walk"):
     for x, y in incoming_spawns(world, room["id"]):
         x, y = x * SCALE, y * SCALE
         draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(90, 230, 120, 230))
-    for occluder in room.get("occluders", []):
-        rect = occluder["rect"]
-        box = scaled(rect)
-        if mode == "occluder":
-            draw.rectangle(box, outline=(0, 230, 255, 255), width=2)
-            base_y = occluder.get("baseline",
-                                  rect["y"] + rect["h"]) * SCALE
-            draw.line([box[0], base_y, box[2], base_y],
-                      fill=(180, 255, 255, 255), width=3)
-        else:
-            draw.rectangle(box, outline=(0, 200, 230, 140), width=1)
     return overlay
 
 
-def compose_scene(world, room, grid, style, show_grid=True, mode="walk"):
-    """-> RGBA Image of plate + walk tint + grid + context markers at
+def compose_scene(world, room, grid, style, show_grid=True, mode="walk",
+                  behind=None, selected=1):
+    """-> RGBA Image of plate + tint layer + grid + context markers at
     960x540 — everything EXCEPT the drawn cursor, so the run loop caches
-    the result and rebuilds it only when room/style/grid-toggle/mode
-    change.
-    This is the REFERENCE composition: recompose_cells patches the cached
-    scene from the same three layers, so after any sequence of edits the
-    cache equals what this function would produce.
+    the result and rebuilds it only when room/style/grid-toggle change.
+    This is the REFERENCE composition: recompose_cells (walk mode) and
+    the behind-mode rect patches stack the same three layers in the same
+    order, so after any sequence of edits the cache equals what this
+    function would produce.
 
-    The walkable tint is one COLSxROWS alpha mask scaled with NEAREST and
-    alpha_composited once — not one rectangle per cell — so a rebuild
-    mid-drag stays well under 100ms."""
+    mode "walk": the middle layer is the walkable tint — one COLSxROWS
+    alpha mask scaled with NEAREST and alpha_composited once, so a
+    rebuild mid-drag stays well under 100ms.  mode "behind": the middle
+    layer is the walk-behind region tint from `behind` (a plate-res mask
+    bytearray) and the overlay adds the baseline tick lines."""
     from PIL import Image
     base = load_plate(style, room["plate"])
-    frame = Image.alpha_composite(base,
-                                  walk_tint(grid, dim=mode == "occluder"))
+    if mode == "behind":
+        mask = behind if behind is not None \
+            else bytearray(PLATE_W * PLATE_H)
+        frame = Image.alpha_composite(base, behind_tint(mask, selected))
+        return Image.alpha_composite(
+            frame, behind_overlay(world, room, show_grid, selected))
+    frame = Image.alpha_composite(base, walk_tint(grid))
     return Image.alpha_composite(frame, scene_overlay(world, room,
-                                                      show_grid, mode))
+                                                      show_grid))
 
 
 def recompose_cells(scene, base, overlay, grid, c0x, c0y, c1x, c1y):
@@ -543,19 +814,6 @@ def cursor_damage(hover, brush):
     return [rect for rect in rects if rect]
 
 
-def preview_damage(rect):
-    """-> pixel damage rects for an occluder rubber-band preview (a
-    logical rect dict) with CURSOR_MARGIN slack, or [] when None."""
-    if rect is None:
-        return []
-    margin = CURSOR_MARGIN
-    clamped = clamp_rect(rect["x"] * SCALE - margin,
-                         rect["y"] * SCALE - margin,
-                         rect["w"] * SCALE + 2 * margin + 1,
-                         rect["h"] * SCALE + 2 * margin + 1)
-    return [clamped] if clamped else []
-
-
 def prune_rects(rects):
     """Drop duplicates and rects fully contained in another (largest
     first).  Remaining overlaps are harmless: every rect is cropped from
@@ -603,7 +861,7 @@ def edit_packet(image_id, frame, rects):
     return "".join(parts)
 
 
-def compose_cursor(scene, hover, brush=1, preview=None):
+def compose_cursor(scene, hover, brush=1):
     """-> RGBA frame: the (cached) scene with the drawn cursor composited
     topmost; the scene itself is never mutated.  hover is a logical (x, y)
     float pair or None.  When set: low-alpha hairlines through the exact
@@ -611,21 +869,13 @@ def compose_cursor(scene, hover, brush=1, preview=None):
     reads on bright plates too) around the hovered cell, and a 3px dot at
     the pointer.  kitty hides the system pointer over the image, so this
     is the only cursor the user gets.  Per-hover cost is one overlay draw
-    plus one alpha_composite — a few ms, no plate/tint/marker work.
-    preview is the occluder rubber band (a logical rect dict or None),
-    drawn cyan beneath the hover cursor while the drag is held."""
-    if hover is None and preview is None:
+    plus one alpha_composite — a few ms, no plate/tint/marker work."""
+    if hover is None:
         return scene
     from PIL import Image, ImageDraw
     overlay = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     cell_px = CELL * SCALE
-    if preview is not None:
-        draw.rectangle([preview["x"] * SCALE, preview["y"] * SCALE,
-                        (preview["x"] + preview["w"]) * SCALE - 1,
-                        (preview["y"] + preview["h"]) * SCALE - 1],
-                       fill=(0, 230, 255, 36), outline=(0, 230, 255, 220),
-                       width=2)
     if hover is not None:
         hx, hy = hover[0] * SCALE, hover[1] * SCALE
         # Hairlines first so the cell outline and dot stay solid on top.
@@ -648,10 +898,12 @@ def compose_cursor(scene, hover, brush=1, preview=None):
     return Image.alpha_composite(scene, overlay)
 
 
-def compose(world, room, grid, style, show_grid=True, hover=None, brush=1):
+def compose(world, room, grid, style, show_grid=True, hover=None, brush=1,
+            mode="walk", behind=None, selected=1):
     """-> PNG bytes of the fully composed frame (headless --render path)."""
     frame = compose_cursor(compose_scene(world, room, grid, style,
-                                         show_grid), hover,
+                                         show_grid, mode, behind,
+                                         selected), hover,
                            brush).convert("RGB")
     buffer = io.BytesIO()
     frame.save(buffer, format="PNG", compress_level=1)
@@ -981,6 +1233,8 @@ def parse_events(data):
                 if match:
                     reports.append((int(match.group(1)),
                                     int(match.group(2))))
+                elif sequence == b"\x1b[3~":    # Del key -> DEL byte
+                    keys.append(0x7f)
         elif kind in STRING_INTRODUCERS:            # terminated by ST
             stop = data.find(b"\x1b\\", index + 2)
             if kind == 0x5d:                        # OSC: BEL also ends it
@@ -1016,8 +1270,14 @@ def run_editor(initial_room, initial_style):
     message = "left toggle+paint · right block"
     paint_value = None
     brush = 1
-    mode = "walk"               # "walk" or "occluder" ('o' toggles)
-    occ_drag = None             # rubber-band anchor (logical), or None
+    mode = "walk"               # "walk" paints the grid; "behind" the mask
+    selected_region = 1
+    wand_tolerance = TOLERANCE_DEFAULT
+    behind_masks = {}           # (room id, style) -> plate-res bytearray
+    behind_counts = {}          # same key -> {region id: px count}
+    dirty_behind = set()        # keys with unsaved mask edits
+    dirty_baselines = False
+    pending_behind = []         # display rects to patch at present time
     pixel_mouse = True          # until a DECRQM reply says otherwise
     mouse_note = "mouse: no input yet"
     hover = None                # logical (x, y) floats, or None
@@ -1026,89 +1286,125 @@ def run_editor(initial_room, initial_style):
     overlay_cache = None        # grid+markers layer, for region recompose
     presented_hover = None      # hover state as last PRESENTED on screen
     presented_brush = 1         # brush size as last presented
-    presented_preview = None    # rubber band as last presented
     paint_rects = []            # cache regions patched but not yet sent
     last_present = None         # monotonic time of last present (trace)
     debug_checksum = bool(os.environ.get("KILIX_WALK_EDITOR_DEBUG_CHECKSUM"))
 
     with Terminal() as terminal:
+        def behind_key():
+            return (rooms[room_index]["id"], STYLES[style_index])
+
+        def current_behind():
+            """The active (room, style) mask, loaded lazily from disk."""
+            key = behind_key()
+            mask = behind_masks.get(key)
+            if mask is None:
+                mask = load_behind_mask(STYLES[style_index],
+                                        rooms[room_index]["plate"])
+                behind_masks[key] = mask
+                behind_counts[key] = mask_counts(mask)
+            return mask
+
+        def apply_delta(key, delta):
+            counts = behind_counts.setdefault(key, {})
+            for region, shift in delta.items():
+                counts[region] = counts.get(region, 0) + shift
+                if counts[region] <= 0:
+                    counts.pop(region, None)
+
+        def any_dirty():
+            return dirty or dirty_baselines or bool(dirty_behind)
+
         def status_lines():
             room = rooms[room_index]
-            state_flag = "*" if dirty else " "
+            state_flag = "*" if any_dirty() else " "
             unit = "" if pixel_mouse else " [cell coords]"
             if hover is None:
                 hover_note = "hover -"
             else:
                 hover_note = (f"hover {int(hover[0])},{int(hover[1])} "
                               f"cell {hover_cell[0]},{hover_cell[1]}")
-            if mode == "occluder":
-                occluders = room.get("occluders", [])
-                if occ_drag is not None and hover is not None:
-                    rect = snap_occluder_rect(occ_drag, hover)
-                    occ_note = (f"new {rect['x']},{rect['y']} "
-                                f"{rect['w']}x{rect['h']}")
-                else:
-                    occluder = occluder_at(room, hover)
-                    if occluder is None:
-                        occ_note = "occ -"
-                    else:
-                        rect = occluder["rect"]
-                        base = occluder.get("baseline",
-                                            rect["y"] + rect["h"])
-                        occ_note = f"occ baseline {base:g}"
+            if mode == "behind":
+                counts = behind_counts.get(behind_key(), {})
+                entry = next((wb for wb in room.get("walkbehinds", [])
+                              if wb["id"] == selected_region), None)
+                base_note = f"{entry['baseline']:g}" if entry else "-"
                 return (
                     f"walk-editor  {room['id']} ({STYLES[style_index]})"
-                    f"{state_flag}  OCCLUDER "
-                    f"{len(occluders)}/{MAX_OCCLUDERS}   {occ_note}   "
+                    f"{state_flag}  behind id {selected_region} "
+                    f"({counts.get(selected_region, 0)}px) "
+                    f"base {base_note} tol {wand_tolerance}   "
                     f"{hover_note}   {mouse_note}{unit}",
-                    "o walk · left-drag new · right-click delete · "
-                    f"[/] baseline · s save · r reload · q quit   {message}")
+                    "o walk · 1-9 id · [/] tol · b baseline · x clear · "
+                    "t style · n/p room · g grid · s save · r reload · "
+                    "q quit   "
+                    f"{message}")
             return (
                 f"walk-editor  {room['id']} ({STYLES[style_index]})"
                 f"{state_flag}  walkable {sum(grid)}/{COLS * ROWS} cells"
                 f"   brush {brush}x{brush}   {hover_note}   "
                 f"{mouse_note}{unit}",
-                "1-5/n/p room · t style · g grid · [/] brush · "
-                "o occluders · s save · u undo · r reload · q quit   "
+                "1-5/n/p room · t style · g grid · [/] brush · o behind "
+                "· s save · u undo · r reload · q quit   "
                 f"{message}")
 
         def repaint():
             """One screen update.  When the scene cache is valid and an
             image is already on screen, patch only the damaged rects (old
-            + new cursor, rubber-band preview, painted cells) with a=f
+            + new cursor, painted cells, wand/erase mask damage) with a=f
             edits; whole-scene changes — or damage beyond
-            EDIT_AREA_FRACTION of the frame — take the double-buffered
-            full present unchanged."""
+            EDIT_AREA_FRACTION of the frame (e.g. a wand that flooded a
+            large area) — take the double-buffered full present
+            unchanged.  Pending behind-mask damage is recomposited into
+            the cached scene first, ONE tint rebuild per present however
+            many wand/erase actions batched, from the same three layers
+            compose_scene stacks — crop commutes with the per-pixel
+            alpha_composite and the NEAREST mask downscale is per-pixel
+            local, so the patched cache stays byte-identical to a fresh
+            compose."""
             nonlocal scene_cache, overlay_cache, last_present
-            nonlocal presented_hover, presented_brush, presented_preview
-            nonlocal paint_rects
+            nonlocal presented_hover, presented_brush
+            nonlocal paint_rects, pending_behind
             started = time.perf_counter()
-            eff_brush = brush if mode == "walk" else 1
-            preview = (snap_occluder_rect(occ_drag, hover)
-                       if occ_drag is not None and hover is not None
-                       else None)
+            if pending_behind:
+                if scene_cache is not None and overlay_cache is not None \
+                        and mode == "behind":
+                    from PIL import Image
+                    tint = behind_tint(current_behind(), selected_region)
+                    base = load_plate(STYLES[style_index],
+                                      rooms[room_index]["plate"])
+                    for x, y, w, h in pending_behind:
+                        box = (x, y, x + w, y + h)
+                        patch = Image.alpha_composite(base.crop(box),
+                                                      tint.crop(box))
+                        scene_cache.paste(
+                            Image.alpha_composite(
+                                patch, overlay_cache.crop(box)), (x, y))
+                    paint_rects.extend(pending_behind)
+                else:
+                    scene_cache = None
+                pending_behind = []
             present_mode, rects = "full", []
             if scene_cache is not None and terminal.current_id is not None:
                 rects = prune_rects(
                     cursor_damage(presented_hover, presented_brush)
-                    + cursor_damage(hover, eff_brush)
-                    + preview_damage(presented_preview)
-                    + preview_damage(preview) + paint_rects)
+                    + cursor_damage(hover, brush) + paint_rects)
                 if sum(w * h for _, _, w, h in rects) <= \
                         EDIT_AREA_FRACTION * DISPLAY_W * DISPLAY_H:
                     present_mode = "edit"
             if present_mode == "edit":
                 if rects:
-                    frame = compose_cursor(scene_cache, hover, eff_brush,
-                                           preview)
+                    frame = compose_cursor(scene_cache, hover, brush)
                     wrote = terminal.edit(frame, rects, status_lines())
                 else:
                     terminal.status(*status_lines())
                     wrote = 0
                 if debug_checksum:
-                    reference = compose_scene(world, rooms[room_index],
-                                              grid, STYLES[style_index],
-                                              show_grid, mode)
+                    reference = compose_scene(
+                        world, rooms[room_index], grid,
+                        STYLES[style_index], show_grid, mode,
+                        current_behind() if mode == "behind" else None,
+                        selected_region)
                     verdict = ("ok" if reference.tobytes()
                                == scene_cache.tobytes() else "DRIFT")
                     terminal.write(f"\x1b_Kwalk-editor coherence={verdict}"
@@ -1117,17 +1413,24 @@ def run_editor(initial_room, initial_style):
                         TRACE(f"coherence {verdict}")
             else:
                 if scene_cache is None:
-                    scene_cache = compose_scene(world, rooms[room_index],
-                                                grid, STYLES[style_index],
-                                                show_grid, mode)
-                    overlay_cache = scene_overlay(world, rooms[room_index],
-                                                  show_grid, mode)
-                frame = compose_cursor(scene_cache, hover, eff_brush,
-                                       preview)
+                    if mode == "behind":
+                        scene_cache = compose_scene(
+                            world, rooms[room_index], grid,
+                            STYLES[style_index], show_grid, "behind",
+                            current_behind(), selected_region)
+                        overlay_cache = behind_overlay(
+                            world, rooms[room_index], show_grid,
+                            selected_region)
+                    else:
+                        scene_cache = compose_scene(
+                            world, rooms[room_index], grid,
+                            STYLES[style_index], show_grid)
+                        overlay_cache = scene_overlay(
+                            world, rooms[room_index], show_grid)
+                frame = compose_cursor(scene_cache, hover, brush)
                 _, wrote = terminal.present(frame.tobytes(),
                                             status_lines())
-            presented_hover, presented_brush = hover, eff_brush
-            presented_preview = preview
+            presented_hover, presented_brush = hover, brush
             paint_rects = []
             if TRACE:
                 now = time.monotonic()
@@ -1153,77 +1456,29 @@ def run_editor(initial_room, initial_style):
             hover costs at most one present per cell crossed.  While a
             paint drag is active, hover-only repaints are skipped outright
             — paint actions drive the presents and the trailing flush
-            snaps the cursor when the gesture ends.  While a rubber-band
-            drag is held every report requests a repaint (the cadence
-            throttle coalesces them) so the preview follows the pointer."""
+            snaps the cursor when the gesture ends."""
             nonlocal hover, hover_cell, need_image, need_status
             hover = point
             cell = (None if point is None else
                     (int(point[0] // CELL), int(point[1] // CELL)))
             if cell != hover_cell:
                 hover_cell = cell
-                if paint_value is None and occ_drag is None:
+                if paint_value is None:
                     need_image = True
-                elif paint_value is not None and TRACE:
+                elif TRACE:
                     TRACE(f"drop hover-repaint cell={cell} (drag active)")
-            if occ_drag is not None:
-                need_image = True
             need_status = True
-
-        def finish_occluder_drag(point):
-            """Commit an active rubber band as a NEW occluder: rect
-            snapped outward to the 6px grid, baseline = rect bottom,
-            respecting the per-room cap.  No-op when no drag is held."""
-            nonlocal occ_drag, dirty, scene_cache, message, need_image
-            if occ_drag is None:
-                return
-            anchor, occ_drag = occ_drag, None
-            rect = snap_occluder_rect(anchor,
-                                      point if point is not None
-                                      else anchor)
-            occluders = rooms[room_index].setdefault("occluders", [])
-            if len(occluders) >= MAX_OCCLUDERS:
-                message = f"occluder cap {MAX_OCCLUDERS} reached"
-            else:
-                occluders.append({"rect": rect,
-                                  "baseline": rect["y"] + rect["h"]})
-                dirty = True
-                message = (f"occluder {rect['x']},{rect['y']} "
-                           f"{rect['w']}x{rect['h']} baseline "
-                           f"{rect['y'] + rect['h']}")
-                if TRACE:
-                    TRACE(f"occluder add {rect}")
-            scene_cache = None
-            need_image = True
-
-        def nudge_baseline(delta):
-            """[ / ] in occluder mode: move the baseline of the occluder
-            under the cursor by delta logical px, clamped to its rect."""
-            nonlocal dirty, scene_cache, message
-            occluder = occluder_at(rooms[room_index], hover)
-            if occluder is None:
-                message = "no occluder under cursor"
-                return
-            rect = occluder["rect"]
-            baseline = occluder.get("baseline",
-                                    rect["y"] + rect["h"]) + delta
-            baseline = max(rect["y"],
-                           min(rect["y"] + rect["h"], baseline))
-            occluder["baseline"] = baseline
-            dirty = True
-            scene_cache = None
-            message = f"baseline {baseline:g}"
 
         def switch_room(new_index):
             nonlocal room_index, grid, dirty, undo_stack, scene_cache
-            nonlocal overlay_cache, occ_drag
+            nonlocal overlay_cache
             room_index = new_index % len(rooms)
             grid = rasterize(rooms[room_index])
             undo_stack = []
             dirty = False
-            occ_drag = None
             scene_cache = None
             overlay_cache = None
+            del pending_behind[:]
 
         repaint()
         last_draw = time.monotonic()
@@ -1231,7 +1486,7 @@ def run_editor(initial_room, initial_style):
         need_image = need_status = False
         while True:
             interval = (DRAG_REPAINT_INTERVAL
-                        if paint_value is not None or occ_drag is not None
+                        if paint_value is not None
                         else REPAINT_INTERVAL)
             if need_image:
                 # A repaint was suppressed by the throttle: wake up exactly
@@ -1283,7 +1538,6 @@ def run_editor(initial_room, initial_style):
                     if paint_value is not None:
                         need_image = True   # gesture over: flush promptly
                     paint_value = None
-                    finish_occluder_drag(point)
                     note(f"{px},{py} release")
                     continue
                 base_button = button & 3
@@ -1296,7 +1550,6 @@ def run_editor(initial_room, initial_style):
                     if paint_value is not None:
                         need_image = True   # gesture over: flush promptly
                     paint_value = None
-                    finish_occluder_drag(point)
                     note(f"{px},{py} hover")
                     continue
                 if point is None:
@@ -1306,37 +1559,70 @@ def run_editor(initial_room, initial_style):
                 if not (0 <= cx < COLS and 0 <= cy < ROWS):
                     note(f"{px},{py} outside grid")
                     continue
-                if mode == "occluder":
-                    # Occluder layer: left press/drag rubber-bands a new
-                    # rect (committed on release), right-click deletes the
-                    # occluder under the pointer.  Never paints the grid.
+                if mode == "behind":
+                    bkey = behind_key()
                     if base_button == 0:
-                        if occ_drag is None:
-                            # Press — or a drag whose press was lost:
-                            # adopt it so the gesture still lands.
-                            occ_drag = point
+                        if motion:      # no drag-wand: press only
+                            note(f"{px},{py} cell {cx},{cy} idle")
+                            continue
+                        plate_rgb = load_plate_rgb(
+                            STYLES[style_index],
+                            rooms[room_index]["plate"])
+                        if plate_rgb is None:
+                            message = ("no 1280x720 plate PNG - "
+                                       "cannot wand")
+                            note(f"{px},{py} wand refused")
                             need_image = True
-                        note(f"{px},{py} occluder drag")
-                    elif base_button == 2 and not motion:
-                        occluders = rooms[room_index].get("occluders", [])
-                        target = next(
-                            (i for i in reversed(range(len(occluders)))
-                             if _point_in_rect(point[0], point[1],
-                                               occluders[i]["rect"])),
-                            None)
-                        if target is None:
-                            message = "no occluder here"
-                        else:
-                            del occluders[target]
-                            dirty = True
-                            scene_cache = None
-                            message = "deleted occluder"
-                            if TRACE:
-                                TRACE(f"occluder delete index={target}")
+                            continue
+                        wx, wy = logical_to_plate(point)
+                        note(f"{px},{py} cell {cx},{cy} wand")
+                        changed, bbox, delta = wand_fill(
+                            plate_rgb, current_behind(), wx, wy,
+                            wand_tolerance, selected_region)
+                        if not changed:
+                            message = "wand: no pixels changed"
+                            need_image = True
+                            continue
+                        apply_delta(bkey, delta)
+                        dirty_behind.add(bkey)
                         need_image = True
-                        note(f"{px},{py} occluder delete")
-                    else:
-                        note(f"{px},{py} idle")
+                        message = (f"wand +{changed}px id "
+                                   f"{selected_region}")
+                        rect = plate_display_rect(bbox)
+                        if scene_cache is not None and rect:
+                            pending_behind.append(rect)
+                        else:
+                            scene_cache = None
+                        if TRACE:
+                            TRACE(f"wand plate={wx},{wy} px={changed} "
+                                  f"id={selected_region} "
+                                  f"tol={wand_tolerance}")
+                        continue
+                    if base_button == 2 and (not motion
+                                             or paint_value is None):
+                        paint_value = "erase"
+                    if paint_value != "erase":
+                        note(f"{px},{py} cell {cx},{cy} idle")
+                        continue
+                    note(f"{px},{py} cell {cx},{cy} erase "
+                         f"{brush}x{brush}")
+                    e0x, e0y, e1x, e1y = brush_footprint(cx, cy, brush)
+                    changed, bbox, delta = erase_rect(
+                        current_behind(),
+                        e0x * PLATE_CELL, e0y * PLATE_CELL,
+                        (e1x + 1) * PLATE_CELL, (e1y + 1) * PLATE_CELL)
+                    if changed:
+                        apply_delta(bkey, delta)
+                        dirty_behind.add(bkey)
+                        need_image = True
+                        rect = plate_display_rect(bbox)
+                        if scene_cache is not None and rect:
+                            pending_behind.append(rect)
+                        else:
+                            scene_cache = None
+                        if TRACE:
+                            TRACE(f"erase cells={e0x},{e0y}..{e1x},{e1y}"
+                                  f" px={changed}")
                     continue
                 if base_button in (0, 2) and (not motion
                                               or paint_value is None):
@@ -1380,7 +1666,8 @@ def run_editor(initial_room, initial_style):
             for key in keys:
                 char = chr(key) if 32 <= key < 127 else ""
                 if char == "q":
-                    if dirty and message != "unsaved changes - q again":
+                    if any_dirty() and \
+                            message != "unsaved changes - q again":
                         message = "unsaved changes - q again"
                         need_image = True
                         break
@@ -1392,6 +1679,47 @@ def run_editor(initial_room, initial_style):
                     else:
                         apply_decomposition(rooms[room_index], result)
                         nudged = repair_spawns(world)
+                        room = rooms[room_index]
+                        bkey = behind_key()
+                        mask = behind_masks.get(bkey)
+                        mask_note = ""
+                        if mask is not None:
+                            # Reconcile this room's walkbehind ids with
+                            # the ids that appear in ANY style's mask
+                            # (ids+baselines are shared across styles by
+                            # contract); a wanded id with no baseline is
+                            # declared inert at 0, AGS-style.
+                            ids = set(behind_counts.get(bkey, {}))
+                            for other in STYLES:
+                                if other == STYLES[style_index]:
+                                    continue
+                                other_key = (room["id"], other)
+                                if other_key in behind_masks:
+                                    ids |= set(behind_counts.get(
+                                        other_key, {}))
+                                else:
+                                    ids |= disk_mask_ids(other,
+                                                         room["plate"])
+                            old = {wb["id"]: wb["baseline"] for wb in
+                                   room.get("walkbehinds", [])}
+                            if ids:
+                                room["walkbehinds"] = [
+                                    {"id": region,
+                                     "baseline": old.get(region, 0)}
+                                    for region in sorted(ids)]
+                            else:
+                                room.pop("walkbehinds", None)
+                            if any(mask) or os.path.exists(
+                                    behind_mask_path(
+                                        STYLES[style_index],
+                                        room["plate"])):
+                                save_behind_mask(STYLES[style_index],
+                                                 room["plate"], mask)
+                                present = sorted(
+                                    behind_counts.get(bkey, {}))
+                                id_note = (",".join(map(str, present))
+                                           if present else "none")
+                                mask_note = f", mask ids {id_note}"
                         with open(world_path(), "w",
                                   encoding="utf-8") as handle:
                             json.dump(world, handle, indent=2)
@@ -1403,38 +1731,88 @@ def run_editor(initial_room, initial_style):
                             capture_output=True, text=True)
                         if verdict.returncode == 0:
                             dirty = False
+                            dirty_baselines = False
+                            dirty_behind.discard(bkey)
                             nudge_note = (f", nudged {len(nudged)} "
                                           "spawn(s)" if nudged else "")
-                            occluders = rooms[room_index].get(
-                                "occluders", [])
                             message = (f"saved: walk + "
                                        f"{len(result['obstacles'])} "
-                                       "obstacles + "
-                                       f"{len(occluders)} occluders"
-                                       f"{nudge_note}, validator OK")
+                                       "obstacles"
+                                       f"{nudge_note}{mask_note}, "
+                                       "validator OK")
                         else:
                             message = ("SAVED BUT INVALID: " +
                                        verdict.stderr.strip()[-90:])
+                        if mode == "behind":
+                            # The reconcile may have added/dropped
+                            # baseline declarations the overlay draws.
+                            scene_cache = None
                 elif char == "o":
-                    mode = "occluder" if mode == "walk" else "walk"
-                    paint_value = None
-                    occ_drag = None
+                    mode = "behind" if mode == "walk" else "walk"
+                    paint_value = None      # a mode flip ends any gesture
+                    if mode == "behind":
+                        current_behind()
+                        message = ("behind masks: left wand · right-drag "
+                                   "erase · b baseline")
+                    else:
+                        message = "walk layer"
                     scene_cache = None
-                    message = ("occluder mode: drag new · right-click "
-                               "delete · [/] baseline"
-                               if mode == "occluder" else "walk mode")
-                elif char == "u" and undo_stack:
-                    grid = bytearray(undo_stack.pop())
-                    dirty = True
+                elif mode == "behind" and char in "123456789":
+                    selected_region = int(char)
                     scene_cache = None
-                    message = "undo"
+                    message = f"selected region id {selected_region}"
+                elif mode == "behind" and char in "]+=":
+                    wand_tolerance = min(TOLERANCE_MAX,
+                                         wand_tolerance + TOLERANCE_STEP)
+                    message = f"wand tolerance {wand_tolerance}"
+                elif mode == "behind" and char in "[-":
+                    wand_tolerance = max(TOLERANCE_MIN,
+                                         wand_tolerance - TOLERANCE_STEP)
+                    message = f"wand tolerance {wand_tolerance}"
+                elif mode == "behind" and char == "b":
+                    if hover is None:
+                        message = "hover over the plate, then b"
+                    else:
+                        baseline = max(0, min(LOGICAL_H,
+                                              int(round(hover[1]))))
+                        entries = rooms[room_index].setdefault(
+                            "walkbehinds", [])
+                        entry = next((wb for wb in entries
+                                      if wb["id"] == selected_region),
+                                     None)
+                        if entry is None:
+                            entries.append({"id": selected_region,
+                                            "baseline": baseline})
+                            entries.sort(key=lambda wb: wb["id"])
+                        else:
+                            entry["baseline"] = baseline
+                        dirty_baselines = True
+                        scene_cache = None
+                        message = (f"baseline id {selected_region} = "
+                                   f"{baseline}")
+                elif mode == "behind" and (char == "x" or key == 0x7f):
+                    removed = clear_region(current_behind(),
+                                           selected_region)
+                    if removed:
+                        behind_counts.get(behind_key(), {}).pop(
+                            selected_region, None)
+                        dirty_behind.add(behind_key())
+                        scene_cache = None
+                        message = (f"cleared id {selected_region} "
+                                   f"({removed}px)")
+                    else:
+                        message = f"id {selected_region} already empty"
+                elif char == "u":
+                    if mode == "behind":
+                        message = "undo covers the walk layer only"
+                    elif undo_stack:
+                        grid = bytearray(undo_stack.pop())
+                        dirty = True
+                        scene_cache = None
+                        message = "undo"
                 elif char == "g":
                     show_grid = not show_grid
                     scene_cache = None
-                elif char == "]" and mode == "occluder":
-                    nudge_baseline(-CELL)   # up: baseline y decreases
-                elif char == "[" and mode == "occluder":
-                    nudge_baseline(CELL)    # down: toward the rect bottom
                 elif char in "]+=":
                     brush = min(BRUSH_MAX, brush + 1)
                     message = f"brush {brush}x{brush}"
@@ -1455,6 +1833,10 @@ def run_editor(initial_room, initial_style):
                 elif char == "r":
                     world = load_world()
                     rooms = world["rooms"]
+                    behind_masks.clear()
+                    behind_counts.clear()
+                    dirty_behind.clear()
+                    dirty_baselines = False
                     switch_room(room_index)
                     message = "reloaded"
                 need_image = True
@@ -1467,7 +1849,7 @@ def run_editor(initial_room, initial_style):
             # they flush every batch to keep hover coords live.
             now = time.monotonic()
             interval = (DRAG_REPAINT_INTERVAL
-                        if paint_value is not None or occ_drag is not None
+                        if paint_value is not None
                         else REPAINT_INTERVAL)
             if need_image and now - last_draw >= interval:
                 repaint()
@@ -1494,6 +1876,13 @@ def main():
     parser.add_argument("--brush", type=int, default=1,
                         choices=range(1, BRUSH_MAX + 1),
                         help="with --render: hover footprint size")
+    parser.add_argument("--behind", action="store_true",
+                        help="with --render: walk-behind mode (mask "
+                             "region tints + baselines) instead of the "
+                             "walk layer")
+    parser.add_argument("--region", type=int, default=1, metavar="ID",
+                        choices=range(1, MAX_REGIONS + 1),
+                        help="with --render --behind: selected region id")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--bench", action="store_true",
                         help="time the frame pipeline on --room/--style "
@@ -1516,10 +1905,17 @@ def main():
         room = next((r for r in world["rooms"]
                      if r["id"] == arguments.room), world["rooms"][0])
         png = compose(world, room, rasterize(room), arguments.style,
-                      hover=hover, brush=arguments.brush)
+                      hover=hover, brush=arguments.brush,
+                      mode="behind" if arguments.behind else "walk",
+                      behind=(load_behind_mask(arguments.style,
+                                               room["plate"])
+                              if arguments.behind else None),
+                      selected=arguments.region)
         with open(arguments.render, "wb") as handle:
             handle.write(png)
         note = f" hover {arguments.hover}" if hover else ""
+        if arguments.behind:
+            note += f" [behind mode, region {arguments.region}]"
         print(f"walk-editor: rendered {room['id']} ({arguments.style}) "
               f"to {arguments.render}{note}")
         return 0

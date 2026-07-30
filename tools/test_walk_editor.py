@@ -48,16 +48,15 @@ Eight scenarios, all must pass:
                  sequence must report coherence=ok, never DRIFT), and
                  grid toggles / room switches still take the full-frame
                  double-buffer delete-after-place path
-  occluder-authoring
-                 'o' enters occluder mode (OCCLUDER status tag, full-frame
-                 present), a left rubber-band drag live-previews via a=f
-                 with snapped coords in the status line and commits on
-                 release (rect snapped to the 6px grid, baseline = rect
-                 bottom, saved to world.json and green under
-                 validate_world.py), [/] nudge the baseline of the
-                 occluder under the cursor, right-click deletes it (gone
-                 from the next save), and walk painting still works after
-                 the mode round-trip
+  behind-authoring  walk-behind mask mode ('o') against a synthetic
+                 1280x720 plate with a distinct-colored blob written into
+                 the temp asset tree: a magic-wand click floods exactly
+                 the blob's pixels into region 1, 'b' sets the baseline
+                 at the hovered y, 's' writes the plate-sized 8-bit
+                 grayscale <room>-behind.png plus the world.json
+                 "walkbehinds" declaration (validator green); a
+                 right-drag erases a strip, x clears the region, and the
+                 empty mask + dropped declaration round-trip too
 
 Usage:  test_walk_editor.py            verbose report with log evidence
         test_walk_editor.py --quick    one line per check, nonzero on failure
@@ -336,7 +335,7 @@ def hover_burst():
 class Session:
     """One editor run on a pty with the live winsize, temp assets tree."""
 
-    def __init__(self, env_extra=None):
+    def __init__(self, env_extra=None, setup=None):
         self.tmp = tempfile.mkdtemp(prefix="walk_editor_test_")
         world_dir = os.path.join(self.tmp, "assets/world")
         os.makedirs(world_dir)
@@ -344,6 +343,8 @@ class Session:
         shutil.copy(WORLD_SRC, self.world)
         with open(self.world, "rb") as handle:
             self.original = handle.read()
+        if setup:
+            setup(self.tmp)
         self.log = bytearray()
         self.lock = threading.Lock()
         self.master, slave = pty.openpty()
@@ -754,179 +755,6 @@ def run_toggle_brush_scenario(verbose):
     return report("toggle+brush", checks, log, verbose)
 
 
-# Occluder-authoring geometry: cells (50,10)->(55,14) span a bedroom area
-# disjoint from the shipped bed occluder (48,138 159x96 -> cells 8..34 x
-# 23..38) and from PAINT_CELLS, so right-click delete can only hit the new
-# rect and the walk grid stays untouched.  With the live tab geometry the
-# editor's inverse pixel mapping lands at ~(303.1,63.0) and ~(333.0,87.0),
-# so the outward 6px snap is exactly x 300..336, y 60..90.
-OCC_DRAG_START = (50, 10)
-OCC_DRAG_END = (55, 14)
-OCC_INSIDE = (52, 12)
-OCC_EXPECT_RECT = {"x": 300, "y": 60, "w": 36, "h": 30}
-OCC_EXPECT_BASELINE = 90
-
-
-def right_click_burst(cell):
-    px, py = pixel_for_cell(*cell)
-    return f"\x1b[<2;{px};{py}M\x1b[<2;{px};{py}m".encode()
-
-
-def hover_at_burst(cell):
-    px, py = pixel_for_cell(*cell)
-    return f"\x1b[<35;{px};{py}M".encode()
-
-
-def read_bedroom(session):
-    """-> ('bedroom' room dict from the temp world.json, error string)."""
-    try:
-        with open(session.world, encoding="utf-8") as handle:
-            world = json.load(handle)
-        return next(r for r in world["rooms"] if r["id"] == "bedroom"), ""
-    except (OSError, ValueError, StopIteration) as error:
-        return None, f"unreadable: {error}"
-
-
-def run_occluder_scenario(verbose):
-    """Occluder layer contract: 'o' round-trips WALK<->OCCLUDER mode,
-    rubber-banding authors a snapped occluder with baseline = rect bottom
-    (live coords in the status line while held), [/] nudge the baseline,
-    right-click deletes, every save passes validate_world.py, and walk
-    painting still works after returning to walk mode."""
-    checks = []
-
-    def check(label, ok, detail=""):
-        checks.append((label, bool(ok), detail))
-
-    session = Session()
-    try:
-        check("transmits kitty image (a=T)",
-              session.wait_for(APC_TRANSMIT, 15) != -1)
-        check("writes status line",
-              session.wait_for(b"walk-editor  ", 5) != -1)
-        time.sleep(0.3)                  # startup repaints settle
-        mode_mark = len(session.snapshot())
-        session.send(b"o")
-        check("'o' shows the OCCLUDER mode tag",
-              session.wait_for(b"OCCLUDER", 5, start=mode_mark) != -1)
-        check("mode switch takes the full-frame a=T path",
-              session.wait_for(APC_TRANSMIT, 5, start=mode_mark) != -1)
-        time.sleep(0.3)                  # mode present settles
-        drag_mark = len(session.snapshot())
-        px0, py0 = pixel_for_cell(*OCC_DRAG_START)
-        px1, py1 = pixel_for_cell(*OCC_DRAG_END)
-        session.send(f"\x1b[<0;{px0};{py0}M\x1b[<32;{px1};{py1}M".encode())
-        rect = OCC_EXPECT_RECT
-        live = (f"new {rect['x']},{rect['y']} "
-                f"{rect['w']}x{rect['h']}").encode()
-        check("status shows live snapped coords while the drag is held",
-              session.wait_for(live, 5, start=drag_mark) != -1)
-        check("rubber-band preview patches via a=f edits",
-              session.wait_for(APC_EDIT, 5, start=drag_mark) != -1)
-        drag_log = session.snapshot()[drag_mark:]
-        check("no full a=T while the rubber band is held",
-              APC_TRANSMIT not in drag_log)
-        session.send(f"\x1b[<0;{px1};{py1}m".encode())
-        check("release commits the occluder (status ack)",
-              session.wait_for(b"occluder 300,60", 5,
-                               start=drag_mark) != -1)
-        time.sleep(0.3)
-        save_mark = len(session.snapshot())
-        session.send(b"s")
-        check("save reports both layers + validator OK",
-              session.wait_for(b"2 occluders, validator OK", 15,
-                               start=save_mark) != -1)
-        bedroom, error = read_bedroom(session)
-        added = [] if bedroom is None else \
-            [o for o in bedroom.get("occluders", [])
-             if o.get("rect") == OCC_EXPECT_RECT]
-        check("saved occluder rect snapped to the 6px grid",
-              len(added) == 1,
-              error or f"occluders={bedroom.get('occluders')}")
-        check("saved baseline = rect bottom",
-              added and added[0].get("baseline") == OCC_EXPECT_BASELINE,
-              f"got {added[0].get('baseline') if added else None}")
-        verdict = subprocess.run(
-            [sys.executable, VALIDATOR, session.world],
-            capture_output=True, text=True)
-        check("world with the authored occluder passes validate_world.py",
-              verdict.returncode == 0, verdict.stderr.strip()[-120:])
-        # Baseline nudge: hover inside the new rect, ']' moves the
-        # baseline up 6px, '[' moves it back down to the rect bottom.
-        session.send(hover_at_burst(OCC_INSIDE))
-        nudge_mark = len(session.snapshot())
-        session.send(b"]")
-        check("']' nudges the hovered baseline up 6px",
-              session.wait_for(b"baseline 84", 5, start=nudge_mark) != -1)
-        back_mark = len(session.snapshot())
-        session.send(b"[")
-        check("'[' nudges it back down (clamped to the rect)",
-              session.wait_for(b"baseline 90", 5, start=back_mark) != -1)
-        delete_mark = len(session.snapshot())
-        session.send(right_click_burst(OCC_INSIDE))
-        check("right-click inside the occluder deletes it",
-              session.wait_for(b"deleted occluder", 5,
-                               start=delete_mark) != -1)
-        time.sleep(0.2)
-        save2_mark = len(session.snapshot())
-        session.send(b"s")
-        check("save after delete reports one occluder + validator OK",
-              session.wait_for(b"1 occluders, validator OK", 15,
-                               start=save2_mark) != -1)
-        bedroom, error = read_bedroom(session)
-        occluders = [] if bedroom is None else bedroom.get("occluders", [])
-        check("deleted occluder is gone from the saved world",
-              bedroom is not None and
-              all(o.get("rect") != OCC_EXPECT_RECT for o in occluders),
-              error or f"occluders={occluders}")
-        check("shipped bed occluder survived untouched",
-              any(o.get("rect") == {"x": 48, "y": 138, "w": 159, "h": 96}
-                  and o.get("baseline") == 228 for o in occluders),
-              f"occluders={occluders}")
-        walk_mark = len(session.snapshot())
-        session.send(b"o")
-        check("'o' returns to walk mode",
-              session.wait_for(b"walk mode", 5, start=walk_mark) != -1)
-        time.sleep(0.3)
-        paint_mark = len(session.snapshot())
-        send_burst(session, mouse_burst(), False)
-        check("walk painting still works after the mode round-trip (a=f)",
-              session.wait_for(APC_EDIT, 6, start=paint_mark) != -1)
-        time.sleep(0.5)
-        save3_mark = len(session.snapshot())
-        session.send(b"s")
-        check("final save reports validator OK",
-              session.wait_for(b"validator OK", 15,
-                               start=save3_mark) != -1)
-        session.send(b"q")
-        exited = True
-        try:
-            session.child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            exited = False
-        check("quits on q", exited)
-    finally:
-        session.close()
-        log = session.snapshot()
-
-    try:
-        with open(session.world, "rb") as handle:
-            world = json.loads(handle.read())
-        room = next(r for r in world["rooms"] if r["id"] == "bedroom")
-        grid = W.rasterize(room)
-        missing = [c for c in PAINT_CELLS
-                   if not grid[c[1] * W.COLS + c[0]]]
-    except (OSError, ValueError, StopIteration, KeyError) as error:
-        missing = [f"unreadable: {error}"]
-    check("painted cells walkable in the final saved world", not missing,
-          f"cells never painted: {missing}")
-
-    check_presentation(log, check)
-    check("no traceback", b"Traceback" not in log)
-    session.cleanup()
-    return report("occluder-authoring", checks, log, verbose)
-
-
 def run_coherence_scenario(verbose):
     """Screen-vs-cache coherence: with KILIX_WALK_EDITOR_DEBUG_CHECKSUM=1
     every edit-mode present byte-compares the incrementally patched scene
@@ -1014,6 +842,205 @@ def run_coherence_scenario(verbose):
     return report("edit-coherence (checksum audit)", checks, log, verbose)
 
 
+# Walk-behind authoring scenario: a synthetic bedroom plate with one
+# distinct-colored blob, written into the temp asset tree before spawn.
+BLOB_RECT = (400, 300, 560, 420)          # plate px, exclusive
+BLOB_COLOR = (196, 64, 60)
+PLATE_BG = (44, 46, 54)
+BLOB_AREA = ((BLOB_RECT[2] - BLOB_RECT[0])
+             * (BLOB_RECT[3] - BLOB_RECT[1]))
+WAND_CELL = (30, 22)                      # cell center -> plate (488, 360)
+BASELINE_CELL = (30, 33)                  # hover row -> baseline y ~201
+BASELINE_Y = 201
+# 1x1-brush erase drag across these cells zeroes this plate strip (each
+# cell is 16 plate px), fully inside the blob.
+ERASE_CELLS = [(28, 22), (29, 22), (30, 22), (31, 22), (32, 22)]
+ERASE_PLATE_RECT = (448, 352, 528, 368)
+ERASE_AREA = ((ERASE_PLATE_RECT[2] - ERASE_PLATE_RECT[0])
+              * (ERASE_PLATE_RECT[3] - ERASE_PLATE_RECT[1]))
+
+
+def make_synthetic_plate(tree):
+    """Write the wandable synthetic legend/bedroom plate into `tree`."""
+    from PIL import Image
+    room_dir = os.path.join(tree, "assets/graphics/rooms/legend")
+    os.makedirs(room_dir, exist_ok=True)
+    plate = Image.new("RGB", (W.PLATE_W, W.PLATE_H), PLATE_BG)
+    blob = Image.new("RGB", (BLOB_RECT[2] - BLOB_RECT[0],
+                             BLOB_RECT[3] - BLOB_RECT[1]), BLOB_COLOR)
+    plate.paste(blob, BLOB_RECT[:2])
+    plate.save(os.path.join(room_dir, "bedroom.png"))
+
+
+def right_drag_burst(cells):
+    """Right press + drags + release exactly as kitty emits them."""
+    px, py = pixel_for_cell(*cells[0])
+    out = [f"\x1b[<2;{px};{py}M"]
+    for cell in cells[1:]:
+        px, py = pixel_for_cell(*cell)
+        out.append(f"\x1b[<34;{px};{py}M")
+    out.append(f"\x1b[<2;{px};{py}m")
+    return "".join(out).encode()
+
+
+def hover_report(cell):
+    px, py = pixel_for_cell(*cell)
+    return f"\x1b[<35;{px};{py}M".encode()
+
+
+def read_mask(session):
+    """-> (mode, size, flat pixel list) of the saved legend bedroom mask,
+    or (None, None, None) when the file does not exist."""
+    from PIL import Image
+    path = os.path.join(session.tmp,
+                        "assets/graphics/rooms/legend/bedroom-behind.png")
+    if not os.path.exists(path):
+        return None, None, None
+    with Image.open(path) as image:
+        return image.mode, image.size, list(image.getdata())
+
+
+def bedroom_walkbehinds(session):
+    with open(session.world, "rb") as handle:
+        world = json.loads(handle.read())
+    room = next(r for r in world["rooms"] if r["id"] == "bedroom")
+    return room.get("walkbehinds")
+
+
+def run_behind_scenario(verbose):
+    """Walk-behind authoring: 'o' enters mask mode, a magic-wand click
+    floods the synthetic blob into region 1, 'b' sets the baseline at
+    the hovered y, 's' writes the mask PNG + world.json declaration
+    (validator green); a right-drag erases a strip, 'x' clears the rest,
+    and the empty mask + dropped declaration save cleanly too."""
+    checks = []
+
+    def check(label, ok, detail=""):
+        checks.append((label, bool(ok), detail))
+
+    session = Session(setup=make_synthetic_plate)
+    try:
+        check("transmits kitty image (a=T)",
+              session.wait_for(APC_TRANSMIT, 15) != -1)
+        check("writes status line",
+              session.wait_for(b"walk-editor  ", 5) != -1)
+        time.sleep(0.3)                  # startup repaints settle
+        mode_mark = len(session.snapshot())
+        session.send(b"o")
+        check("'o' enters behind mode (status shows the region id)",
+              session.wait_for(b"behind id 1", 5, start=mode_mark) != -1)
+        time.sleep(0.2)
+        wand_mark = len(session.snapshot())
+        session.send(click_burst(WAND_CELL))
+        check("magic wand floods exactly the blob into region 1",
+              session.wait_for(f"wand +{BLOB_AREA}px id 1".encode(), 6,
+                               start=wand_mark) != -1)
+        check("wand updates the image",
+              wait_for_any(session, IMAGE_UPDATE, 6, start=wand_mark)
+              != -1)
+        session.send(hover_report(BASELINE_CELL))
+        check("hover reaches the baseline row",
+              session.wait_for(b"cell 30,33", 5, start=wand_mark) != -1)
+        session.send(b"b")
+        check("'b' sets the selected region's baseline",
+              session.wait_for(b"baseline id 1 = ", 5,
+                               start=wand_mark) != -1)
+        time.sleep(0.2)
+        save1 = len(session.snapshot())
+        session.send(b"s")
+        check("save 1 reports 'validator OK'",
+              session.wait_for(b"validator OK", 15, start=save1) != -1)
+
+        mask_mode, size, data = read_mask(session)
+        check("mask PNG written plate-sized 8-bit grayscale",
+              mask_mode == "L" and size == (W.PLATE_W, W.PLATE_H),
+              f"mode={mask_mode} size={size}")
+        blob_ok = (data is not None and set(data) == {0, 1}
+                   and data.count(1) == BLOB_AREA
+                   and data[BLOB_RECT[1] * W.PLATE_W + BLOB_RECT[0]] == 1
+                   and data[(BLOB_RECT[3] - 1) * W.PLATE_W
+                            + BLOB_RECT[2] - 1] == 1
+                   and data[BLOB_RECT[1] * W.PLATE_W
+                            + BLOB_RECT[0] - 1] == 0
+                   and data[(BLOB_RECT[1] - 1) * W.PLATE_W
+                            + BLOB_RECT[0]] == 0)
+        check("mask contains exactly the blob's pixels as region 1",
+              blob_ok,
+              "" if data is None else
+              f"values={sorted(set(data))} count1={data.count(1)}")
+        declared = bedroom_walkbehinds(session)
+        check("world.json declares id 1 with the authored baseline",
+              isinstance(declared, list) and len(declared) == 1
+              and declared[0].get("id") == 1
+              and abs(declared[0].get("baseline", -99)
+                      - BASELINE_Y) <= 1,
+              f"walkbehinds={declared}")
+
+        erase_mark = len(session.snapshot())
+        session.send(right_drag_burst(ERASE_CELLS))
+        remaining = BLOB_AREA - ERASE_AREA
+        check("right-drag erase drops the region px count in the status",
+              session.wait_for(f"({remaining}px)".encode(), 5,
+                               start=erase_mark) != -1)
+        time.sleep(0.4)                  # trailing flush + queue drain
+        save2 = len(session.snapshot())
+        session.send(b"s")
+        check("save 2 reports 'validator OK'",
+              session.wait_for(b"validator OK", 15, start=save2) != -1)
+        _, _, data = read_mask(session)
+        strip_ok = (data is not None and all(
+            data[y * W.PLATE_W + x] == 0
+            for y in range(ERASE_PLATE_RECT[1], ERASE_PLATE_RECT[3])
+            for x in range(ERASE_PLATE_RECT[0], ERASE_PLATE_RECT[2])))
+        check("erased strip is zero in the saved mask", strip_ok)
+        check("unerased blob pixels survive as region 1",
+              data is not None
+              and data.count(1) == BLOB_AREA - ERASE_AREA
+              and data[305 * W.PLATE_W + 405] == 1,
+              "" if data is None else f"count1={data.count(1)}")
+        declared = bedroom_walkbehinds(session)
+        check("declaration kept while mask pixels remain",
+              isinstance(declared, list)
+              and [wb["id"] for wb in declared] == [1],
+              f"walkbehinds={declared}")
+
+        clear_mark = len(session.snapshot())
+        session.send(b"x")
+        check("'x' clears the selected region",
+              session.wait_for(b"cleared id 1", 5, start=clear_mark)
+              != -1)
+        save3 = len(session.snapshot())
+        session.send(b"s")
+        check("save 3 (empty mask) reports 'validator OK'",
+              session.wait_for(b"validator OK", 15, start=save3) != -1)
+        _, _, data = read_mask(session)
+        check("empty mask saved as all-zero",
+              data is not None and set(data) == {0},
+              "" if data is None else f"values={sorted(set(data))}")
+        check("empty mask drops the world.json declaration",
+              bedroom_walkbehinds(session) in (None, []),
+              f"walkbehinds={bedroom_walkbehinds(session)}")
+        session.send(b"q")
+        exited = True
+        try:
+            session.child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            exited = False
+        check("quits on q", exited)
+    finally:
+        session.close()
+        log = session.snapshot()
+
+    verdict = subprocess.run([sys.executable, VALIDATOR, session.world],
+                             capture_output=True, text=True)
+    check("final world passes validate_world.py",
+          verdict.returncode == 0, verdict.stderr.strip()[-120:])
+    check_presentation(log, check)
+    check("no traceback", b"Traceback" not in log)
+    session.cleanup()
+    return report("behind-authoring (magic wand)", checks, log, verbose)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true",
@@ -1027,7 +1054,7 @@ def main():
     ok &= run_drag_scenario(verbose)
     ok &= run_toggle_brush_scenario(verbose)
     ok &= run_coherence_scenario(verbose)
-    ok &= run_occluder_scenario(verbose)
+    ok &= run_behind_scenario(verbose)
     return 0 if ok else 1
 
 
