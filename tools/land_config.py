@@ -14,7 +14,7 @@ expansion. `folder` values open in the file manager (kilix-file first). An
 absent line means the built-in default. The desktop re-reads the file on
 every activation, so edits here apply immediately.
 
-Interactive mode wears the kilix-tui desktop's chrome (the real kilix_tui
+Interactive mode wears the shared Kilix text shell (the real ``kilix_tui``
 core imported from the kilix-tui-utils checkout). `--check` validates the
 bindings file with nothing but the stdlib and is wired into `make test`.
 """
@@ -442,12 +442,9 @@ def run_interactive():
         return 1
     sys.path.insert(0, core)
     import curses  # noqa: F401  (kilix_tui.app owns the wrapper)
-    from kilix_tui import app, chrome, keys as keymap
+    from kilix_tui import app, keys as keymap, shell
 
     state = State()
-    page = chrome.Page("KILIX LAND CONFIG",
-                       [name for _, name, _ in state.rooms],
-                       node="land")
 
     def render(surface, s):
         footer = {
@@ -455,34 +452,59 @@ def run_interactive():
             "kind": "←/→ choose · Enter next · Esc cancel",
             "value": "type value · Enter save · Esc cancel",
         }[s.mode]
-        page.render(surface, s.section, footer=footer, status=s.message)
-        top, left, height, width = page.content_box()
-        if height < 3 or width < 20:
-            return
         room_id, room_name, objects = s.rooms[s.section]
-        row = top
-        surface.addstr(row, left, f"{room_name} objects"[: width - 1])
-        row += 2
+        summary = f"{room_name} · {len(objects)} objects"
+        if s.message:
+            summary += f" · {s.message}"
+        body = shell.draw(
+            surface,
+            title="Kilix Land · Config",
+            sections=[name for _, name, _ in s.rooms],
+            active=s.section,
+            summary=summary,
+            footer=footer,
+            summary_role="accent" if s.message else "muted",
+        )
+        if body.height < 3 or body.width < 20:
+            return
+        row = body.top
         for index, (object_id, target, prompt) in enumerate(objects):
-            if row >= top + height - 3:
+            if row >= body.bottom - 2:
                 break
             marker = "▶" if (index == s.selected and s.mode == "list") else " "
             line = (f"{marker} {object_id:<14.14} "
                     f"{s.describe(room_id, object_id, target)}")
-            surface.addstr(row, left, line[: width - 1])
+            shell.put(
+                surface,
+                row,
+                body.left,
+                line.ljust(body.width)[:body.width],
+                shell.tango.attr("selected")
+                if index == s.selected and s.mode == "list" else 0,
+            )
             row += 1
         if s.mode == "kind":
-            row = top + height - 3
+            row = body.bottom - 2
             choices = "   ".join(
                 (f"[{kind.upper()}]" if i == s.kind_cursor else f" {kind} ")
                 for i, kind in enumerate(KINDS))
-            surface.addstr(row, left, f"bind {s.key()}: {choices}"
-                           [: width - 1])
+            shell.put(
+                surface,
+                row,
+                body.left,
+                f"bind {s.key()}: {choices}"[:body.width],
+                shell.tango.attr("accent"),
+            )
         elif s.mode == "value":
-            row = top + height - 3
+            row = body.bottom - 2
             kind = KINDS[s.kind_cursor]
-            surface.addstr(row, left,
-                           f"{s.key()} = {kind} {s.value}_"[: width - 1])
+            shell.put(
+                surface,
+                row,
+                body.left,
+                f"{s.key()} = {kind} {s.value}_"[:body.width],
+                shell.tango.attr("accent"),
+            )
 
     def commit(s):
         kind = KINDS[s.kind_cursor]

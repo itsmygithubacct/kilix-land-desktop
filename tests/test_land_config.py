@@ -195,6 +195,56 @@ class LandConfigTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("defaults everywhere", standard_output.getvalue())
 
+    def test_interactive_editor_uses_shared_kilix_shell(self) -> None:
+        if land_config.locate_tui_core() is None:
+            self.skipTest("kilix-tui-utils checkout is unavailable")
+
+        screenshot = self.root / "land-config.txt"
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["land_config.py", "--screenshot", str(screenshot)],
+        ):
+            self.assertEqual(land_config.run_interactive(), 0)
+
+        lines = screenshot.read_text(encoding="utf-8").splitlines()
+        self.assertIn("KILIX TUI", lines[0])
+        self.assertIn("Kilix Land · Config", lines[0])
+        self.assertIn("▶1 ", lines[1])
+        self.assertTrue(lines[2].startswith("─"))
+        self.assertIn("objects", lines[3])
+        self.assertNotIn("KILIX LAND CONFIG", "\n".join(lines))
+        self.assertNotIn(" // ", "\n".join(lines))
+
+        from kilix_tui import app
+
+        short_screenshot = self.root / "land-config-short.txt"
+        render_to_text = app.render_to_text
+
+        def render_short(render, state):
+            state.mode = "kind"
+            return render_to_text(render, state, height=6, width=80)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["land_config.py", "--screenshot", str(short_screenshot)],
+            ),
+            mock.patch.object(
+                app,
+                "render_to_text",
+                side_effect=render_short,
+            ),
+        ):
+            self.assertEqual(land_config.run_interactive(), 0)
+
+        short_lines = short_screenshot.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertIn("Bedroom · 2 objects", short_lines[3])
+        self.assertNotIn("bind bedroom.bed", "\n".join(short_lines))
+
 
 if __name__ == "__main__":
     unittest.main()
