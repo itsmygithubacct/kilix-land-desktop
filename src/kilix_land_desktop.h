@@ -286,7 +286,7 @@ typedef struct desk_graphics {
     desk_cast outfit_cast;
     int outfit_index;
     uint8_t *outfit_pixels;
-    ki_td_rgba8 outfit_cells[16 * 8]; /* covers the largest hero sheet */
+    ki_td_rgba8 outfit_cells[16 * 8]; /* covers every imported hero sheet */
     int outfit_columns;
     int outfit_rows;
     bool outfit_ready;

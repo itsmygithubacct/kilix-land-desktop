@@ -75,29 +75,29 @@
     {
       "id": "fantasy-characters",
       "path": "assets/graphics/casts/fantasy-characters.png",
-      "sha256": "6039cf233c51ffabe0d02caad530e6c35c2060a68aa083b6c6f396e1990e57c1",
+      "sha256": "e46093ba98ccb5b874c6c51a45ba6dff22a548d4e125da2fbceb342a1df93cca",
       "alpha_required": true,
       "grid": {
-        "columns": 8,
-        "rows": 4,
-        "width": 1776,
-        "height": 888,
-        "cell_width": 222,
-        "cell_height": 222
+        "columns": 24,
+        "rows": 68,
+        "width": 384,
+        "height": 1632,
+        "cell_width": 16,
+        "cell_height": 24
       }
     },
     {
       "id": "fantasy-portraits",
       "path": "assets/graphics/casts/fantasy-portraits.png",
-      "sha256": "c28ec591d10c5aef333456bd24b32a4c42da5ad41c55b6280b5365b53769ef5b",
+      "sha256": "fc21b6e9d52fae163625a1925c7f9abb792afa302f0eaea861b5fb42d94d6aad",
       "alpha_required": true,
       "grid": {
-        "columns": 4,
-        "rows": 2,
-        "width": 1776,
-        "height": 888,
-        "cell_width": 444,
-        "cell_height": 444
+        "columns": 27,
+        "rows": 4,
+        "width": 1080,
+        "height": 160,
+        "cell_width": 40,
+        "cell_height": 40
       }
     },
     {

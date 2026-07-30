@@ -82,6 +82,40 @@ def png_dimensions(data: bytes) -> tuple[int, int]:
     return struct.unpack(">II", data[16:24])
 
 
+def committed_atlas_grid(source: Path, data: bytes) -> dict[str, int]:
+    """Return the source atlas grid from the source game's committed manifest."""
+    root = repository_root(source)
+    relative = source.resolve().relative_to(root.resolve()).as_posix()
+    manifest_path = source.parents[1] / "manifest.json"
+    manifest = json.loads(committed_text(manifest_path))
+    for entry in manifest.get("atlases", []):
+        if entry.get("path") != relative:
+            continue
+        grid = entry.get("grid")
+        if not isinstance(grid, dict):
+            break
+        fields = ("columns", "rows", "width", "height",
+                  "cell_width", "cell_height")
+        if not all(
+            isinstance(grid.get(field), int) and grid[field] > 0
+            for field in fields
+        ):
+            break
+        width, height = png_dimensions(data)
+        expected = {field: grid[field] for field in fields}
+        if (
+            expected["width"] != width
+            or expected["height"] != height
+            or expected["columns"] * expected["cell_width"] != width
+            or expected["rows"] * expected["cell_height"] != height
+        ):
+            raise ValueError(
+                f"committed manifest grid does not match {relative}"
+            )
+        return expected
+    raise ValueError(f"committed manifest has no valid grid for {relative}")
+
+
 def source_digest(paths: list[Path]) -> str:
     digest = hashlib.sha256()
     for path in paths:
@@ -265,31 +299,8 @@ def synchronize(games_root: Path, write: bool) -> list[str]:
                 manifest_changed = True
             else:
                 errors.append(f"manifest hash is stale for {asset_id}")
-        width, height = png_dimensions(source_data)
+        expected_grid = committed_atlas_grid(source, source_data)
         grid = entry.get("grid")
-        if not isinstance(grid, dict):
-            errors.append(f"manifest grid is missing for {asset_id}")
-            continue
-        columns = grid.get("columns")
-        rows = grid.get("rows")
-        if (
-            not isinstance(columns, int)
-            or not isinstance(rows, int)
-            or columns <= 0
-            or rows <= 0
-            or width % columns != 0
-            or height % rows != 0
-        ):
-            errors.append(f"manifest grid is invalid for {asset_id}")
-            continue
-        expected_grid = {
-            "columns": columns,
-            "rows": rows,
-            "width": width,
-            "height": height,
-            "cell_width": width // columns,
-            "cell_height": height // rows,
-        }
         if grid != expected_grid:
             if write:
                 entry["grid"] = expected_grid

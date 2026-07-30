@@ -13,6 +13,9 @@
 #define DESK_LEGEND_SHEET_COLUMNS 16
 #define DESK_LEGEND_SHEET_ROWS 8
 #define DESK_PAINTED_HERO_COLUMNS 8
+#define DESK_FANTASY_HERO_COLUMNS 24
+#define DESK_FANTASY_CELL_WIDTH 16u
+#define DESK_FANTASY_CELL_HEIGHT 24u
 #define DESK_OUTFIT_PALETTE_CAPACITY 128
 #define DESK_MIN_GARMENT_SATURATION 0.25f
 #define DESK_MIN_LEGEND_SATURATION 0.28f
@@ -54,8 +57,8 @@ static const graphic_spec GRAPHIC_SPECS[DESK_GRAPHICS_COUNT] = {
     {"legend-portraits", 384u, 288u, 4u, 3u},
     {"chumrunner-characters", 1776u, 888u, 8u, 4u},
     {"chumrunner-portraits", 1776u, 888u, 4u, 2u},
-    {"fantasy-characters", 1776u, 888u, 8u, 4u},
-    {"fantasy-portraits", 1776u, 888u, 4u, 2u},
+    {"fantasy-characters", 384u, 1632u, 24u, 68u},
+    {"fantasy-portraits", 1080u, 160u, 27u, 4u},
     {"pleb-bound-characters", 1776u, 888u, 8u, 4u},
     {"pleb-bound-portraits", 1776u, 888u, 4u, 2u}
 };
@@ -87,6 +90,32 @@ static desk_graphic character_graphic(desk_cast cast)
     if (cast == DESK_CAST_CHUMRUNNER) return DESK_GRAPHIC_CHUM_CHARACTERS;
     if (cast == DESK_CAST_FANTASY) return DESK_GRAPHIC_FANTASY_CHARACTERS;
     return DESK_GRAPHIC_PLEB_CHARACTERS;
+}
+
+static int hero_columns(desk_cast cast)
+{
+    if (cast == DESK_CAST_LEGEND) return DESK_LEGEND_SHEET_COLUMNS;
+    if (cast == DESK_CAST_FANTASY) return DESK_FANTASY_HERO_COLUMNS;
+    return DESK_PAINTED_HERO_COLUMNS;
+}
+
+static int hero_rows(desk_cast cast)
+{
+    return cast == DESK_CAST_LEGEND ? DESK_LEGEND_SHEET_ROWS : 1;
+}
+
+static uint32_t hero_cell_width(desk_cast cast)
+{
+    if (cast == DESK_CAST_LEGEND) return DESK_LEGEND_CELL;
+    if (cast == DESK_CAST_FANTASY) return DESK_FANTASY_CELL_WIDTH;
+    return DESK_CHARACTER_CELL;
+}
+
+static uint32_t hero_cell_height(desk_cast cast)
+{
+    if (cast == DESK_CAST_LEGEND) return DESK_LEGEND_CELL;
+    if (cast == DESK_CAST_FANTASY) return DESK_FANTASY_CELL_HEIGHT;
+    return DESK_CHARACTER_CELL;
 }
 
 static void make_locator(kilix_asset_locator *locator, const char *asset_root)
@@ -704,7 +733,8 @@ static bool rebuild_motion_cells(desk_graphics *graphics)
     int cast_index;
     if (!rebuild_legend_steps(graphics)) return false;
     for (cast_index = 1; cast_index < DESK_CAST_COUNT; ++cast_index)
-        if (!rebuild_hero_motion_cast(graphics, (desk_cast)cast_index))
+        if ((desk_cast)cast_index != DESK_CAST_FANTASY &&
+            !rebuild_hero_motion_cast(graphics, (desk_cast)cast_index))
             return false;
     return true;
 }
@@ -1019,19 +1049,19 @@ bool desk_graphics_set_outfit(desk_graphics *graphics, desk_cast cast,
     outfit_palette palette;
     int columns;
     int rows;
-    uint32_t cell_size;
+    uint32_t cell_width;
+    uint32_t cell_height;
     size_t cell_bytes;
     size_t total_cells;
     int index;
     if (!graphics || (int)cast < 0 || (int)cast >= DESK_CAST_COUNT ||
         outfit < 0 || outfit >= DESK_OUTFIT_COUNT)
         return false;
-    columns = cast == DESK_CAST_LEGEND ?
-        DESK_LEGEND_SHEET_COLUMNS : DESK_PAINTED_HERO_COLUMNS;
-    rows = cast == DESK_CAST_LEGEND ? DESK_LEGEND_SHEET_ROWS : 1;
-    cell_size = cast == DESK_CAST_LEGEND ?
-        DESK_LEGEND_CELL : DESK_CHARACTER_CELL;
-    cell_bytes = (size_t)cell_size * cell_size * 4u;
+    columns = hero_columns(cast);
+    rows = hero_rows(cast);
+    cell_width = hero_cell_width(cast);
+    cell_height = hero_cell_height(cast);
+    cell_bytes = (size_t)cell_width * cell_height * 4u;
     total_cells = (size_t)columns * (size_t)rows;
     graphics->outfit_ready = false;
     free(graphics->outfit_pixels);
@@ -1048,15 +1078,16 @@ bool desk_graphics_set_outfit(desk_graphics *graphics, desk_cast cast,
                                column, row, &source) :
             desk_graphics_cell(graphics, character_graphic(cast),
                                column, 0, &source);
-        if (!loaded || source.width != (int)cell_size ||
-            source.height != (int)cell_size) {
+        if (!loaded || source.width != (int)cell_width ||
+            source.height != (int)cell_height) {
             free(graphics->outfit_pixels);
             graphics->outfit_pixels = NULL;
             return false;
         }
         copy_cell(destination, &source);
         graphics->outfit_cells[index] =
-            ki_td_rgba8_make(destination, (int)cell_size, (int)cell_size);
+            ki_td_rgba8_make(destination, (int)cell_width,
+                             (int)cell_height);
     }
     if (outfit != 0) {
         /* Garment hue is measured from the idle cell every time; a failed
@@ -1112,9 +1143,8 @@ bool desk_graphics_hero_cell(const desk_graphics *graphics, desk_cast cast,
     if (!graphics || !image || (int)cast < 0 ||
         (int)cast >= DESK_CAST_COUNT || column < 0 || row < 0)
         return false;
-    columns = cast == DESK_CAST_LEGEND ?
-        DESK_LEGEND_SHEET_COLUMNS : DESK_PAINTED_HERO_COLUMNS;
-    rows = cast == DESK_CAST_LEGEND ? DESK_LEGEND_SHEET_ROWS : 1;
+    columns = hero_columns(cast);
+    rows = hero_rows(cast);
     if (column >= columns || row >= rows) return false;
     if (graphics->outfit_ready && graphics->outfit_cast == cast) {
         *image = graphics->outfit_cells[

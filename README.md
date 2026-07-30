@@ -38,27 +38,26 @@ kilix-ui at their established `third_party/` paths.
 ## Provider
 
 Runs standalone in any kitty-graphics terminal (`./kilix-land-desktop` from
-the checkout). To boot it as a kilix desktop session **today**, use kilix's
-existing `command` provider mode — no kilix changes needed. In
-`~/.local/gpu_terminal/kilix/config/kilix.env`:
+the checkout). Kilix also exposes it as a native executable provider:
 
 ```
-KILIX_DESKTOP_PROVIDER=command
-KILIX_DESKTOP_COMMAND=cd ~/.local/gpu_terminal/sources/kilix-desktops/kilix-land-desktop && exec ./kilix-land-desktop
-KILIX_DESKTOP_NAME=Kilix Land
+kilix land
+kilix desktop land
+KILIX_DESKTOP_PROVIDER=land kilix desktop
 ```
 
-Native executable-mode wiring (`kilix land`, `KILIX_DESKTOP_PROVIDER=land`,
-pinned installer — the kilix-cap pattern) remains a separate M5 integration
-step. That milestone changes how Kilix selects and pins the project, not
-whether Kilix Land is a desktop. Until it lands, this repository is an optional
-ecosystem desktop rather than part of Kilix’s pinned dependency closure or the
-four-repository Plebian-OS release core.
+On first use, Kilix clones its immutable pinned revision beneath
+`${GPU_TERMINAL_SOURCE_HOME:-~/.local/gpu_terminal/sources}/kilix-desktops`, builds it, and
+validates that the result is a regular executable. Existing development
+checkouts are built in place and are never reset unless an explicit
+`KILIX_LAND_DESKTOP_REF` is supplied.
 
 Environment: `KILIX_LAND_DESKTOP_ASSETS` (checkout root containing `assets/`
 and `tools/`), `KILIX_LAND_DESKTOP_CONFIG_HOME` (absolute profile-store
 override), `KILIX_LAND_DESKTOP_EXTERNAL_APPS=0` (disable all launches),
-`KILIX_LAND_DESKTOP_AUDIO=0` (mute).
+`KILIX_LAND_DESKTOP_AUDIO=0` (mute). Provider installation can be controlled
+with `KILIX_LAND_DESKTOP_AUTO_INSTALL`, `KILIX_LAND_DESKTOP_DIR`,
+`KILIX_LAND_DESKTOP_REPO`, and `KILIX_LAND_DESKTOP_REF`.
 
 Review CLI: `./kilix-land-desktop --screenshot out.ppm --room study
 --style chumrunner` renders any room in any style headlessly.

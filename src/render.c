@@ -11,6 +11,7 @@
 #define COLOR_GOLD UINT32_C(0xf0c36b)
 #define LEGEND_PLAYER_RENDER_SIZE 64
 #define STANDARD_PLAYER_RENDER_SIZE 92
+#define FANTASY_PLAYER_RENDER_WIDTH 61
 #define WIZARD_STEP_TOTAL 5
 
 typedef struct room_palette {
@@ -279,6 +280,13 @@ static bool standard_player_cell(const desk_state *state,
                                  const desk_graphics *graphics,
                                  desk_cast cast, ki_td_rgba8 *cell)
 {
+    static const int fantasy_idle_columns[] = {0, 1, 2, 3};
+    static const int fantasy_walk_columns[][4] = {
+        {4, 5, 6, 5},
+        {7, 8, 9, 8},
+        {10, 11, 12, 11},
+        {13, 14, 15, 14}
+    };
     static const int side_columns[] = {4, 5, 4, 5};
     int phase = standard_walk_phase(state);
     int column = 0;
@@ -286,6 +294,12 @@ static bool standard_player_cell(const desk_state *state,
     desk_hero_motion_variant variant;
     bool authored_side_faces_right =
         cast == DESK_CAST_FANTASY || cast == DESK_CAST_PLEB_BOUND;
+    if (cast == DESK_CAST_FANTASY) {
+        column = state->player_moving ?
+            fantasy_walk_columns[state->facing][phase] :
+            fantasy_idle_columns[state->facing];
+        return desk_graphics_hero_cell(graphics, cast, column, 0, cell);
+    }
     if (state->facing == DESK_FACING_DOWN) {
         if (!state->player_moving || (phase & 1) == 0)
             column = 0;
@@ -330,9 +344,11 @@ static void draw_player(ki_td_soft_renderer *renderer, const ki_td_view *view,
                                LEGEND_PLAYER_RENDER_SIZE,
                                LEGEND_PLAYER_RENDER_SIZE, 1.0f, bounds);
     } else if (standard_player_cell(state, graphics, cast, &cell)) {
+        int render_width = cast == DESK_CAST_FANTASY ?
+            FANTASY_PLAYER_RENDER_WIDTH : STANDARD_PLAYER_RENDER_SIZE;
         draw_foot_anchored(renderer, view, &cell,
                            state->player_x, state->player_y,
-                           STANDARD_PLAYER_RENDER_SIZE,
+                           render_width,
                            STANDARD_PLAYER_RENDER_SIZE, 1.0f, bounds);
     }
 }
@@ -359,12 +375,15 @@ static void draw_npc(ki_td_soft_renderer *renderer, const ki_td_view *view,
         }
     } else if (desk_graphics_cell(graphics, character_graphic(cast), 0,
                                   npc->actor, &cell)) {
-        ki_td_soft_rgba_resized(renderer, view, npc->x - 46.0f,
+        int render_width = cast == DESK_CAST_FANTASY ?
+            FANTASY_PLAYER_RENDER_WIDTH : STANDARD_PLAYER_RENDER_SIZE;
+        ki_td_soft_rgba_resized(renderer, view,
+                                npc->x - (float)render_width * 0.5f,
                                 npc->y - 87.0f + bob, &cell,
-                                STANDARD_PLAYER_RENDER_SIZE,
+                                render_width,
                                 STANDARD_PLAYER_RENDER_SIZE, 1.0f);
-        bounds_add(bounds, npc->x - 46.0f, npc->y - 87.0f + bob,
-                   (float)STANDARD_PLAYER_RENDER_SIZE,
+        bounds_add(bounds, npc->x - (float)render_width * 0.5f,
+                   npc->y - 87.0f + bob, (float)render_width,
                    (float)STANDARD_PLAYER_RENDER_SIZE);
     }
 }
@@ -663,7 +682,7 @@ static bool portrait_image(const desk_graphics *graphics, desk_cast cast,
     static const int standard_columns[DESK_CAST_COUNT][DESK_ACTOR_COUNT] = {
         {0, 0, 0, 0},
         {0, 1, 2, 3},
-        {0, 2, 1, 3},
+        {0, 1, 2, 3},
         {0, 1, 2, 3}
     };
     if (portrait) *portrait = (ki_td_rgba8){0};
@@ -1118,6 +1137,8 @@ static void draw_wizard_outfit(ki_td_soft_renderer *renderer,
                            DESK_OUTFIT_COUNT - 1);
     int preview_size = cast == DESK_CAST_LEGEND ?
         LEGEND_PLAYER_RENDER_SIZE * 2 : STANDARD_PLAYER_RENDER_SIZE * 2;
+    int preview_width = cast == DESK_CAST_FANTASY ?
+        FANTASY_PLAYER_RENDER_WIDTH * 2 : preview_size;
     ki_td_rgba8 cell;
     bool cell_ok;
     int outfit;
@@ -1153,7 +1174,7 @@ static void draw_wizard_outfit(ki_td_soft_renderer *renderer,
                 cast == DESK_CAST_LEGEND ? 26.0f : 30.0f, NULL);
     if (cell_ok)
         draw_foot_anchored(renderer, view, &cell, 350.0f, 218.0f,
-                           preview_size, preview_size, 1.0f, NULL);
+                           preview_width, preview_size, 1.0f, NULL);
     small_text(canvas, view, 308.0f, 64.0f, "OUTFIT PREVIEW",
                COLOR_MUTED);
 }
