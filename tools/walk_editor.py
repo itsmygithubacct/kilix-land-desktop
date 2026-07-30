@@ -21,7 +21,26 @@ always a block brush.  The brush covers 1x1 up to 5x5 cells and the hover
 outline previews its full footprint.  Keys:
   1-5 / n / p  switch room        t  cycle style        g  toggle grid
   [ / ]  brush size               s  save               u  undo
-  r  reload from json             q  quit
+  r  reload from json             q  quit               o  occluder layer
+
+The 'o' key toggles between WALK mode (everything above) and OCCLUDER
+mode, which authors the room's draw-over furniture rects ("occluders":
+[{"rect", "baseline"}] in world.json — an entity whose feet y is less
+than baseline draws BEHIND the furniture).  In occluder mode the walk
+tint stays visible but dimmer, existing occluders render as cyan
+outlines with a bright tick line at their baseline, and:
+  left-drag   rubber-bands a NEW occluder (live snapped coords in the
+              status line; on release the rect snaps outward to the 6px
+              grid and baseline defaults to the rect bottom)
+  right-click inside an existing occluder deletes it
+  [ / ]       nudge the baseline of the occluder under the cursor
+              down/up by 6px, clamped to its rect (brush keys only
+              apply in walk mode, so the reuse cannot conflict)
+'s' always saves BOTH layers: the painted grid decomposes into
+walk+obstacles, the room's occluders ride along in the same world.json
+rewrite (spawn repair unchanged), and the save verdict reports both.
+In walk mode (and --render) occluders show as thin cyan outlines so
+the furniture context is never invisible.
 
 Presentation has two tiers.  Whole-scene changes (room/style switch, grid
 toggle, undo, reload, first frame) use flicker-free double buffering
@@ -80,6 +99,7 @@ LOGICAL_W, LOGICAL_H = 480, 270
 CELL = 6
 COLS, ROWS = LOGICAL_W // CELL, LOGICAL_H // CELL
 MAX_OBSTACLES = 64
+MAX_OCCLUDERS = 12              # DESK_MAX_OCCLUDERS_PER_ROOM
 STYLES = ("legend", "chumrunner", "fantasy", "pleb-bound")
 DISPLAY_W, DISPLAY_H = 960, 540
 SCALE = DISPLAY_W // LOGICAL_W
@@ -240,6 +260,36 @@ def _point_in_rect(px, py, rect):
             rect["y"] <= py <= rect["y"] + rect["h"])
 
 
+def snap_occluder_rect(a, b):
+    """Snap the rubber band spanned by logical points a and b OUTWARD to
+    the 6px cell grid, clamped to the canvas, never smaller than one
+    cell.  -> {"x","y","w","h"} with int values."""
+    x0, x1 = sorted((a[0], b[0]))
+    y0, y1 = sorted((a[1], b[1]))
+    sx0 = max(0, int(x0 // CELL) * CELL)
+    sy0 = max(0, int(y0 // CELL) * CELL)
+    sx1 = min(LOGICAL_W, int(-(-x1 // CELL)) * CELL)
+    sy1 = min(LOGICAL_H, int(-(-y1 // CELL)) * CELL)
+    if sx1 <= sx0:
+        sx1 = min(LOGICAL_W, sx0 + CELL)
+        sx0 = sx1 - CELL
+    if sy1 <= sy0:
+        sy1 = min(LOGICAL_H, sy0 + CELL)
+        sy0 = sy1 - CELL
+    return {"x": sx0, "y": sy0, "w": sx1 - sx0, "h": sy1 - sy0}
+
+
+def occluder_at(room, point):
+    """Topmost (last-listed) occluder whose rect contains the logical
+    point, or None — the one a right-click deletes and [/] nudge."""
+    if point is None:
+        return None
+    for occluder in reversed(room.get("occluders", [])):
+        if _point_in_rect(point[0], point[1], occluder["rect"]):
+            return occluder
+    return None
+
+
 def repair_spawns(world):
     """Painting can strand a door spawn inside freshly blocked space (or a
     repositioned walk bbox).  Nudge every invalid spawn to the nearest
@@ -323,8 +373,10 @@ def selftest():
 
 
 _PLATE_CACHE = {}
-# grid byte 0 -> alpha 0, any nonzero -> the walkable tint alpha (78)
+# grid byte 0 -> alpha 0, any nonzero -> the walkable tint alpha (78);
+# occluder mode dims the tint (36) so the cyan furniture rects read first.
 _WALK_ALPHA = bytes(0 if value == 0 else 78 for value in range(256))
+_WALK_ALPHA_DIM = bytes(0 if value == 0 else 36 for value in range(256))
 
 
 def load_plate(style, plate):
@@ -347,11 +399,12 @@ def load_plate(style, plate):
     return cached
 
 
-def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS):
+def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS, dim=False):
     """-> RGBA walkable-tint image for a cell region, NEAREST-scaled to
     display pixels.  The display is an exact integer multiple of the cell
     grid, so a region tint is byte-identical to the same crop of the full
-    tint — the regional recompose can never drift from compose_scene."""
+    tint — the regional recompose can never drift from compose_scene.
+    dim=True is the occluder-mode tint (visible but quieter)."""
     from PIL import Image
     if cols == COLS and rows == ROWS and not c0x and not c0y:
         cells = bytes(grid)
@@ -362,18 +415,21 @@ def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS):
             for r in range(rows))
     cell_px = CELL * SCALE
     alpha = Image.frombytes("L", (cols, rows),
-                            cells.translate(_WALK_ALPHA)).resize(
+                            cells.translate(_WALK_ALPHA_DIM if dim
+                                            else _WALK_ALPHA)).resize(
         (cols * cell_px, rows * cell_px), Image.NEAREST)
     tint = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
     tint.putalpha(alpha)
     return tint
 
 
-def scene_overlay(world, room, show_grid=True):
+def scene_overlay(world, room, show_grid=True, mode="walk"):
     """-> RGBA overlay of grid lines + context markers (doors, object
-    rects, NPC anchors, incoming spawns) — the layer compose_scene stacks
-    above the tinted plate.  Cached by the run loop alongside the scene
-    so painting can recomposite single regions."""
+    rects, NPC anchors, incoming spawns, occluder rects) — the layer
+    compose_scene stacks above the tinted plate.  Cached by the run loop
+    alongside the scene so painting can recomposite single regions.
+    Occluders draw as thin cyan outlines in walk mode; occluder mode
+    brightens them and adds the baseline tick line."""
     from PIL import Image, ImageDraw
     overlay = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -403,13 +459,25 @@ def scene_overlay(world, room, show_grid=True):
     for x, y in incoming_spawns(world, room["id"]):
         x, y = x * SCALE, y * SCALE
         draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(90, 230, 120, 230))
+    for occluder in room.get("occluders", []):
+        rect = occluder["rect"]
+        box = scaled(rect)
+        if mode == "occluder":
+            draw.rectangle(box, outline=(0, 230, 255, 255), width=2)
+            base_y = occluder.get("baseline",
+                                  rect["y"] + rect["h"]) * SCALE
+            draw.line([box[0], base_y, box[2], base_y],
+                      fill=(180, 255, 255, 255), width=3)
+        else:
+            draw.rectangle(box, outline=(0, 200, 230, 140), width=1)
     return overlay
 
 
-def compose_scene(world, room, grid, style, show_grid=True):
+def compose_scene(world, room, grid, style, show_grid=True, mode="walk"):
     """-> RGBA Image of plate + walk tint + grid + context markers at
     960x540 — everything EXCEPT the drawn cursor, so the run loop caches
-    the result and rebuilds it only when room/style/grid-toggle change.
+    the result and rebuilds it only when room/style/grid-toggle/mode
+    change.
     This is the REFERENCE composition: recompose_cells patches the cached
     scene from the same three layers, so after any sequence of edits the
     cache equals what this function would produce.
@@ -419,9 +487,10 @@ def compose_scene(world, room, grid, style, show_grid=True):
     mid-drag stays well under 100ms."""
     from PIL import Image
     base = load_plate(style, room["plate"])
-    frame = Image.alpha_composite(base, walk_tint(grid))
+    frame = Image.alpha_composite(base,
+                                  walk_tint(grid, dim=mode == "occluder"))
     return Image.alpha_composite(frame, scene_overlay(world, room,
-                                                      show_grid))
+                                                      show_grid, mode))
 
 
 def recompose_cells(scene, base, overlay, grid, c0x, c0y, c1x, c1y):
@@ -474,6 +543,19 @@ def cursor_damage(hover, brush):
     return [rect for rect in rects if rect]
 
 
+def preview_damage(rect):
+    """-> pixel damage rects for an occluder rubber-band preview (a
+    logical rect dict) with CURSOR_MARGIN slack, or [] when None."""
+    if rect is None:
+        return []
+    margin = CURSOR_MARGIN
+    clamped = clamp_rect(rect["x"] * SCALE - margin,
+                         rect["y"] * SCALE - margin,
+                         rect["w"] * SCALE + 2 * margin + 1,
+                         rect["h"] * SCALE + 2 * margin + 1)
+    return [clamped] if clamped else []
+
+
 def prune_rects(rects):
     """Drop duplicates and rects fully contained in another (largest
     first).  Remaining overlaps are harmless: every rect is cropped from
@@ -521,7 +603,7 @@ def edit_packet(image_id, frame, rects):
     return "".join(parts)
 
 
-def compose_cursor(scene, hover, brush=1):
+def compose_cursor(scene, hover, brush=1, preview=None):
     """-> RGBA frame: the (cached) scene with the drawn cursor composited
     topmost; the scene itself is never mutated.  hover is a logical (x, y)
     float pair or None.  When set: low-alpha hairlines through the exact
@@ -529,31 +611,40 @@ def compose_cursor(scene, hover, brush=1):
     reads on bright plates too) around the hovered cell, and a 3px dot at
     the pointer.  kitty hides the system pointer over the image, so this
     is the only cursor the user gets.  Per-hover cost is one overlay draw
-    plus one alpha_composite — a few ms, no plate/tint/marker work."""
-    if hover is None:
+    plus one alpha_composite — a few ms, no plate/tint/marker work.
+    preview is the occluder rubber band (a logical rect dict or None),
+    drawn cyan beneath the hover cursor while the drag is held."""
+    if hover is None and preview is None:
         return scene
     from PIL import Image, ImageDraw
     overlay = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     cell_px = CELL * SCALE
-    hx, hy = hover[0] * SCALE, hover[1] * SCALE
-    # Hairlines first so the cell outline and dot stay solid on top.
-    draw.line([0, hy, DISPLAY_W, hy], fill=(255, 220, 130, 70))
-    draw.line([hx, 0, hx, DISPLAY_H], fill=(255, 220, 130, 70))
-    hcx, hcy = int(hover[0] // CELL), int(hover[1] // CELL)
-    if 0 <= hcx < COLS and 0 <= hcy < ROWS:
-        # Outline the full brush footprint so the sweep of a click or drag
-        # is visible before committing to it.
-        c0x, c0y, c1x, c1y = brush_footprint(hcx, hcy, brush)
-        x0, y0 = c0x * cell_px, c0y * cell_px
-        x1 = (c1x + 1) * cell_px - 1
-        y1 = (c1y + 1) * cell_px - 1
-        draw.rectangle([x0, y0, x1, y1], outline=(255, 200, 70, 255),
+    if preview is not None:
+        draw.rectangle([preview["x"] * SCALE, preview["y"] * SCALE,
+                        (preview["x"] + preview["w"]) * SCALE - 1,
+                        (preview["y"] + preview["h"]) * SCALE - 1],
+                       fill=(0, 230, 255, 36), outline=(0, 230, 255, 220),
                        width=2)
-        draw.rectangle([x0 + 2, y0 + 2, x1 - 2, y1 - 2],
-                       outline=(40, 32, 8, 255), width=1)
-    draw.ellipse([hx - 1, hy - 1, hx + 1, hy + 1],
-                 fill=(255, 200, 70, 255))
+    if hover is not None:
+        hx, hy = hover[0] * SCALE, hover[1] * SCALE
+        # Hairlines first so the cell outline and dot stay solid on top.
+        draw.line([0, hy, DISPLAY_W, hy], fill=(255, 220, 130, 70))
+        draw.line([hx, 0, hx, DISPLAY_H], fill=(255, 220, 130, 70))
+        hcx, hcy = int(hover[0] // CELL), int(hover[1] // CELL)
+        if 0 <= hcx < COLS and 0 <= hcy < ROWS:
+            # Outline the full brush footprint so the sweep of a click or
+            # drag is visible before committing to it.
+            c0x, c0y, c1x, c1y = brush_footprint(hcx, hcy, brush)
+            x0, y0 = c0x * cell_px, c0y * cell_px
+            x1 = (c1x + 1) * cell_px - 1
+            y1 = (c1y + 1) * cell_px - 1
+            draw.rectangle([x0, y0, x1, y1], outline=(255, 200, 70, 255),
+                           width=2)
+            draw.rectangle([x0 + 2, y0 + 2, x1 - 2, y1 - 2],
+                           outline=(40, 32, 8, 255), width=1)
+        draw.ellipse([hx - 1, hy - 1, hx + 1, hy + 1],
+                     fill=(255, 200, 70, 255))
     return Image.alpha_composite(scene, overlay)
 
 
@@ -925,6 +1016,8 @@ def run_editor(initial_room, initial_style):
     message = "left toggle+paint · right block"
     paint_value = None
     brush = 1
+    mode = "walk"               # "walk" or "occluder" ('o' toggles)
+    occ_drag = None             # rubber-band anchor (logical), or None
     pixel_mouse = True          # until a DECRQM reply says otherwise
     mouse_note = "mouse: no input yet"
     hover = None                # logical (x, y) floats, or None
@@ -933,6 +1026,7 @@ def run_editor(initial_room, initial_style):
     overlay_cache = None        # grid+markers layer, for region recompose
     presented_hover = None      # hover state as last PRESENTED on screen
     presented_brush = 1         # brush size as last presented
+    presented_preview = None    # rubber band as last presented
     paint_rects = []            # cache regions patched but not yet sent
     last_present = None         # monotonic time of last present (trace)
     debug_checksum = bool(os.environ.get("KILIX_WALK_EDITOR_DEBUG_CHECKSUM"))
@@ -947,34 +1041,66 @@ def run_editor(initial_room, initial_style):
             else:
                 hover_note = (f"hover {int(hover[0])},{int(hover[1])} "
                               f"cell {hover_cell[0]},{hover_cell[1]}")
+            if mode == "occluder":
+                occluders = room.get("occluders", [])
+                if occ_drag is not None and hover is not None:
+                    rect = snap_occluder_rect(occ_drag, hover)
+                    occ_note = (f"new {rect['x']},{rect['y']} "
+                                f"{rect['w']}x{rect['h']}")
+                else:
+                    occluder = occluder_at(room, hover)
+                    if occluder is None:
+                        occ_note = "occ -"
+                    else:
+                        rect = occluder["rect"]
+                        base = occluder.get("baseline",
+                                            rect["y"] + rect["h"])
+                        occ_note = f"occ baseline {base:g}"
+                return (
+                    f"walk-editor  {room['id']} ({STYLES[style_index]})"
+                    f"{state_flag}  OCCLUDER "
+                    f"{len(occluders)}/{MAX_OCCLUDERS}   {occ_note}   "
+                    f"{hover_note}   {mouse_note}{unit}",
+                    "o walk · left-drag new · right-click delete · "
+                    f"[/] baseline · s save · r reload · q quit   {message}")
             return (
                 f"walk-editor  {room['id']} ({STYLES[style_index]})"
                 f"{state_flag}  walkable {sum(grid)}/{COLS * ROWS} cells"
                 f"   brush {brush}x{brush}   {hover_note}   "
                 f"{mouse_note}{unit}",
-                "1-5/n/p room · t style · g grid · [/] brush · s save · "
-                f"u undo · r reload · q quit   {message}")
+                "1-5/n/p room · t style · g grid · [/] brush · "
+                "o occluders · s save · u undo · r reload · q quit   "
+                f"{message}")
 
         def repaint():
             """One screen update.  When the scene cache is valid and an
             image is already on screen, patch only the damaged rects (old
-            + new cursor, painted cells) with a=f edits; whole-scene
-            changes — or damage beyond EDIT_AREA_FRACTION of the frame —
-            take the double-buffered full present unchanged."""
+            + new cursor, rubber-band preview, painted cells) with a=f
+            edits; whole-scene changes — or damage beyond
+            EDIT_AREA_FRACTION of the frame — take the double-buffered
+            full present unchanged."""
             nonlocal scene_cache, overlay_cache, last_present
-            nonlocal presented_hover, presented_brush, paint_rects
+            nonlocal presented_hover, presented_brush, presented_preview
+            nonlocal paint_rects
             started = time.perf_counter()
-            mode, rects = "full", []
+            eff_brush = brush if mode == "walk" else 1
+            preview = (snap_occluder_rect(occ_drag, hover)
+                       if occ_drag is not None and hover is not None
+                       else None)
+            present_mode, rects = "full", []
             if scene_cache is not None and terminal.current_id is not None:
                 rects = prune_rects(
                     cursor_damage(presented_hover, presented_brush)
-                    + cursor_damage(hover, brush) + paint_rects)
+                    + cursor_damage(hover, eff_brush)
+                    + preview_damage(presented_preview)
+                    + preview_damage(preview) + paint_rects)
                 if sum(w * h for _, _, w, h in rects) <= \
                         EDIT_AREA_FRACTION * DISPLAY_W * DISPLAY_H:
-                    mode = "edit"
-            if mode == "edit":
+                    present_mode = "edit"
+            if present_mode == "edit":
                 if rects:
-                    frame = compose_cursor(scene_cache, hover, brush)
+                    frame = compose_cursor(scene_cache, hover, eff_brush,
+                                           preview)
                     wrote = terminal.edit(frame, rects, status_lines())
                 else:
                     terminal.status(*status_lines())
@@ -982,7 +1108,7 @@ def run_editor(initial_room, initial_style):
                 if debug_checksum:
                     reference = compose_scene(world, rooms[room_index],
                                               grid, STYLES[style_index],
-                                              show_grid)
+                                              show_grid, mode)
                     verdict = ("ok" if reference.tobytes()
                                == scene_cache.tobytes() else "DRIFT")
                     terminal.write(f"\x1b_Kwalk-editor coherence={verdict}"
@@ -993,20 +1119,22 @@ def run_editor(initial_room, initial_style):
                 if scene_cache is None:
                     scene_cache = compose_scene(world, rooms[room_index],
                                                 grid, STYLES[style_index],
-                                                show_grid)
+                                                show_grid, mode)
                     overlay_cache = scene_overlay(world, rooms[room_index],
-                                                  show_grid)
-                frame = compose_cursor(scene_cache, hover, brush)
+                                                  show_grid, mode)
+                frame = compose_cursor(scene_cache, hover, eff_brush,
+                                       preview)
                 _, wrote = terminal.present(frame.tobytes(),
                                             status_lines())
-            presented_hover, presented_brush = hover, brush
+            presented_hover, presented_brush = hover, eff_brush
+            presented_preview = preview
             paint_rects = []
             if TRACE:
                 now = time.monotonic()
                 gap = ("first" if last_present is None else
                        f"{(now - last_present) * 1000:.1f}ms")
-                TRACE(f"present mode={mode} "
-                      f"rects={len(rects) if mode == 'edit' else 'all'} "
+                TRACE(f"present mode={present_mode} rects="
+                      f"{len(rects) if present_mode == 'edit' else 'all'} "
                       f"bytes={wrote} "
                       f"ms={(time.perf_counter() - started) * 1000:.1f} "
                       f"since={gap}")
@@ -1023,28 +1151,77 @@ def run_editor(initial_room, initial_style):
             """Track the pointer; repaint only when the CELL changes (the
             hairlines/dot then snap to the new exact position too) so pure
             hover costs at most one present per cell crossed.  While a
-            drag is active, hover-only repaints are skipped outright —
-            paint actions drive the presents and the trailing flush snaps
-            the cursor when the gesture ends."""
+            paint drag is active, hover-only repaints are skipped outright
+            — paint actions drive the presents and the trailing flush
+            snaps the cursor when the gesture ends.  While a rubber-band
+            drag is held every report requests a repaint (the cadence
+            throttle coalesces them) so the preview follows the pointer."""
             nonlocal hover, hover_cell, need_image, need_status
             hover = point
             cell = (None if point is None else
                     (int(point[0] // CELL), int(point[1] // CELL)))
             if cell != hover_cell:
                 hover_cell = cell
-                if paint_value is None:
+                if paint_value is None and occ_drag is None:
                     need_image = True
-                elif TRACE:
+                elif paint_value is not None and TRACE:
                     TRACE(f"drop hover-repaint cell={cell} (drag active)")
+            if occ_drag is not None:
+                need_image = True
             need_status = True
+
+        def finish_occluder_drag(point):
+            """Commit an active rubber band as a NEW occluder: rect
+            snapped outward to the 6px grid, baseline = rect bottom,
+            respecting the per-room cap.  No-op when no drag is held."""
+            nonlocal occ_drag, dirty, scene_cache, message, need_image
+            if occ_drag is None:
+                return
+            anchor, occ_drag = occ_drag, None
+            rect = snap_occluder_rect(anchor,
+                                      point if point is not None
+                                      else anchor)
+            occluders = rooms[room_index].setdefault("occluders", [])
+            if len(occluders) >= MAX_OCCLUDERS:
+                message = f"occluder cap {MAX_OCCLUDERS} reached"
+            else:
+                occluders.append({"rect": rect,
+                                  "baseline": rect["y"] + rect["h"]})
+                dirty = True
+                message = (f"occluder {rect['x']},{rect['y']} "
+                           f"{rect['w']}x{rect['h']} baseline "
+                           f"{rect['y'] + rect['h']}")
+                if TRACE:
+                    TRACE(f"occluder add {rect}")
+            scene_cache = None
+            need_image = True
+
+        def nudge_baseline(delta):
+            """[ / ] in occluder mode: move the baseline of the occluder
+            under the cursor by delta logical px, clamped to its rect."""
+            nonlocal dirty, scene_cache, message
+            occluder = occluder_at(rooms[room_index], hover)
+            if occluder is None:
+                message = "no occluder under cursor"
+                return
+            rect = occluder["rect"]
+            baseline = occluder.get("baseline",
+                                    rect["y"] + rect["h"]) + delta
+            baseline = max(rect["y"],
+                           min(rect["y"] + rect["h"], baseline))
+            occluder["baseline"] = baseline
+            dirty = True
+            scene_cache = None
+            message = f"baseline {baseline:g}"
 
         def switch_room(new_index):
             nonlocal room_index, grid, dirty, undo_stack, scene_cache
-            nonlocal overlay_cache
+            nonlocal overlay_cache, occ_drag
             room_index = new_index % len(rooms)
             grid = rasterize(rooms[room_index])
             undo_stack = []
             dirty = False
+            occ_drag = None
             scene_cache = None
             overlay_cache = None
 
@@ -1053,7 +1230,8 @@ def run_editor(initial_room, initial_style):
         pending = b""               # incomplete escape tail, carried over
         need_image = need_status = False
         while True:
-            interval = (DRAG_REPAINT_INTERVAL if paint_value is not None
+            interval = (DRAG_REPAINT_INTERVAL
+                        if paint_value is not None or occ_drag is not None
                         else REPAINT_INTERVAL)
             if need_image:
                 # A repaint was suppressed by the throttle: wake up exactly
@@ -1105,6 +1283,7 @@ def run_editor(initial_room, initial_style):
                     if paint_value is not None:
                         need_image = True   # gesture over: flush promptly
                     paint_value = None
+                    finish_occluder_drag(point)
                     note(f"{px},{py} release")
                     continue
                 base_button = button & 3
@@ -1117,6 +1296,7 @@ def run_editor(initial_room, initial_style):
                     if paint_value is not None:
                         need_image = True   # gesture over: flush promptly
                     paint_value = None
+                    finish_occluder_drag(point)
                     note(f"{px},{py} hover")
                     continue
                 if point is None:
@@ -1125,6 +1305,38 @@ def run_editor(initial_room, initial_style):
                 cx, cy = int(point[0] // CELL), int(point[1] // CELL)
                 if not (0 <= cx < COLS and 0 <= cy < ROWS):
                     note(f"{px},{py} outside grid")
+                    continue
+                if mode == "occluder":
+                    # Occluder layer: left press/drag rubber-bands a new
+                    # rect (committed on release), right-click deletes the
+                    # occluder under the pointer.  Never paints the grid.
+                    if base_button == 0:
+                        if occ_drag is None:
+                            # Press — or a drag whose press was lost:
+                            # adopt it so the gesture still lands.
+                            occ_drag = point
+                            need_image = True
+                        note(f"{px},{py} occluder drag")
+                    elif base_button == 2 and not motion:
+                        occluders = rooms[room_index].get("occluders", [])
+                        target = next(
+                            (i for i in reversed(range(len(occluders)))
+                             if _point_in_rect(point[0], point[1],
+                                               occluders[i]["rect"])),
+                            None)
+                        if target is None:
+                            message = "no occluder here"
+                        else:
+                            del occluders[target]
+                            dirty = True
+                            scene_cache = None
+                            message = "deleted occluder"
+                            if TRACE:
+                                TRACE(f"occluder delete index={target}")
+                        need_image = True
+                        note(f"{px},{py} occluder delete")
+                    else:
+                        note(f"{px},{py} idle")
                     continue
                 if base_button in (0, 2) and (not motion
                                               or paint_value is None):
@@ -1193,13 +1405,24 @@ def run_editor(initial_room, initial_style):
                             dirty = False
                             nudge_note = (f", nudged {len(nudged)} "
                                           "spawn(s)" if nudged else "")
+                            occluders = rooms[room_index].get(
+                                "occluders", [])
                             message = (f"saved: walk + "
                                        f"{len(result['obstacles'])} "
-                                       f"obstacles{nudge_note}, "
-                                       "validator OK")
+                                       "obstacles + "
+                                       f"{len(occluders)} occluders"
+                                       f"{nudge_note}, validator OK")
                         else:
                             message = ("SAVED BUT INVALID: " +
                                        verdict.stderr.strip()[-90:])
+                elif char == "o":
+                    mode = "occluder" if mode == "walk" else "walk"
+                    paint_value = None
+                    occ_drag = None
+                    scene_cache = None
+                    message = ("occluder mode: drag new · right-click "
+                               "delete · [/] baseline"
+                               if mode == "occluder" else "walk mode")
                 elif char == "u" and undo_stack:
                     grid = bytearray(undo_stack.pop())
                     dirty = True
@@ -1208,6 +1431,10 @@ def run_editor(initial_room, initial_style):
                 elif char == "g":
                     show_grid = not show_grid
                     scene_cache = None
+                elif char == "]" and mode == "occluder":
+                    nudge_baseline(-CELL)   # up: baseline y decreases
+                elif char == "[" and mode == "occluder":
+                    nudge_baseline(CELL)    # down: toward the rect bottom
                 elif char in "]+=":
                     brush = min(BRUSH_MAX, brush + 1)
                     message = f"brush {brush}x{brush}"
@@ -1239,7 +1466,8 @@ def run_editor(initial_room, initial_style):
             # input goes quiet.  Status-only updates are a few bytes, so
             # they flush every batch to keep hover coords live.
             now = time.monotonic()
-            interval = (DRAG_REPAINT_INTERVAL if paint_value is not None
+            interval = (DRAG_REPAINT_INTERVAL
+                        if paint_value is not None or occ_drag is not None
                         else REPAINT_INTERVAL)
             if need_image and now - last_draw >= interval:
                 repaint()

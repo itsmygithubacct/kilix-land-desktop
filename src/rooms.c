@@ -15,6 +15,7 @@
 #include <string.h>
 
 #define DESK_WORLD_FILE_CAPACITY (256u * 1024u)
+#define DESK_OCCLUDER_BASELINE_TOLERANCE 0.001f
 
 typedef struct world_parser {
     const char *text;
@@ -508,6 +509,44 @@ static bool parse_npc(world_parser *p, desk_npc *npc)
     return true;
 }
 
+static bool parse_occluder(world_parser *p, desk_occluder *occluder)
+{
+    bool first = true;
+    unsigned seen = 0u;
+    size_t start;
+    char key[32];
+
+    skip_ws(p);
+    start = p->offset;
+    if (!expect_char(p, '{'))
+        return false;
+    for (;;) {
+        int step = next_key(p, &first, key, sizeof key);
+
+        if (step < 0)
+            return false;
+        if (step == 0)
+            break;
+        if (strcmp(key, "rect") == 0) {
+            if (!claim_key(p, &seen, 1u << 0, key) ||
+                !parse_rect_value(p, &occluder->rect))
+                return false;
+        } else if (strcmp(key, "baseline") == 0) {
+            if (!claim_key(p, &seen, 1u << 1, key) ||
+                !parse_number(p, &occluder->baseline))
+                return false;
+        } else {
+            return fail_at(p, p->key_offset, "unknown key '%s' in occluder",
+                           key);
+        }
+    }
+    if ((seen & (1u << 0)) == 0u)
+        return fail_at(p, start, "occluder missing 'rect'");
+    if ((seen & (1u << 1)) == 0u)
+        occluder->baseline = occluder->rect.y + occluder->rect.h;
+    return true;
+}
+
 static bool parse_obstacle_element(world_parser *p, desk_room *room,
                                    int index)
 {
@@ -527,6 +566,12 @@ static bool parse_object_element(world_parser *p, desk_room *room, int index)
 static bool parse_npc_element(world_parser *p, desk_room *room, int index)
 {
     return parse_npc(p, &room->npcs[index]);
+}
+
+static bool parse_occluder_element(world_parser *p, desk_room *room,
+                                   int index)
+{
+    return parse_occluder(p, &room->occluders[index]);
 }
 
 static bool parse_array(world_parser *p, desk_room *room, int *count,
@@ -624,6 +669,12 @@ static bool parse_room(world_parser *p, desk_room *room)
                 !parse_array(p, room, &room->npc_count,
                              DESK_MAX_NPCS_PER_ROOM, "npcs",
                              parse_npc_element))
+                return false;
+        } else if (strcmp(key, "occluders") == 0) {
+            if (!claim_key(p, &seen, 1u << 9, key) ||
+                !parse_array(p, room, &room->occluder_count,
+                             DESK_MAX_OCCLUDERS_PER_ROOM, "occluders",
+                             parse_occluder_element))
                 return false;
         } else {
             return fail_at(p, p->key_offset, "unknown key '%s' in room",
@@ -956,6 +1007,26 @@ bool desk_world_validate(const desk_world *world, char *error,
                 return vfail(error, error_size,
                              "%s.npcs[%d]: position off the logical canvas",
                              room->id, i);
+        }
+
+        if (room->occluder_count < 0 ||
+            room->occluder_count > DESK_MAX_OCCLUDERS_PER_ROOM)
+            return vfail(error, error_size, "%s: more than %d occluders",
+                         room->id, DESK_MAX_OCCLUDERS_PER_ROOM);
+        for (i = 0; i < room->occluder_count; ++i) {
+            const desk_occluder *occluder = &room->occluders[i];
+
+            (void)snprintf(label, sizeof label, "%s.occluders[%d].rect",
+                           room->id, i);
+            if (!check_rect(&occluder->rect, label, error, error_size))
+                return false;
+            if (occluder->baseline < occluder->rect.y -
+                    DESK_OCCLUDER_BASELINE_TOLERANCE ||
+                occluder->baseline > occluder->rect.y + occluder->rect.h +
+                    DESK_OCCLUDER_BASELINE_TOLERANCE)
+                return vfail(error, error_size,
+                             "%s.occluders[%d]: baseline %g outside its rect",
+                             room->id, i, (double)occluder->baseline);
         }
     }
 

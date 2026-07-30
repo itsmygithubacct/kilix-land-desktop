@@ -16,6 +16,8 @@ MAX_OBJECTS = 12
 MAX_DOORS = 4
 MAX_OBSTACLES = 64
 MAX_NPCS = 3
+MAX_OCCLUDERS = 12
+OCCLUDER_BASELINE_TOLERANCE = 0.001
 ID_CAPACITY = 24
 LABEL_CAPACITY = 40
 PROMPT_CAPACITY = 48
@@ -194,6 +196,27 @@ def main():
                 fail(f"{rid}.npcs[{i}]: missing position")
             if not (0 <= x <= LOGICAL_WIDTH and 0 <= y <= LOGICAL_HEIGHT):
                 fail(f"{rid}.npcs[{i}]: position off the logical canvas")
+
+        occluders = room.get("occluders", [])
+        if len(occluders) > MAX_OCCLUDERS:
+            fail(f"{rid}: more than {MAX_OCCLUDERS} occluders")
+        for i, occluder in enumerate(occluders):
+            unknown = set(occluder) - {"rect", "baseline"}
+            if unknown:
+                fail(f"{rid}.occluders[{i}]: unknown keys "
+                     f"{', '.join(sorted(unknown))}")
+            rect = occluder.get("rect")
+            if not isinstance(rect, dict):
+                fail(f"{rid}.occluders[{i}]: missing rect")
+            check_rect(rect, f"{rid}.occluders[{i}].rect")
+            baseline = occluder.get("baseline", rect["y"] + rect["h"])
+            if not isinstance(baseline, (int, float)):
+                fail(f"{rid}.occluders[{i}]: baseline must be a number")
+            if not (rect["y"] - OCCLUDER_BASELINE_TOLERANCE
+                    <= baseline
+                    <= rect["y"] + rect["h"] + OCCLUDER_BASELINE_TOLERANCE):
+                fail(f"{rid}.occluders[{i}]: baseline {baseline} "
+                     "outside its rect")
 
     unreachable = [room["id"] for room in rooms
                    if room["id"] != start and room["id"] not in reachable]

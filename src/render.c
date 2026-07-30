@@ -334,39 +334,107 @@ static int room_npc_count(const desk_room *room)
     return clamp_int(room->npc_count, 0, DESK_MAX_NPCS_PER_ROOM);
 }
 
+/* 480 logical columns sample the 1280 plate columns at exactly 8/3 (and 270
+ * rows the 720 plate rows), so every 3-logical-pixel step lands on a whole
+ * plate pixel. Occluder redraws snap outward to that grid: the subview blit
+ * then samples the same plate pixels at the same screen positions as the
+ * full-plate backdrop blit and is pixel-identical to it. */
+#define OCCLUDER_SNAP_GRID 3
+
+static void draw_occluder(ki_td_soft_renderer *renderer,
+                          const ki_td_view *view, const ki_td_rgba8 *plate,
+                          const desk_occluder *occluder)
+{
+    ki_td_rgba8 subview;
+    int x0 = (int)occluder->rect.x;
+    int y0 = (int)occluder->rect.y;
+    int x1 = (int)(occluder->rect.x + occluder->rect.w);
+    int y1 = (int)(occluder->rect.y + occluder->rect.h);
+    if ((float)x1 < occluder->rect.x + occluder->rect.w) x1++;
+    if ((float)y1 < occluder->rect.y + occluder->rect.h) y1++;
+    x0 -= x0 % OCCLUDER_SNAP_GRID;
+    y0 -= y0 % OCCLUDER_SNAP_GRID;
+    x1 += (OCCLUDER_SNAP_GRID - x1 % OCCLUDER_SNAP_GRID) %
+          OCCLUDER_SNAP_GRID;
+    y1 += (OCCLUDER_SNAP_GRID - y1 % OCCLUDER_SNAP_GRID) %
+          OCCLUDER_SNAP_GRID;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > DESK_LOGICAL_WIDTH) x1 = DESK_LOGICAL_WIDTH;
+    if (y1 > DESK_LOGICAL_HEIGHT) y1 = DESK_LOGICAL_HEIGHT;
+    if (x1 <= x0 || y1 <= y0) return;
+    subview = ki_td_rgba8_subimage(
+        plate, x0 * DESK_PLATE_WIDTH / DESK_LOGICAL_WIDTH,
+        y0 * DESK_PLATE_HEIGHT / DESK_LOGICAL_HEIGHT,
+        (x1 - x0) * DESK_PLATE_WIDTH / DESK_LOGICAL_WIDTH,
+        (y1 - y0) * DESK_PLATE_HEIGHT / DESK_LOGICAL_HEIGHT);
+    if (!ki_td_rgba8_is_valid(&subview)) return;
+    ki_td_soft_rgba_resized(renderer, view, (float)x0, (float)y0, &subview,
+                            x1 - x0, y1 - y0, 1.0f);
+}
+
 static void draw_actors(ki_td_soft_renderer *renderer, const ki_td_view *view,
                         const desk_state *state,
-                        const desk_graphics *graphics, const desk_room *room)
+                        const desk_graphics *graphics, const desk_room *room,
+                        int room_index)
 {
-    int order[DESK_MAX_NPCS_PER_ROOM + 1];
-    float depth[DESK_MAX_NPCS_PER_ROOM + 1];
+    enum { ACTOR_DRAW_CAPACITY = DESK_MAX_NPCS_PER_ROOM + 1 +
+                                 DESK_MAX_OCCLUDERS_PER_ROOM };
+    int order[ACTOR_DRAW_CAPACITY];
+    /* 0 = entity, 1 = occluder: at equal depth the occluder draws after the
+     * entity, so an entity standing exactly on the baseline is covered. */
+    int kind[ACTOR_DRAW_CAPACITY];
+    float depth[ACTOR_DRAW_CAPACITY];
+    ki_td_rgba8 plate;
     int npc_count = room_npc_count(room);
+    int occluder_count = 0;
     int count = 0;
     int left;
     int npc;
+    int occluder;
+    /* Occluders re-blit plate art; the procedural fallback has none. */
+    if (desk_graphics_plate(graphics, room_index, &plate))
+        occluder_count = clamp_int(room->occluder_count, 0,
+                                   DESK_MAX_OCCLUDERS_PER_ROOM);
     for (npc = 0; npc < npc_count; ++npc) {
         order[count] = npc;
         depth[count] = room->npcs[npc].y;
+        kind[count] = 0;
         ++count;
     }
     order[count] = -1;
     depth[count] = state->player_y;
+    kind[count] = 0;
     ++count;
+    for (occluder = 0; occluder < occluder_count; ++occluder) {
+        order[count] = occluder;
+        depth[count] = room->occluders[occluder].baseline;
+        kind[count] = 1;
+        ++count;
+    }
     for (left = 0; left < count - 1; ++left) {
         int right;
         for (right = left + 1; right < count; ++right) {
-            if (depth[right] < depth[left]) {
+            if (depth[right] < depth[left] ||
+                (depth[right] == depth[left] &&
+                 kind[right] < kind[left])) {
                 int swap_order = order[left];
+                int swap_kind = kind[left];
                 float swap_depth = depth[left];
                 order[left] = order[right];
                 depth[left] = depth[right];
+                kind[left] = kind[right];
                 order[right] = swap_order;
                 depth[right] = swap_depth;
+                kind[right] = swap_kind;
             }
         }
     }
     for (left = 0; left < count; ++left) {
-        if (order[left] < 0)
+        if (kind[left] != 0)
+            draw_occluder(renderer, view, &plate,
+                          &room->occluders[order[left]]);
+        else if (order[left] < 0)
             draw_player(renderer, view, state, graphics);
         else
             draw_npc(renderer, view, state, graphics,
@@ -1165,7 +1233,8 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
         if (room) {
             draw_room_scene(renderer, &view, canvas, state, graphics,
                             room, state->room);
-            draw_actors(renderer, &view, state, graphics, room);
+            draw_actors(renderer, &view, state, graphics, room,
+                        state->room);
             draw_npc_tags(renderer, &view, canvas, state, room);
         }
     }

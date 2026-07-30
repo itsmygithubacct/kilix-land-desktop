@@ -30,7 +30,7 @@ partial rects (f=32,o=z,r=1 with x,y,s,v, payload length-checked) that
 always target the image id currently on screen; and every present — full
 or edit batch — sits inside a DEC 2026 synchronized update.
 
-Seven scenarios, all must pass:
+Eight scenarios, all must pass:
   clean          the whole mouse burst arrives in one read
   torture        the same bytes arrive in 3-byte fragments with 10ms gaps,
                  splitting every escape sequence across reads — what a pty
@@ -48,6 +48,16 @@ Seven scenarios, all must pass:
                  sequence must report coherence=ok, never DRIFT), and
                  grid toggles / room switches still take the full-frame
                  double-buffer delete-after-place path
+  occluder-authoring
+                 'o' enters occluder mode (OCCLUDER status tag, full-frame
+                 present), a left rubber-band drag live-previews via a=f
+                 with snapped coords in the status line and commits on
+                 release (rect snapped to the 6px grid, baseline = rect
+                 bottom, saved to world.json and green under
+                 validate_world.py), [/] nudge the baseline of the
+                 occluder under the cursor, right-click deletes it (gone
+                 from the next save), and walk painting still works after
+                 the mode round-trip
 
 Usage:  test_walk_editor.py            verbose report with log evidence
         test_walk_editor.py --quick    one line per check, nonzero on failure
@@ -744,6 +754,179 @@ def run_toggle_brush_scenario(verbose):
     return report("toggle+brush", checks, log, verbose)
 
 
+# Occluder-authoring geometry: cells (50,10)->(55,14) span a bedroom area
+# disjoint from the shipped bed occluder (48,138 159x96 -> cells 8..34 x
+# 23..38) and from PAINT_CELLS, so right-click delete can only hit the new
+# rect and the walk grid stays untouched.  With the live tab geometry the
+# editor's inverse pixel mapping lands at ~(303.1,63.0) and ~(333.0,87.0),
+# so the outward 6px snap is exactly x 300..336, y 60..90.
+OCC_DRAG_START = (50, 10)
+OCC_DRAG_END = (55, 14)
+OCC_INSIDE = (52, 12)
+OCC_EXPECT_RECT = {"x": 300, "y": 60, "w": 36, "h": 30}
+OCC_EXPECT_BASELINE = 90
+
+
+def right_click_burst(cell):
+    px, py = pixel_for_cell(*cell)
+    return f"\x1b[<2;{px};{py}M\x1b[<2;{px};{py}m".encode()
+
+
+def hover_at_burst(cell):
+    px, py = pixel_for_cell(*cell)
+    return f"\x1b[<35;{px};{py}M".encode()
+
+
+def read_bedroom(session):
+    """-> ('bedroom' room dict from the temp world.json, error string)."""
+    try:
+        with open(session.world, encoding="utf-8") as handle:
+            world = json.load(handle)
+        return next(r for r in world["rooms"] if r["id"] == "bedroom"), ""
+    except (OSError, ValueError, StopIteration) as error:
+        return None, f"unreadable: {error}"
+
+
+def run_occluder_scenario(verbose):
+    """Occluder layer contract: 'o' round-trips WALK<->OCCLUDER mode,
+    rubber-banding authors a snapped occluder with baseline = rect bottom
+    (live coords in the status line while held), [/] nudge the baseline,
+    right-click deletes, every save passes validate_world.py, and walk
+    painting still works after returning to walk mode."""
+    checks = []
+
+    def check(label, ok, detail=""):
+        checks.append((label, bool(ok), detail))
+
+    session = Session()
+    try:
+        check("transmits kitty image (a=T)",
+              session.wait_for(APC_TRANSMIT, 15) != -1)
+        check("writes status line",
+              session.wait_for(b"walk-editor  ", 5) != -1)
+        time.sleep(0.3)                  # startup repaints settle
+        mode_mark = len(session.snapshot())
+        session.send(b"o")
+        check("'o' shows the OCCLUDER mode tag",
+              session.wait_for(b"OCCLUDER", 5, start=mode_mark) != -1)
+        check("mode switch takes the full-frame a=T path",
+              session.wait_for(APC_TRANSMIT, 5, start=mode_mark) != -1)
+        time.sleep(0.3)                  # mode present settles
+        drag_mark = len(session.snapshot())
+        px0, py0 = pixel_for_cell(*OCC_DRAG_START)
+        px1, py1 = pixel_for_cell(*OCC_DRAG_END)
+        session.send(f"\x1b[<0;{px0};{py0}M\x1b[<32;{px1};{py1}M".encode())
+        rect = OCC_EXPECT_RECT
+        live = (f"new {rect['x']},{rect['y']} "
+                f"{rect['w']}x{rect['h']}").encode()
+        check("status shows live snapped coords while the drag is held",
+              session.wait_for(live, 5, start=drag_mark) != -1)
+        check("rubber-band preview patches via a=f edits",
+              session.wait_for(APC_EDIT, 5, start=drag_mark) != -1)
+        drag_log = session.snapshot()[drag_mark:]
+        check("no full a=T while the rubber band is held",
+              APC_TRANSMIT not in drag_log)
+        session.send(f"\x1b[<0;{px1};{py1}m".encode())
+        check("release commits the occluder (status ack)",
+              session.wait_for(b"occluder 300,60", 5,
+                               start=drag_mark) != -1)
+        time.sleep(0.3)
+        save_mark = len(session.snapshot())
+        session.send(b"s")
+        check("save reports both layers + validator OK",
+              session.wait_for(b"2 occluders, validator OK", 15,
+                               start=save_mark) != -1)
+        bedroom, error = read_bedroom(session)
+        added = [] if bedroom is None else \
+            [o for o in bedroom.get("occluders", [])
+             if o.get("rect") == OCC_EXPECT_RECT]
+        check("saved occluder rect snapped to the 6px grid",
+              len(added) == 1,
+              error or f"occluders={bedroom.get('occluders')}")
+        check("saved baseline = rect bottom",
+              added and added[0].get("baseline") == OCC_EXPECT_BASELINE,
+              f"got {added[0].get('baseline') if added else None}")
+        verdict = subprocess.run(
+            [sys.executable, VALIDATOR, session.world],
+            capture_output=True, text=True)
+        check("world with the authored occluder passes validate_world.py",
+              verdict.returncode == 0, verdict.stderr.strip()[-120:])
+        # Baseline nudge: hover inside the new rect, ']' moves the
+        # baseline up 6px, '[' moves it back down to the rect bottom.
+        session.send(hover_at_burst(OCC_INSIDE))
+        nudge_mark = len(session.snapshot())
+        session.send(b"]")
+        check("']' nudges the hovered baseline up 6px",
+              session.wait_for(b"baseline 84", 5, start=nudge_mark) != -1)
+        back_mark = len(session.snapshot())
+        session.send(b"[")
+        check("'[' nudges it back down (clamped to the rect)",
+              session.wait_for(b"baseline 90", 5, start=back_mark) != -1)
+        delete_mark = len(session.snapshot())
+        session.send(right_click_burst(OCC_INSIDE))
+        check("right-click inside the occluder deletes it",
+              session.wait_for(b"deleted occluder", 5,
+                               start=delete_mark) != -1)
+        time.sleep(0.2)
+        save2_mark = len(session.snapshot())
+        session.send(b"s")
+        check("save after delete reports one occluder + validator OK",
+              session.wait_for(b"1 occluders, validator OK", 15,
+                               start=save2_mark) != -1)
+        bedroom, error = read_bedroom(session)
+        occluders = [] if bedroom is None else bedroom.get("occluders", [])
+        check("deleted occluder is gone from the saved world",
+              bedroom is not None and
+              all(o.get("rect") != OCC_EXPECT_RECT for o in occluders),
+              error or f"occluders={occluders}")
+        check("shipped bed occluder survived untouched",
+              any(o.get("rect") == {"x": 48, "y": 138, "w": 159, "h": 96}
+                  and o.get("baseline") == 228 for o in occluders),
+              f"occluders={occluders}")
+        walk_mark = len(session.snapshot())
+        session.send(b"o")
+        check("'o' returns to walk mode",
+              session.wait_for(b"walk mode", 5, start=walk_mark) != -1)
+        time.sleep(0.3)
+        paint_mark = len(session.snapshot())
+        send_burst(session, mouse_burst(), False)
+        check("walk painting still works after the mode round-trip (a=f)",
+              session.wait_for(APC_EDIT, 6, start=paint_mark) != -1)
+        time.sleep(0.5)
+        save3_mark = len(session.snapshot())
+        session.send(b"s")
+        check("final save reports validator OK",
+              session.wait_for(b"validator OK", 15,
+                               start=save3_mark) != -1)
+        session.send(b"q")
+        exited = True
+        try:
+            session.child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            exited = False
+        check("quits on q", exited)
+    finally:
+        session.close()
+        log = session.snapshot()
+
+    try:
+        with open(session.world, "rb") as handle:
+            world = json.loads(handle.read())
+        room = next(r for r in world["rooms"] if r["id"] == "bedroom")
+        grid = W.rasterize(room)
+        missing = [c for c in PAINT_CELLS
+                   if not grid[c[1] * W.COLS + c[0]]]
+    except (OSError, ValueError, StopIteration, KeyError) as error:
+        missing = [f"unreadable: {error}"]
+    check("painted cells walkable in the final saved world", not missing,
+          f"cells never painted: {missing}")
+
+    check_presentation(log, check)
+    check("no traceback", b"Traceback" not in log)
+    session.cleanup()
+    return report("occluder-authoring", checks, log, verbose)
+
+
 def run_coherence_scenario(verbose):
     """Screen-vs-cache coherence: with KILIX_WALK_EDITOR_DEBUG_CHECKSUM=1
     every edit-mode present byte-compares the incrementally patched scene
@@ -844,6 +1027,7 @@ def main():
     ok &= run_drag_scenario(verbose)
     ok &= run_toggle_brush_scenario(verbose)
     ok &= run_coherence_scenario(verbose)
+    ok &= run_occluder_scenario(verbose)
     return 0 if ok else 1
 
 

@@ -125,7 +125,18 @@
           "target": "wardrobe"
         }
       ],
-      "npcs": []
+      "npcs": [],
+      "occluders": [
+        {
+          "rect": {
+            "x": 48,
+            "y": 138,
+            "w": 159,
+            "h": 96
+          },
+          "baseline": 228
+        }
+      ]
     },
     {
       "id": "living",
@@ -333,6 +344,17 @@
           "actor": 3,
           "x": 408,
           "y": 204
+        }
+      ],
+      "occluders": [
+        {
+          "rect": {
+            "x": 213,
+            "y": 177,
+            "w": 57,
+            "h": 48
+          },
+          "baseline": 216
         }
       ]
     },
@@ -605,7 +627,18 @@
           "target": "trash"
         }
       ],
-      "npcs": []
+      "npcs": [],
+      "occluders": [
+        {
+          "rect": {
+            "x": 231,
+            "y": 108,
+            "w": 120,
+            "h": 69
+          },
+          "baseline": 177
+        }
+      ]
     },
     {
       "id": "yard",
@@ -736,7 +769,26 @@
           "target": "gate-locked"
         }
       ],
-      "npcs": []
+      "npcs": [],
+      "occluders": [
+        {
+          "rect": {
+            "x": 21,
+            "y": 108,
+            "w": 63,
+            "h": 84
+          }
+        },
+        {
+          "rect": {
+            "x": 270,
+            "y": 33,
+            "w": 138,
+            "h": 159
+          },
+          "baseline": 189
+        }
+      ]
     }
   ]
 }

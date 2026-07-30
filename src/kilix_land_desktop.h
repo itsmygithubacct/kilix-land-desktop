@@ -42,6 +42,7 @@
 #define DESK_MAX_DOORS_PER_ROOM 4
 #define DESK_MAX_OBSTACLES_PER_ROOM 64
 #define DESK_MAX_NPCS_PER_ROOM 3
+#define DESK_MAX_OCCLUDERS_PER_ROOM 12
 
 #define DESK_INTERACT_RADIUS 72.0f
 #define DESK_DOOR_COOLDOWN_TICKS 30
@@ -176,6 +177,17 @@ typedef struct desk_npc {
     float y;
 } desk_npc;
 
+/* Furniture depth mask: rect bounds the furniture's plate art in logical
+ * coordinates, baseline is the y where the furniture meets the floor. An
+ * entity whose feet y is less than baseline is behind the furniture, so the
+ * plate subregion for rect redraws over it (painter's algorithm, keyed by
+ * baseline; ties draw the occluder after the entity). Rooms rendering the
+ * procedural fallback (no plate) skip occluders entirely. */
+typedef struct desk_occluder {
+    desk_rect rect;
+    float baseline; /* defaults to the rect bottom when not authored */
+} desk_occluder;
+
 typedef struct desk_room {
     char id[DESK_ID_CAPACITY];
     char name[DESK_LABEL_CAPACITY];
@@ -190,6 +202,8 @@ typedef struct desk_room {
     int object_count;
     desk_npc npcs[DESK_MAX_NPCS_PER_ROOM];
     int npc_count;
+    desk_occluder occluders[DESK_MAX_OCCLUDERS_PER_ROOM];
+    int occluder_count;
 } desk_room;
 
 typedef struct desk_world {
