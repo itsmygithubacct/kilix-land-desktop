@@ -662,6 +662,10 @@ void desk_init(desk_state *state, const desk_world *world)
                 room_safe_spawn(room, &state->player_x, &state->player_y);
             }
             clamp_to_walk(state, room);
+            /* The map may have been repainted since this position was
+             * saved; never resume inside freshly blocked space. */
+            if (!position_clear(room, state->player_x, state->player_y))
+                room_safe_spawn(room, &state->player_x, &state->player_y);
         }
         state->mode = DESK_MODE_ROOM;
         state->outfit_dirty = true;
