@@ -821,13 +821,13 @@ def _default_generator_root() -> Path:
         return (
             Path(source_home).expanduser()
             / "kilix-apps"
-            / "python_sound_generator"
+            / "python-sound-generator"
         )
     return (
         Path.home()
         / "gpu_terminal"
         / "kilix-apps"
-        / "python_sound_generator"
+        / "python-sound-generator"
     )
 
 
