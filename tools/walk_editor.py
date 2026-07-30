@@ -79,7 +79,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGICAL_W, LOGICAL_H = 480, 270
 CELL = 6
 COLS, ROWS = LOGICAL_W // CELL, LOGICAL_H // CELL
-MAX_OBSTACLES = 24
+MAX_OBSTACLES = 64
 STYLES = ("legend", "chumrunner", "fantasy", "pleb-bound")
 DISPLAY_W, DISPLAY_H = 960, 540
 SCALE = DISPLAY_W // LOGICAL_W
@@ -156,25 +156,51 @@ def decompose(grid):
                for cy in range(min_cy, max_cy + 1)
                for cx in range(min_cx, max_cx + 1)
                if not grid[cy * COLS + cx]}
-    rects = []
-    while blocked:
-        cx, cy = min(blocked, key=lambda c: (c[1], c[0]))
-        width = 1
-        while (cx + width, cy) in blocked and cx + width <= max_cx:
-            width += 1
-        height = 1
-        while all((cx + i, cy + height) in blocked for i in range(width)) \
-                and cy + height <= max_cy:
-            height += 1
-        for dy in range(height):
-            for dx in range(width):
-                blocked.discard((cx + dx, cy + dy))
-        rects.append({"x": cx * CELL, "y": cy * CELL,
-                      "w": width * CELL, "h": height * CELL})
+    # Organic painted shapes decompose very differently depending on sweep
+    # orientation (furniture outlines are usually run-heavy one way): cover
+    # both ways and keep the smaller set.
+    rects = min(_greedy_cover(blocked, max_cx, max_cy, False),
+                _greedy_cover(blocked, max_cx, max_cy, True), key=len)
     if len(rects) > MAX_OBSTACLES:
         return None, (f"{len(rects)} obstacle rects exceed the cap of "
                       f"{MAX_OBSTACLES}; simplify the blocked shape")
     return {"walk": walk, "obstacles": rects}, None
+
+
+def _greedy_cover(blocked, max_cx, max_cy, column_major):
+    """Exact rect cover of the blocked cells, sweeping row- or column-major:
+    grow the primary run first, then thicken while the full run stays
+    blocked."""
+    remaining = set(blocked)
+    key = (lambda c: (c[0], c[1])) if column_major else \
+        (lambda c: (c[1], c[0]))
+    rects = []
+    while remaining:
+        cx, cy = min(remaining, key=key)
+        if column_major:
+            height = 1
+            while (cx, cy + height) in remaining and cy + height <= max_cy:
+                height += 1
+            width = 1
+            while cx + width <= max_cx and \
+                    all((cx + width, cy + i) in remaining
+                        for i in range(height)):
+                width += 1
+        else:
+            width = 1
+            while (cx + width, cy) in remaining and cx + width <= max_cx:
+                width += 1
+            height = 1
+            while cy + height <= max_cy and \
+                    all((cx + i, cy + height) in remaining
+                        for i in range(width)):
+                height += 1
+        for dy in range(height):
+            for dx in range(width):
+                remaining.discard((cx + dx, cy + dy))
+        rects.append({"x": cx * CELL, "y": cy * CELL,
+                      "w": width * CELL, "h": height * CELL})
+    return rects
 
 
 def apply_decomposition(room, result):
@@ -207,6 +233,58 @@ def apply_brush(grid, cx, cy, value, brush):
                 grid[row * COLS + column] = value
                 changed = True
     return changed
+
+
+def _point_in_rect(px, py, rect):
+    return (rect["x"] <= px <= rect["x"] + rect["w"] and
+            rect["y"] <= py <= rect["y"] + rect["h"])
+
+
+def repair_spawns(world):
+    """Painting can strand a door spawn inside freshly blocked space (or a
+    repositioned walk bbox).  Nudge every invalid spawn to the nearest
+    walkable cell center of its destination that is also outside every
+    door rect — the validator's exact conditions.  -> ['room->dest', ...]
+    labels that moved; an unrepairable spawn is left for the validator to
+    report."""
+    rooms = {room["id"]: room for room in world["rooms"]}
+    grids = {}
+    moved = []
+
+    def valid(dest, x, y):
+        if not _point_in_rect(x, y, dest["walk"]):
+            return False
+        if any(_point_in_rect(x, y, o) for o in dest.get("obstacles", [])):
+            return False
+        return not any(_point_in_rect(x, y, d["rect"])
+                       for d in dest.get("doors", []))
+
+    for room in world["rooms"]:
+        for door in room.get("doors", []):
+            dest = rooms.get(door["to"])
+            if dest is None:
+                continue
+            sx, sy = door["spawn"]["x"], door["spawn"]["y"]
+            if valid(dest, sx, sy):
+                continue
+            grid = grids.setdefault(door["to"], rasterize(dest))
+            best = None
+            for cy in range(ROWS):
+                for cx in range(COLS):
+                    if not grid[cy * COLS + cx]:
+                        continue
+                    x = cx * CELL + CELL // 2
+                    y = cy * CELL + CELL // 2
+                    if not valid(dest, x, y):
+                        continue
+                    distance = (x - sx) ** 2 + (y - sy) ** 2
+                    if best is None or distance < best[0]:
+                        best = (distance, x, y)
+            if best is None:
+                continue
+            door["spawn"] = {"x": best[1], "y": best[2]}
+            moved.append(f"{room['id']}->{door['to']}")
+    return moved
 
 
 def incoming_spawns(world, room_id):
@@ -1101,6 +1179,7 @@ def run_editor(initial_room, initial_style):
                         message = error
                     else:
                         apply_decomposition(rooms[room_index], result)
+                        nudged = repair_spawns(world)
                         with open(world_path(), "w",
                                   encoding="utf-8") as handle:
                             json.dump(world, handle, indent=2)
@@ -1112,9 +1191,12 @@ def run_editor(initial_room, initial_style):
                             capture_output=True, text=True)
                         if verdict.returncode == 0:
                             dirty = False
+                            nudge_note = (f", nudged {len(nudged)} "
+                                          "spawn(s)" if nudged else "")
                             message = (f"saved: walk + "
                                        f"{len(result['obstacles'])} "
-                                       "obstacles, validator OK")
+                                       f"obstacles{nudge_note}, "
+                                       "validator OK")
                         else:
                             message = ("SAVED BUT INVALID: " +
                                        verdict.stderr.strip()[-90:])

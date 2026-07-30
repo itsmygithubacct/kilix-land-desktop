@@ -513,6 +513,72 @@ static void open_wizard_from_profile(desk_state *state)
     state->nearest_npc = -1;
 }
 
+static bool position_clear(const desk_room *room, float x, float y)
+{
+    int index;
+    if (x < room->walk.x || x > room->walk.x + room->walk.w ||
+        y < room->walk.y || y > room->walk.y + room->walk.h)
+        return false;
+    for (index = 0; index < room->obstacle_count; ++index) {
+        const desk_rect *rect = &room->obstacles[index];
+        if (x >= rect->x && x <= rect->x + rect->w &&
+            y >= rect->y && y <= rect->y + rect->h)
+            return false;
+    }
+    return true;
+}
+
+/* Painted worlds can put walls across the walk-rect center, so a fixed
+ * center drop may land inside furniture (or a door, which would teleport
+ * instantly).  Prefer the center; otherwise the nearest clear 6px cell
+ * center outside every door rect. */
+static void room_safe_spawn(const desk_room *room, float *x, float *y)
+{
+    float center_x = room->walk.x + room->walk.w * 0.5f;
+    float center_y = room->walk.y + room->walk.h * 0.5f;
+    float best_x = center_x;
+    float best_y = center_y;
+    float best_distance = -1.0f;
+    float grid_y;
+    if (position_clear(room, center_x, center_y)) {
+        *x = center_x;
+        *y = center_y;
+        return;
+    }
+    for (grid_y = room->walk.y + 3.0f;
+         grid_y <= room->walk.y + room->walk.h; grid_y += 6.0f) {
+        float grid_x;
+        for (grid_x = room->walk.x + 3.0f;
+             grid_x <= room->walk.x + room->walk.w; grid_x += 6.0f) {
+            float dx;
+            float dy;
+            float distance;
+            int door;
+            bool in_door = false;
+            if (!position_clear(room, grid_x, grid_y)) continue;
+            for (door = 0; door < room->door_count; ++door) {
+                const desk_rect *rect = &room->doors[door].rect;
+                if (grid_x >= rect->x && grid_x <= rect->x + rect->w &&
+                    grid_y >= rect->y && grid_y <= rect->y + rect->h) {
+                    in_door = true;
+                    break;
+                }
+            }
+            if (in_door) continue;
+            dx = grid_x - center_x;
+            dy = grid_y - center_y;
+            distance = dx * dx + dy * dy;
+            if (best_distance < 0.0f || distance < best_distance) {
+                best_distance = distance;
+                best_x = grid_x;
+                best_y = grid_y;
+            }
+        }
+    }
+    *x = best_x;
+    *y = best_y;
+}
+
 static void commit_wizard(desk_state *state, const desk_world *world)
 {
     const desk_room *room = NULL;
@@ -534,8 +600,7 @@ static void commit_wizard(desk_state *state, const desk_world *world)
         world->room_count <= DESK_MAX_ROOMS) {
         state->room = world->start_room;
         room = &world->rooms[world->start_room];
-        state->player_x = room->walk.x + room->walk.w * 0.5f;
-        state->player_y = room->walk.y + room->walk.h * 0.5f;
+        room_safe_spawn(room, &state->player_x, &state->player_y);
     }
     if (world && state->room >= 0 && state->room < world->room_count)
         (void)snprintf(state->profile.last_room,
@@ -577,8 +642,7 @@ void desk_init(desk_state *state, const desk_world *world)
         world->start_room < world->room_count) {
         state->room = world->start_room;
         room = &world->rooms[world->start_room];
-        state->player_x = room->walk.x + room->walk.w * 0.5f;
-        state->player_y = room->walk.y + room->walk.h * 0.5f;
+        room_safe_spawn(room, &state->player_x, &state->player_y);
     }
     if (desk_profile_load(&state->profile) && state->profile.first_run_done) {
         state->talked_mask = state->profile.talked_mask;
@@ -595,8 +659,7 @@ void desk_init(desk_state *state, const desk_world *world)
                 state->player_x = state->profile.last_x;
                 state->player_y = state->profile.last_y;
             } else {
-                state->player_x = room->walk.x + room->walk.w * 0.5f;
-                state->player_y = room->walk.y + room->walk.h * 0.5f;
+                room_safe_spawn(room, &state->player_x, &state->player_y);
             }
             clamp_to_walk(state, room);
         }

@@ -570,11 +570,30 @@ static int selftest_body(void)
     }
 
     living = desk_world_room_index(&world, "living");
-    state.player_x = 450.0f;
-    state.player_y = 216.0f;
+    /* The door trigger is position-based, so place the player inside the
+     * start room's door rect instead of walking a path the painted world
+     * may have reshaped; the walk itself is exercised above. */
+    {
+        const desk_room *start_scene = &world.rooms[world.start_room];
+        const desk_door *exit_door = NULL;
+        int door_index;
+        for (door_index = 0; door_index < start_scene->door_count;
+             ++door_index)
+            if (start_scene->doors[door_index].to_room == living) {
+                exit_door = &start_scene->doors[door_index];
+                break;
+            }
+        if (!exit_door) {
+            (void)fprintf(stderr,
+                          "FAIL selftest no door to living\n");
+            return EXIT_FAILURE;
+        }
+        state.player_x = exit_door->rect.x + exit_door->rect.w * 0.5f;
+        state.player_y = exit_door->rect.y + exit_door->rect.h * 0.5f;
+    }
     state.door_cooldown_ticks = 0;
     for (guard = 0; guard < 30 && state.room == world.start_room; ++guard)
-        desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
     if (living < 0 || state.room != living ||
         strcmp(state.profile.last_room, "living") != 0 ||
         state.door_cooldown_ticks == 0 || !state.profile_dirty ||
@@ -922,7 +941,8 @@ static int walk_render_test(const char *directory)
 {
     render_fixture fixture;
     desk_state state;
-    const desk_door *door;
+    const desk_door *door = NULL;
+    float approach_y = -1.0f;
     bool success;
     int frame;
     if (!fixture_open(&fixture, directory)) return EXIT_FAILURE;
@@ -931,15 +951,43 @@ static int walk_render_test(const char *directory)
               complete_wizard(&state, &fixture.world) &&
               fixture.world.rooms[fixture.world.start_room].door_count > 0;
     if (success) {
+        /* The painted world decides which lane reaches the door: probe
+         * each 6px approach row (no rendering) until a straight walk-right
+         * crosses, then re-run that lane for the rendered frames. */
+        float try_y;
         door = &fixture.world.rooms[fixture.world.start_room].doors[0];
+        for (try_y = door->rect.y + 3.0f;
+             try_y <= door->rect.y + door->rect.h - 3.0f &&
+             approach_y < 0.0f; try_y += 6.0f) {
+            int tick;
+            state.room = fixture.world.start_room;
+            state.player_x = door->rect.x - 22.0f;
+            state.player_y = try_y;
+            state.facing = DESK_FACING_RIGHT;
+            state.door_cooldown_ticks = 0;
+            for (tick = 0;
+                 tick < 40 && state.room == fixture.world.start_room;
+                 ++tick)
+                desk_update(&state, &fixture.world, 1, 0,
+                            DESK_TICK_SECONDS);
+            if (state.room != fixture.world.start_room)
+                approach_y = try_y;
+        }
+        success = approach_y >= 0.0f;
+    }
+    if (success) {
+        uint64_t base_tick;
+        state.room = fixture.world.start_room;
         state.player_x = door->rect.x - 22.0f;
-        state.player_y = door->rect.y + door->rect.h * 0.5f;
+        state.player_y = approach_y;
         state.facing = DESK_FACING_RIGHT;
         state.door_cooldown_ticks = 0;
         state.toast_ticks = 0;
+        base_tick = state.simulation_tick;
         for (frame = 0; frame < 8 && success; ++frame) {
             char name[32];
-            uint64_t target_tick = (uint64_t)(unsigned int)frame * 5u + 1u;
+            uint64_t target_tick = base_tick +
+                (uint64_t)(unsigned int)frame * 5u + 1u;
             int written = snprintf(name, sizeof name, "walk-%02d", frame);
             while (state.simulation_tick < target_tick)
                 desk_update(&state, &fixture.world, 1, 0,

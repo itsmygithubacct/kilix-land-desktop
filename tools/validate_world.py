@@ -14,7 +14,7 @@ LOGICAL_HEIGHT = 270
 MAX_ROOMS = 16
 MAX_OBJECTS = 12
 MAX_DOORS = 4
-MAX_OBSTACLES = 24
+MAX_OBSTACLES = 64
 MAX_NPCS = 3
 ID_CAPACITY = 24
 LABEL_CAPACITY = 40
@@ -200,7 +200,74 @@ def main():
     if unreachable:
         fail(f"rooms unreachable by any door: {', '.join(unreachable)}")
 
+    for room in rooms:
+        check_connectivity(room, rooms, ids, start)
+
     print(f"world: OK ({len(rooms)} rooms, start '{start}')")
+
+
+CELL = 6
+GRID_COLS = LOGICAL_WIDTH // CELL
+GRID_ROWS = LOGICAL_HEIGHT // CELL
+
+
+def walkable_cells(room):
+    """Cell centers inside walk and outside every obstacle — the same
+    rasterization the walk editor paints and desk.c effectively enforces."""
+    cells = set()
+    walk = room["walk"]
+    obstacles = room.get("obstacles", [])
+    for cy in range(GRID_ROWS):
+        for cx in range(GRID_COLS):
+            x, y = cx * CELL + CELL / 2, cy * CELL + CELL / 2
+            if not point_in_rect(x, y, walk):
+                continue
+            if any(point_in_rect(x, y, o) for o in obstacles):
+                continue
+            cells.add((cx, cy))
+    return cells
+
+
+def check_connectivity(room, rooms, ids, start):
+    """Every door of a room must be reachable by walking from where the
+    player can appear in it (incoming door spawns; for the start room also
+    the wizard drop near the walk center) — a painted wall that seals a
+    door is a broken world even though every rect is individually valid."""
+    rid = room["id"]
+    cells = walkable_cells(room)
+    if not cells:
+        fail(f"{rid}: no walkable cells at all")
+    seeds = set()
+    for other in rooms:
+        for door in other.get("doors", []):
+            if door.get("to") == rid:
+                spawn = door["spawn"]
+                seeds.add((int(spawn["x"] // CELL),
+                           int(spawn["y"] // CELL)))
+    if rid == start:
+        walk = room["walk"]
+        center = (walk["x"] + walk["w"] / 2, walk["y"] + walk["h"] / 2)
+        seeds.add(min(cells, key=lambda c: (
+            (c[0] * CELL + 3 - center[0]) ** 2 +
+            (c[1] * CELL + 3 - center[1]) ** 2)))
+    seeds &= cells
+    if not seeds:
+        fail(f"{rid}: no spawn lands on a walkable cell")
+    frontier = list(seeds)
+    reached = set(seeds)
+    while frontier:
+        cx, cy = frontier.pop()
+        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1),
+                       (cx, cy - 1)):
+            if (nx, ny) in cells and (nx, ny) not in reached:
+                reached.add((nx, ny))
+                frontier.append((nx, ny))
+    for i, door in enumerate(room.get("doors", [])):
+        rect = door["rect"]
+        if not any(point_in_rect(cx * CELL + 3, cy * CELL + 3, rect)
+                   for cx, cy in reached):
+            fail(f"{rid}.doors[{i}] (to '{door['to']}'): unreachable — "
+                 "walkable space does not connect the spawns to this door")
 
 
 if __name__ == "__main__":
