@@ -320,7 +320,7 @@ def main() -> int:
     parser.add_argument(
         "--games-root",
         type=Path,
-        default=ROOT.parent / "games",
+        default=ROOT.parents[1] / "games",
         help="directory containing the four source game repositories",
     )
     parser.add_argument(

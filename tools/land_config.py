@@ -395,8 +395,9 @@ def locate_tui_core():
     for candidate in (
         os.environ.get("KILIX_TUI_UTILS_DIR"),
         os.path.join(os.environ.get("GPU_TERMINAL_SOURCE_HOME", ""),
-                     "kilix-tui-utils"),
-        os.path.expanduser("~/.local/gpu_terminal/sources/kilix-tui-utils"),
+                     "kilix-desktops", "kilix-tui-utils"),
+        os.path.expanduser(
+            "~/.local/gpu_terminal/sources/kilix-desktops/kilix-tui-utils"),
     ):
         if candidate and os.path.isdir(os.path.join(candidate, "src",
                                                     "kilix_tui")):

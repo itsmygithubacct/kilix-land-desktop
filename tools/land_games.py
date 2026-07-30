@@ -24,8 +24,10 @@ def resolve_root():
     source = os.environ.get("GPU_TERMINAL_SOURCE_HOME")
     if source:
         return os.path.abspath(
-            os.path.join(os.path.expanduser(source), "kilix-95"))
-    return os.path.expanduser("~/.local/gpu_terminal/sources/kilix-95")
+            os.path.join(os.path.expanduser(source), "kilix-desktops",
+                         "kilix-95"))
+    return os.path.expanduser(
+        "~/.local/gpu_terminal/sources/kilix-desktops/kilix-95")
 
 
 def wait_for_enter():
@@ -87,7 +89,8 @@ def main():
     if not os.path.isfile(games_py):
         print(f"Kilix 95 is not installed (no games.py under {root}).")
         print("Clone github.com/itsmygithubacct/kilix-95 to "
-              "~/.local/gpu_terminal/sources/kilix-95 or set KILIX95_PROJECT_HOME.")
+              "~/.local/gpu_terminal/sources/kilix-desktops/kilix-95 or set "
+              "KILIX95_PROJECT_HOME.")
         wait_for_enter()
         return 1
     try:

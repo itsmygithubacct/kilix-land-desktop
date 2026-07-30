@@ -818,8 +818,17 @@ def build(
 def _default_generator_root() -> Path:
     source_home = os.environ.get("GPU_TERMINAL_SOURCE_HOME")
     if source_home:
-        return Path(source_home).expanduser() / "python_sound_generator"
-    return Path.home() / "gpu_terminal" / "python_sound_generator"
+        return (
+            Path(source_home).expanduser()
+            / "kilix-apps"
+            / "python_sound_generator"
+        )
+    return (
+        Path.home()
+        / "gpu_terminal"
+        / "kilix-apps"
+        / "python_sound_generator"
+    )
 
 
 def parse_args() -> argparse.Namespace:

@@ -44,7 +44,7 @@ existing `command` provider mode — no kilix changes needed. In
 
 ```
 KILIX_DESKTOP_PROVIDER=command
-KILIX_DESKTOP_COMMAND=cd ~/.local/gpu_terminal/sources/kilix-land-desktop && exec ./kilix-land-desktop
+KILIX_DESKTOP_COMMAND=cd ~/.local/gpu_terminal/sources/kilix-desktops/kilix-land-desktop && exec ./kilix-land-desktop
 KILIX_DESKTOP_NAME=Kilix Land
 ```
 

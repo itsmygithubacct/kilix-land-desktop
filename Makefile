@@ -32,7 +32,7 @@ SRC := src/main.c src/desk.c src/rooms.c src/launcher.c \
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 DEPENDENCIES := $(OBJ:.o=.d)
 GRAPHICS_MANIFEST := assets/graphics/manifest.json
-GAMES_ROOT ?= ../games
+GAMES_ROOT ?= ../../games
 PARITY_TOOL := tools/sync_source_parity.py
 AUDIO_TOOL := tools/generate_audio.py
 
