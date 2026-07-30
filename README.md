@@ -1,14 +1,13 @@
 # kilix-land-desktop
 
-A kilix desktop provider that plays like kilix-land. On first login you create a
-character — pick a cast member from the four-game crossover roster (Legend of
-Kilix, Chumrunner, Kilix Fantasy, Pleb Bound), name them, choose an outfit
-color — and they wake up in a house rendered in their source game's art style.
-Walk between rooms and the yard; interacting with objects (desk computer,
-filing cabinet, TV, stereo, mailbox, bed…) engages OS and desktop functions the
-way kilix-cap's rooms do, but through a walkable avatar.
-
-Design document: `<workspace>/kilix-land-desktop/IMPLEMENTATION.md`.
+A full Kilix desktop provider, alongside Kilix 95, Kilix Cap, and Kilix TUI,
+that plays like kilix-land. On first login you create a character — pick a cast
+member from the four-game crossover roster (Legend of Kilix, Chumrunner, Kilix
+Fantasy, Pleb Bound), name them, choose an outfit color — and they wake up in a
+house rendered in their source game's art style. Walk between rooms and the
+yard; interacting with objects (desk computer, filing cabinet, TV, stereo,
+mailbox, bed…) engages OS and desktop functions the way kilix-cap's rooms do,
+but through a walkable avatar.
 
 ## Build
 
@@ -17,8 +16,9 @@ make            # builds ./kilix-land-desktop
 make test       # parity check + selftest + headless render fixtures
 ```
 
-The engine stack is the same four submodules as kilix-land, pinned to the same
-commits: kilix-game-kit, kilix-top-down-engine, kilix-assets, kilix-ui.
+The engine stack comes from one pinned `kilix-game-sdk` submodule. Compatibility
+symlinks expose kilix-game-kit, kilix-top-down-engine, kilix-assets, and
+kilix-ui at their established `third_party/` paths.
 
 ## Layout
 
@@ -49,8 +49,11 @@ KILIX_DESKTOP_NAME=Kilix Land
 ```
 
 Native executable-mode wiring (`kilix land`, `KILIX_DESKTOP_PROVIDER=land`,
-pinned installer — the kilix-cap pattern) is the planned M5 step; per the
-design doc it waits until the game-kit submodule pin is publishable.
+pinned installer — the kilix-cap pattern) remains a separate M5 integration
+step. That milestone changes how Kilix selects and pins the project, not
+whether Kilix Land is a desktop. Until it lands, this repository is an optional
+ecosystem desktop rather than part of Kilix’s pinned dependency closure or the
+four-repository Plebian-OS release core.
 
 Environment: `KILIX_LAND_DESKTOP_ASSETS` (checkout root containing `assets/`
 and `tools/`), `KILIX_LAND_DESKTOP_CONFIG_HOME` (absolute profile-store
