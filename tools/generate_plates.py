@@ -28,8 +28,7 @@ import prepare_plate  # noqa: E402
 REPO = pathlib.Path(__file__).resolve().parents[1]
 ROOMS_DIR = REPO / "assets" / "graphics" / "rooms"
 GENERATOR = pathlib.Path.home() / (
-    "gpu_terminal/image-generation/providers/gemini-v7/gemini_image/"
-    "gemini_image.sh")
+    "image-generation/providers/gemini-v7/gemini_image/gemini_image.sh")
 MODEL = "gemini-3-pro-image"
 ATTEMPTS = 3
 
