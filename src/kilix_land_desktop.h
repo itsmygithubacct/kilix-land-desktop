@@ -267,8 +267,9 @@ typedef struct desk_state {
     char wizard_name[DESK_NAME_CAPACITY];
     bool wizard_editing_existing;
     bool outfit_dirty; /* graphics must re-run desk_graphics_set_outfit */
-    int nearest_object; /* -1 = none */
-    int nearest_npc;    /* -1 = none */
+    int nearest_object;     /* -1 = none */
+    int nearest_npc;        /* -1 = none */
+    int nearest_world_item; /* -1 = none; index into items.items */
     int conversation_npc;
     int dialogue_beat;
     int dialogue_age;
@@ -289,6 +290,13 @@ typedef struct desk_state {
     int pending_audio_count;
     bool quit_requested;
     bool profile_dirty; /* main persists via desk_profile_save */
+    /* Item world: the immutable catalog (owned by main, set at init) and
+     * the durable world record. Every committed item mutation sets
+     * world_dirty; main persists via desk_world_state_save with the same
+     * retry backoff as the profile. */
+    const desk_item_catalog *catalog;
+    desk_world_state items;
+    bool world_dirty;
 } desk_state;
 
 /* Opaque-pixel measurements of one sprite cell, captured when the cell is
@@ -361,11 +369,18 @@ bool desk_world_validate_items(const desk_world *world,
 int desk_world_room_index(const desk_world *world, const char *id);
 
 /* desk.c — simulation, wizard, profile */
-void desk_init(desk_state *state, const desk_world *world);
+void desk_init(desk_state *state, const desk_world *world,
+               const desk_item_catalog *catalog);
 void desk_update(desk_state *state, const desk_world *world, int move_x,
                  int move_y, float seconds);
 bool desk_interact(desk_state *state, const desk_world *world);
 void desk_cancel(desk_state *state, const desk_world *world);
+/* Hotbar selection and the explicit drop action; all no-ops outside room
+ * mode. Drop places the whole selected stack on clear floor in front of
+ * the player and never happens implicitly. */
+void desk_select_slot(desk_state *state, int slot);
+void desk_cycle_slot(desk_state *state, int delta);
+bool desk_drop_selected(desk_state *state, const desk_world *world);
 bool desk_text_input(desk_state *state, uint32_t codepoint);
 bool desk_text_backspace(desk_state *state);
 desk_target desk_take_launch_request(desk_state *state);

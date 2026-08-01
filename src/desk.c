@@ -1,6 +1,7 @@
 #include "kilix_land_desktop.h"
 #include "state_store.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -330,9 +331,24 @@ static void update_nearest(desk_state *state, const desk_world *world)
     if (!state) return;
     state->nearest_object = -1;
     state->nearest_npc = -1;
+    state->nearest_world_item = -1;
     if (state->mode != DESK_MODE_ROOM) return;
     room = current_room(state, world);
     if (!room) return;
+    best = limit;
+    for (index = 0; index < state->items.item_count &&
+                    index < DESK_MAX_WORLD_ITEMS; ++index) {
+        const desk_world_item *entry = &state->items.items[index];
+        float distance;
+        if (entry->room != state->room) continue;
+        distance = point_distance_sq(state->player_x, state->player_y,
+                                     entry->x, entry->y);
+        if (distance > limit) continue;
+        if (state->nearest_world_item < 0 || distance < best) {
+            best = distance;
+            state->nearest_world_item = index;
+        }
+    }
     best = limit;
     for (index = 0; index < room->object_count &&
                     index < DESK_MAX_OBJECTS_PER_ROOM; ++index) {
@@ -357,23 +373,63 @@ static void update_nearest(desk_state *state, const desk_world *world)
     }
 }
 
+typedef enum desk_pick {
+    DESK_PICK_NONE = 0,
+    DESK_PICK_ITEM = 1,
+    DESK_PICK_NPC = 2,
+    DESK_PICK_OBJECT = 3
+} desk_pick;
+
+/* One decision for prompt, accent, and interaction: the nearest of the
+ * three candidate kinds wins, and on exact ties a pickup beats a talk
+ * beats a fixture (the doc's interact priority, radial edition). */
+static desk_pick room_pick(const desk_state *state, const desk_room *room)
+{
+    float item_distance = FLT_MAX;
+    float npc_distance = FLT_MAX;
+    float object_distance = FLT_MAX;
+
+    if (!state || !room) return DESK_PICK_NONE;
+    if (state->nearest_world_item >= 0 &&
+        state->nearest_world_item < state->items.item_count) {
+        const desk_world_item *entry =
+            &state->items.items[state->nearest_world_item];
+
+        item_distance = point_distance_sq(state->player_x, state->player_y,
+                                          entry->x, entry->y);
+    }
+    if (state->nearest_npc >= 0 && state->nearest_npc < room->npc_count) {
+        const desk_npc *npc = &room->npcs[state->nearest_npc];
+
+        if (npc->actor >= (int)DESK_ACTOR_ALLY_1 &&
+            npc->actor <= (int)DESK_ACTOR_ALLY_3)
+            npc_distance = point_distance_sq(state->player_x,
+                                             state->player_y, npc->x,
+                                             npc->y);
+    }
+    if (state->nearest_object >= 0 &&
+        state->nearest_object < room->object_count)
+        object_distance =
+            object_distance_sq(state,
+                               &room->objects[state->nearest_object]);
+    if (item_distance == FLT_MAX && npc_distance == FLT_MAX &&
+        object_distance == FLT_MAX)
+        return DESK_PICK_NONE;
+    if (item_distance <= npc_distance && item_distance <= object_distance)
+        return DESK_PICK_ITEM;
+    if (npc_distance <= object_distance) return DESK_PICK_NPC;
+    return DESK_PICK_OBJECT;
+}
+
 static bool npc_selected(const desk_state *state, const desk_room *room)
 {
-    const desk_npc *npc;
-    if (!state || !room || state->nearest_npc < 0 ||
-        state->nearest_npc >= room->npc_count)
-        return false;
-    npc = &room->npcs[state->nearest_npc];
-    if (npc->actor < (int)DESK_ACTOR_ALLY_1 ||
-        npc->actor > (int)DESK_ACTOR_ALLY_3)
-        return false;
-    if (state->nearest_object < 0 ||
-        state->nearest_object >= room->object_count)
-        return true;
-    return point_distance_sq(state->player_x, state->player_y,
-                             npc->x, npc->y) <=
-           object_distance_sq(state,
-                              &room->objects[state->nearest_object]);
+    return room_pick(state, room) == DESK_PICK_NPC;
+}
+
+static bool world_item_selected(const desk_state *state,
+                                const desk_room *room)
+{
+    return room_pick(state, room) == DESK_PICK_ITEM;
 }
 
 static const conversation *active_conversation(const desk_state *state)
@@ -511,6 +567,7 @@ static void open_wizard_from_profile(desk_state *state)
     state->player_moving = false;
     state->nearest_object = -1;
     state->nearest_npc = -1;
+    state->nearest_world_item = -1;
 }
 
 static bool position_clear(const desk_room *room, float x, float y)
@@ -625,7 +682,58 @@ static void commit_wizard(desk_state *state, const desk_world *world)
     update_nearest(state, world);
 }
 
-void desk_init(desk_state *state, const desk_world *world)
+/* Resolve saved room ids and materialize each unclaimed authored spawn
+ * exactly once: the spawn id joins the claimed table the moment the item
+ * exists, so a save that later moves or consumes the item can never
+ * resurrect it, while a new release's added spawns still appear. */
+static void init_world_items(desk_state *state, const desk_world *world)
+{
+    bool corrupt = false;
+    int index;
+    int r;
+
+    if (!state->catalog || !world) return;
+    if (desk_world_state_load(&state->items, state->catalog, &corrupt) &&
+        corrupt) {
+        set_toast(state, "The house misplaced a few belongings.");
+        state->world_dirty = true;
+    }
+    for (index = 0; index < state->items.item_count; ++index)
+        state->items.items[index].room =
+            desk_world_room_index(world, state->items.items[index].room_id);
+    for (r = 0; r < world->room_count; ++r) {
+        const desk_room *room = &world->rooms[r];
+
+        for (index = 0; index < room->spawn_count; ++index) {
+            const desk_item_spawn *spawn = &room->spawns[index];
+            desk_world_item *entry;
+            int definition;
+
+            if (desk_world_state_is_claimed(&state->items, spawn->id))
+                continue;
+            definition = desk_items_find(state->catalog, spawn->item);
+            if (definition <= 0 ||
+                state->items.item_count >= DESK_MAX_WORLD_ITEMS ||
+                !desk_world_state_claim(&state->items, spawn->id))
+                continue;
+            entry = &state->items.items[state->items.item_count];
+            memset(entry, 0, sizeof *entry);
+            entry->item = desk_item_make((uint16_t)definition,
+                                         (uint16_t)spawn->quantity);
+            entry->x = spawn->x;
+            entry->y = spawn->y;
+            entry->placed = false;
+            entry->room = r;
+            (void)snprintf(entry->room_id, sizeof entry->room_id, "%s",
+                           room->id);
+            state->items.item_count++;
+            state->world_dirty = true;
+        }
+    }
+}
+
+void desk_init(desk_state *state, const desk_world *world,
+               const desk_item_catalog *catalog)
 {
     const desk_room *room = NULL;
     int room_index = -1;
@@ -634,9 +742,12 @@ void desk_init(desk_state *state, const desk_world *world)
     (void)memset(state, 0, sizeof *state);
     state->nearest_object = -1;
     state->nearest_npc = -1;
+    state->nearest_world_item = -1;
     state->conversation_npc = -1;
     state->facing = DESK_FACING_DOWN;
     state->pending_launch = DESK_TARGET_NONE;
+    state->catalog = catalog;
+    desk_world_state_init(&state->items);
     if (world && world->room_count > 0 &&
         world->room_count <= DESK_MAX_ROOMS && world->start_room >= 0 &&
         world->start_room < world->room_count) {
@@ -691,7 +802,133 @@ void desk_init(desk_state *state, const desk_world *world)
         state->wizard_editing_existing = false;
         state->outfit_dirty = true;
     }
+    init_world_items(state, world);
     update_nearest(state, world);
+}
+
+static int room_world_item_count(const desk_world_state *items, int room)
+{
+    int count = 0;
+    int index;
+
+    for (index = 0; index < items->item_count; ++index)
+        if (items->items[index].room == room) count++;
+    return count;
+}
+
+void desk_select_slot(desk_state *state, int slot)
+{
+    if (!state || state->mode != DESK_MODE_ROOM || slot < 0 ||
+        slot >= DESK_INVENTORY_SLOTS)
+        return;
+    if (state->items.inventory.selected == slot) return;
+    state->items.inventory.selected = slot;
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+}
+
+void desk_cycle_slot(desk_state *state, int delta)
+{
+    int next;
+
+    if (!state || state->mode != DESK_MODE_ROOM || delta == 0) return;
+    next = state->items.inventory.selected + (delta < 0 ? -1 : 1);
+    if (next < 0) next = DESK_INVENTORY_SLOTS - 1;
+    if (next >= DESK_INVENTORY_SLOTS) next = 0;
+    state->items.inventory.selected = next;
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+}
+
+bool desk_drop_selected(desk_state *state, const desk_world *world)
+{
+    const desk_room *room;
+    const desk_item_def *def;
+    desk_world_item *entry;
+    desk_item_plan plan;
+    desk_item removed;
+    char message[64];
+    float drop_x;
+    float drop_y;
+    int slot;
+    int index;
+
+    if (!state || !state->catalog || state->mode != DESK_MODE_ROOM)
+        return false;
+    room = current_room(state, world);
+    if (!room) return false;
+    slot = state->items.inventory.selected;
+    if (slot < 0 || slot >= DESK_INVENTORY_SLOTS ||
+        desk_item_is_empty(&state->items.inventory.slots[slot]))
+        return false;
+    def = desk_items_def(state->catalog,
+                         state->items.inventory.slots[slot].definition);
+    if (!def) return false;
+    switch (state->facing) {
+    case DESK_FACING_LEFT:
+        drop_x = state->player_x - 20.0f;
+        drop_y = state->player_y;
+        break;
+    case DESK_FACING_RIGHT:
+        drop_x = state->player_x + 20.0f;
+        drop_y = state->player_y;
+        break;
+    case DESK_FACING_UP:
+        drop_x = state->player_x;
+        drop_y = state->player_y - 14.0f;
+        break;
+    case DESK_FACING_DOWN:
+    default:
+        drop_x = state->player_x;
+        drop_y = state->player_y + 14.0f;
+        break;
+    }
+    if (!position_clear(room, drop_x, drop_y) ||
+        room_world_item_count(&state->items, state->room) >=
+            DESK_MAX_WORLD_ITEMS_PER_ROOM ||
+        state->items.item_count >= DESK_MAX_WORLD_ITEMS) {
+        set_toast(state, "No clear spot to set that down.");
+        return false;
+    }
+    for (index = 0; index < room->door_count; ++index)
+        if (point_in_rect(drop_x, drop_y, &room->doors[index].rect)) {
+            set_toast(state, "Not in the doorway.");
+            return false;
+        }
+    for (index = 0; index < room->object_count; ++index)
+        if (point_in_rect(drop_x, drop_y, &room->objects[index].rect)) {
+            set_toast(state, "That spot is taken.");
+            return false;
+        }
+    for (index = 0; index < room->npc_count; ++index) {
+        float dx = drop_x - room->npcs[index].x;
+        float dy = drop_y - room->npcs[index].y;
+
+        if (dx * dx + dy * dy < DESK_NPC_SPAWN_EXCLUSION *
+                                DESK_NPC_SPAWN_EXCLUSION) {
+            set_toast(state, "Give them a little space.");
+            return false;
+        }
+    }
+    if (!desk_inventory_plan_remove(
+            &state->items.inventory, slot,
+            state->items.inventory.slots[slot].quantity, &plan) ||
+        !desk_inventory_commit_remove(&state->items.inventory, &plan,
+                                      &removed))
+        return false;
+    entry = &state->items.items[state->items.item_count];
+    memset(entry, 0, sizeof *entry);
+    entry->item = removed;
+    entry->x = drop_x;
+    entry->y = drop_y;
+    entry->placed = false;
+    entry->room = state->room;
+    (void)snprintf(entry->room_id, sizeof entry->room_id, "%s", room->id);
+    state->items.item_count++;
+    state->world_dirty = true;
+    (void)snprintf(message, sizeof message, "Set down %s", def->name);
+    set_toast(state, message);
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    update_nearest(state, world);
+    return true;
 }
 
 static void update_wizard_cursors(desk_state *state, int move_x, int move_y)
@@ -826,11 +1063,63 @@ static void open_status_board(desk_state *state, const desk_world *world)
     state->player_moving = false;
 }
 
+/* Order-preserving removal so world-item draw order and save order stay
+ * deterministic across pickups. */
+static void remove_world_item(desk_world_state *items, int index)
+{
+    int i;
+
+    if (!items || index < 0 || index >= items->item_count) return;
+    for (i = index; i < items->item_count - 1; ++i)
+        items->items[i] = items->items[i + 1];
+    items->item_count--;
+    memset(&items->items[items->item_count], 0,
+           sizeof items->items[items->item_count]);
+    items->items[items->item_count].room = -1;
+}
+
+static bool interact_pickup(desk_state *state)
+{
+    desk_world_item *entry;
+    const desk_item_def *def;
+    desk_item_plan plan;
+    char message[64];
+
+    if (!state->catalog || state->nearest_world_item < 0 ||
+        state->nearest_world_item >= state->items.item_count)
+        return false;
+    entry = &state->items.items[state->nearest_world_item];
+    def = desk_items_def(state->catalog, entry->item.definition);
+    if (!def) return false;
+    if (!desk_inventory_plan_add(&state->items.inventory, state->catalog,
+                                 &entry->item, &plan)) {
+        /* A full inventory refuses the pickup and moves nothing. */
+        set_toast(state, "Hands full. Make room first.");
+        return true;
+    }
+    if (!desk_inventory_commit_add(&state->items.inventory, state->catalog,
+                                   &entry->item, &plan))
+        return false;
+    if (entry->item.quantity > 1u)
+        (void)snprintf(message, sizeof message, "Picked up %s x%u",
+                       def->name, (unsigned)entry->item.quantity);
+    else
+        (void)snprintf(message, sizeof message, "Picked up %s", def->name);
+    remove_world_item(&state->items, state->nearest_world_item);
+    state->nearest_world_item = -1;
+    state->world_dirty = true;
+    set_toast(state, message);
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    return true;
+}
+
 static bool interact_room(desk_state *state, const desk_world *world,
                           const desk_room *room)
 {
     const desk_object *object;
     if (!room) return false;
+    if (world_item_selected(state, room))
+        return interact_pickup(state);
     if (npc_selected(state, room)) {
         state->mode = DESK_MODE_DIALOGUE;
         state->conversation_npc = room->npcs[state->nearest_npc].actor;
@@ -1133,6 +1422,7 @@ void desk_cancel(desk_state *state, const desk_world *world)
         state->player_moving = false;
         state->nearest_object = -1;
         state->nearest_npc = -1;
+        state->nearest_world_item = -1;
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         return;
     case DESK_MODE_PAUSE:
@@ -1348,6 +1638,18 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         return validate_fail(error, error_size, "nearest object out of range");
     if (state->nearest_npc < -1 || state->nearest_npc >= room->npc_count)
         return validate_fail(error, error_size, "nearest npc out of range");
+    if (state->items.item_count < 0 ||
+        state->items.item_count > DESK_MAX_WORLD_ITEMS)
+        return validate_fail(error, error_size,
+                             "world item count out of range");
+    if (state->nearest_world_item < -1 ||
+        state->nearest_world_item >= state->items.item_count)
+        return validate_fail(error, error_size,
+                             "nearest world item out of range");
+    if (state->items.inventory.selected < 0 ||
+        state->items.inventory.selected >= DESK_INVENTORY_SLOTS)
+        return validate_fail(error, error_size,
+                             "selected slot out of range");
     if (state->door_cooldown_ticks < 0 ||
         state->door_cooldown_ticks > DESK_DOOR_COOLDOWN_TICKS)
         return validate_fail(error, error_size,
@@ -1449,6 +1751,21 @@ const char *desk_interact_prompt(const desk_state *state,
     if (!state || !world || state->mode != DESK_MODE_ROOM) return NULL;
     room = current_room(state, world);
     if (!room) return NULL;
+    if (world_item_selected(state, room)) {
+        const desk_world_item *entry =
+            &state->items.items[state->nearest_world_item];
+        const desk_item_def *def =
+            desk_items_def(state->catalog, entry->item.definition);
+
+        if (!def) return NULL;
+        if (entry->item.quantity > 1u)
+            (void)snprintf(prompt, sizeof prompt, "Pick up %.30s x%u",
+                           def->name, (unsigned)entry->item.quantity);
+        else
+            (void)snprintf(prompt, sizeof prompt, "Pick up %.36s",
+                           def->name);
+        return prompt;
+    }
     if (npc_selected(state, room)) {
         (void)snprintf(prompt, sizeof prompt, "Talk to %s",
                        desk_actor_name(state->profile.cast,

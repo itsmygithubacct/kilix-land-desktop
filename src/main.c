@@ -29,10 +29,25 @@ typedef struct desk_key_input {
     bool enter_pressed;
     bool space_pressed;
     bool cancel_pressed;
+    /* Hotbar intents; desk.c ignores them outside room mode, so digits
+     * typed into the wizard name field stay plain text. */
+    int select_slot; /* -1 = none; 0..11 from 1..9, 0, -, = */
+    int cycle_slot;  /* sum of [ (-1) and ] (+1) presses */
+    bool drop_pressed;
     int backspace_count;
     int text_count;
     uint32_t text[DESK_TEXT_QUEUE_CAPACITY];
 } desk_key_input;
+
+static int hotbar_slot_for_codepoint(uint32_t codepoint)
+{
+    if (codepoint >= (uint32_t)'1' && codepoint <= (uint32_t)'9')
+        return (int)(codepoint - (uint32_t)'1');
+    if (codepoint == (uint32_t)'0') return 9;
+    if (codepoint == (uint32_t)'-') return 10;
+    if (codepoint == (uint32_t)'=') return 11;
+    return -1;
+}
 
 static kittyts_session terminal_session;
 static uint32_t last_movement_key;
@@ -99,6 +114,7 @@ static bool poll_input(desk_key_input *input, bool *quit_requested)
         return false;
     }
     (void)memset(input, 0, sizeof *input);
+    input->select_slot = -1;
     if (kittyts_read_input(&terminal_session) < 0 && errno != EAGAIN &&
         errno != EWOULDBLOCK && errno != EINTR)
         return false;
@@ -135,6 +151,16 @@ static bool poll_input(desk_key_input *input, bool *quit_requested)
                 (event.shifted_key != 0u ? event.shifted_key : event.key);
             if (codepoint == (uint32_t)' ' && pressed)
                 input->space_pressed = true;
+            if (pressed) {
+                int slot = hotbar_slot_for_codepoint(codepoint);
+
+                if (slot >= 0) input->select_slot = slot;
+                if (codepoint == (uint32_t)'[') input->cycle_slot -= 1;
+                if (codepoint == (uint32_t)']') input->cycle_slot += 1;
+                if (codepoint == (uint32_t)'q' ||
+                    codepoint == (uint32_t)'Q')
+                    input->drop_pressed = true;
+            }
             if (codepoint >= 32u && codepoint <= 126u &&
                 input->text_count < DESK_TEXT_QUEUE_CAPACITY)
                 input->text[input->text_count++] = codepoint;
@@ -170,6 +196,11 @@ static void merge_pending_input(desk_key_input *pending,
                              current->space_pressed;
     pending->cancel_pressed = pending->cancel_pressed ||
                               current->cancel_pressed;
+    if (current->select_slot >= 0)
+        pending->select_slot = current->select_slot;
+    pending->cycle_slot += current->cycle_slot;
+    pending->drop_pressed = pending->drop_pressed ||
+                            current->drop_pressed;
     pending->backspace_count += current->backspace_count;
     for (index = 0; index < current->text_count; ++index) {
         if (pending->text_count >= DESK_TEXT_QUEUE_CAPACITY) break;
@@ -184,6 +215,9 @@ static void consume_edge_input(desk_key_input *input)
     input->enter_pressed = false;
     input->space_pressed = false;
     input->cancel_pressed = false;
+    input->select_slot = -1;
+    input->cycle_slot = 0;
+    input->drop_pressed = false;
     input->backspace_count = 0;
     input->text_count = 0;
 }
@@ -662,7 +696,7 @@ static int selftest_body(void)
         }
     }
 
-    desk_init(&state, &world);
+    desk_init(&state, &world, &catalog);
     if (state.mode != DESK_MODE_WIZARD ||
         state.wizard_step != DESK_WIZARD_CAST ||
         state.wizard_cast_cursor != 0 || state.wizard_name_len != 0 ||
@@ -804,6 +838,75 @@ static int selftest_body(void)
         return EXIT_FAILURE;
     }
 
+    /* Item flow: the authored record spawn materialized into the living
+     * room at first init; pick it up, set it down, retrieve it, exercise
+     * hotbar selection, then prove a fresh init neither respawns the
+     * claimed spawn nor loses the inventory. */
+    {
+        static desk_state fresh;
+        int record = desk_items_find(&catalog, "core:media/record");
+        int before_items = state.items.item_count;
+
+        if (record <= 0 || before_items < 1 ||
+            !desk_world_state_is_claimed(&state.items, "starter-record")) {
+            (void)fprintf(stderr, "FAIL selftest spawn materialization\n");
+            return EXIT_FAILURE;
+        }
+        state.player_x = 272.0f;
+        state.player_y = 224.0f;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (state.nearest_world_item < 0 ||
+            !desk_interact(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)record) != 1 ||
+            state.items.item_count != before_items - 1 ||
+            !state.world_dirty ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest pickup: %s\n", error);
+            return EXIT_FAILURE;
+        }
+        (void)desk_take_audio_events(&state, events);
+        state.facing = DESK_FACING_DOWN;
+        if (!desk_drop_selected(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)record) != 0 ||
+            state.items.item_count != before_items) {
+            (void)fprintf(stderr, "FAIL selftest drop\n");
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (state.nearest_world_item < 0 ||
+            !desk_interact(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)record) != 1 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest re-pickup: %s\n", error);
+            return EXIT_FAILURE;
+        }
+        desk_select_slot(&state, 3);
+        desk_cycle_slot(&state, 1);
+        if (state.items.inventory.selected != 4) {
+            (void)fprintf(stderr, "FAIL selftest slot selection\n");
+            return EXIT_FAILURE;
+        }
+        desk_cycle_slot(&state, -1);
+        desk_select_slot(&state, 0);
+        (void)desk_take_audio_events(&state, events);
+        if (!desk_world_state_save(&state.items, &catalog)) {
+            (void)fprintf(stderr, "FAIL selftest world save\n");
+            return EXIT_FAILURE;
+        }
+        state.world_dirty = false;
+        desk_init(&fresh, &world, &catalog);
+        if (desk_inventory_total(&fresh.items.inventory,
+                                 (uint16_t)record) != 1 ||
+            fresh.items.item_count != before_items - 1 ||
+            !desk_world_state_is_claimed(&fresh.items, "starter-record")) {
+            (void)fprintf(stderr, "FAIL selftest item persistence\n");
+            return EXIT_FAILURE;
+        }
+    }
+
     state.player_x = 120.0f;
     state.player_y = 210.0f;
     desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
@@ -910,7 +1013,8 @@ static int selftest_body(void)
     (void)printf(
         "PASS selftest rooms=%d wizard=cast-actor-name-outfit-confirm "
         "door=bedroom->living launch=games dialogue=reveal-advance-close "
-        "pause=quit-confirm walkbehinds=bad-rejected targets=%d\n",
+        "pause=quit-confirm walkbehinds=bad-rejected "
+        "items=materialize-pickup-drop-persist targets=%d\n",
         world.room_count, DESK_TARGET_COUNT - 1);
     return EXIT_SUCCESS;
 }
@@ -1844,7 +1948,7 @@ static bool fixture_open(render_fixture *fixture, const char *directory)
     if (!realpath(directory, resolved) ||
         setenv("KILIX_LAND_DESKTOP_CONFIG_HOME", resolved, 1) != 0)
         return false;
-    if (!desk_profile_reset()) return false;
+    if (!desk_profile_reset() || !desk_world_state_reset()) return false;
     if (!load_world(&fixture->world, &fixture->catalog, error,
                     sizeof error)) {
         (void)fprintf(stderr, "FAIL render world: %s\n", error);
@@ -1899,7 +2003,7 @@ static int wizard_render_test(const char *directory)
     desk_state state;
     bool success;
     if (!fixture_open(&fixture, directory)) return EXIT_FAILURE;
-    desk_init(&state, &fixture.world);
+    desk_init(&state, &fixture.world, &fixture.catalog);
     success = state.mode == DESK_MODE_WIZARD &&
               state.wizard_cast_cursor == 0 &&
               fixture_snapshot(&fixture, &state, directory, "cast");
@@ -1969,7 +2073,7 @@ static int room_render_test(const char *directory)
     int behind = 0;
     int room;
     if (!fixture_open(&fixture, directory)) return EXIT_FAILURE;
-    desk_init(&state, &fixture.world);
+    desk_init(&state, &fixture.world, &fixture.catalog);
     success = state.mode == DESK_MODE_WIZARD &&
               complete_wizard(&state, &fixture.world) &&
               state.profile.cast == DESK_CAST_LEGEND &&
@@ -2041,7 +2145,7 @@ static int outfit_render_test(const char *directory)
             desk_state state;
             char name[64];
             int written;
-            desk_init(&state, &fixture.world);
+            desk_init(&state, &fixture.world, &fixture.catalog);
             state.mode = DESK_MODE_WIZARD;
             state.wizard_step = DESK_WIZARD_OUTFIT;
             state.wizard_cast_cursor = cast;
@@ -2078,7 +2182,7 @@ static int walk_render_test(const char *directory)
     bool success;
     int frame;
     if (!fixture_open(&fixture, directory)) return EXIT_FAILURE;
-    desk_init(&state, &fixture.world);
+    desk_init(&state, &fixture.world, &fixture.catalog);
     success = state.mode == DESK_MODE_WIZARD &&
               complete_wizard(&state, &fixture.world) &&
               fixture.world.rooms[fixture.world.start_room].door_count > 0;
@@ -2177,7 +2281,7 @@ static int run_interactive(void)
             error);
         return EXIT_FAILURE;
     }
-    desk_init(&state, &world);
+    desk_init(&state, &world, &catalog);
     if (!desk_graphics_init(&graphics, asset_root())) {
         (void)fprintf(stderr,
             "kilix-land-desktop: could not load graphics under %s "
@@ -2270,6 +2374,12 @@ static int run_interactive(void)
             else if (pending_input.enter_pressed ||
                      (!name_entry && pending_input.space_pressed))
                 (void)desk_interact(&state, &world);
+            if (pending_input.select_slot >= 0)
+                desk_select_slot(&state, pending_input.select_slot);
+            if (pending_input.cycle_slot != 0)
+                desk_cycle_slot(&state, pending_input.cycle_slot);
+            if (pending_input.drop_pressed)
+                (void)desk_drop_selected(&state, &world);
             /* The room walks on held keys; menus step on key presses. */
             if (state.mode == DESK_MODE_ROOM)
                 desk_update(&state, &world, pending_input.move_x,
@@ -2293,8 +2403,11 @@ static int run_interactive(void)
             (void)desk_launcher_service(&launcher, &state, &world);
             {
                 /* A persistently failing save (unwritable config dir, full
-                 * disk) must not retry at 60 Hz. */
+                 * disk) must not retry at 60 Hz. The two records retry
+                 * independently so one failing store cannot starve the
+                 * other. */
                 static int save_retry_ticks;
+                static int world_save_retry_ticks;
                 if (save_retry_ticks > 0) {
                     save_retry_ticks--;
                 } else if (state.profile_dirty) {
@@ -2302,6 +2415,14 @@ static int run_interactive(void)
                         state.profile_dirty = false;
                     else
                         save_retry_ticks = 5 * DESK_SIMULATION_HZ;
+                }
+                if (world_save_retry_ticks > 0) {
+                    world_save_retry_ticks--;
+                } else if (state.world_dirty) {
+                    if (desk_world_state_save(&state.items, &catalog))
+                        state.world_dirty = false;
+                    else
+                        world_save_retry_ticks = 5 * DESK_SIMULATION_HZ;
                 }
             }
             desk_audio_update(&audio, DESK_TICK_SECONDS);
@@ -2352,6 +2473,8 @@ done:
         }
         (void)desk_profile_save(&state.profile);
     }
+    if (!failed && state.world_dirty)
+        (void)desk_world_state_save(&state.items, &catalog);
     ki_td_soft_renderer_destroy(&renderer);
     kittyts_stop(&terminal_session);
     kilix_game_signals_restore(&signals);
@@ -2394,7 +2517,7 @@ static int screenshot(const char *path, const char *room_id,
     }
     success = fixture_open(&fixture, config_dir);
     if (success) {
-        desk_init(&state, &fixture.world);
+        desk_init(&state, &fixture.world, &fixture.catalog);
         for (step = 0; step < style; ++step)
             desk_update(&state, &fixture.world, 0, 1, DESK_TICK_SECONDS);
         success = state.mode == DESK_MODE_WIZARD &&
