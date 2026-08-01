@@ -1015,6 +1015,217 @@ static int selftest_body(void)
         (void)desk_take_audio_events(&state, events);
     }
 
+    /* Receiver, drink, and placement: the rest of the vertical slice. */
+    {
+        static desk_state fresh2;
+        const desk_room *living_room = &world.rooms[living];
+        const desk_receiver_state *receiver;
+        desk_item_plan seed_plan;
+        desk_item seed;
+        float ghost_x;
+        float ghost_y;
+        bool ghost_valid;
+        int record = desk_items_find(&catalog, "core:media/record");
+        int coffee = desk_items_find(&catalog, "core:drink/coffee");
+        int plant = desk_items_find(&catalog, "core:decor/houseplant");
+        int stereo_index = -1;
+        int slot_index;
+        int use_slot;
+        int items_before;
+        int tick;
+
+        for (slot_index = 0; slot_index < living_room->object_count;
+             ++slot_index)
+            if (strcmp(living_room->objects[slot_index].id, "stereo") == 0)
+                stereo_index = slot_index;
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)record &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        state.player_x = 322.0f;
+        state.player_y = 200.0f;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        desk_select_slot(&state, use_slot);
+        if (stereo_index < 0 || use_slot < 0 ||
+            state.nearest_object != stereo_index) {
+            (void)fprintf(stderr, "FAIL selftest stereo targeting\n");
+            return EXIT_FAILURE;
+        }
+        if (!desk_use_item(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)record) != 0 ||
+            state.pending_launch != DESK_TARGET_MUSIC ||
+            strcmp(state.pending_launch_object, "stereo") != 0) {
+            (void)fprintf(stderr, "FAIL selftest record insert\n");
+            return EXIT_FAILURE;
+        }
+        receiver = desk_receiver_lookup(
+            &state, living_room, &living_room->objects[stereo_index]);
+        if (!receiver ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_READY ||
+            receiver->item.definition != (uint16_t)record ||
+            desk_take_launch_request(&state) != DESK_TARGET_MUSIC ||
+            !state.world_dirty ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest receiver ready: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        if (!desk_interact(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)record) != 1 ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_EMPTY) {
+            (void)fprintf(stderr, "FAIL selftest record eject\n");
+            return EXIT_FAILURE;
+        }
+        (void)desk_take_audio_events(&state, events);
+
+        seed = desk_item_make((uint16_t)coffee, 2u);
+        if (coffee <= 0 ||
+            !desk_inventory_plan_add(&state.items.inventory, &catalog,
+                                     &seed, &seed_plan) ||
+            !desk_inventory_commit_add(&state.items.inventory, &catalog,
+                                       &seed, &seed_plan)) {
+            (void)fprintf(stderr, "FAIL selftest coffee inject\n");
+            return EXIT_FAILURE;
+        }
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)coffee &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        desk_select_slot(&state, use_slot);
+        if (!desk_use_item(&state, &world) || !state.action.active ||
+            state.player_animator.clip != DESK_CLIP_DRINK ||
+            !state.player_animator.movement_locked) {
+            (void)fprintf(stderr, "FAIL selftest drink start\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 80 && !state.action.committed; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (!state.action.committed ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)coffee) != 1 ||
+            state.items.effect_count != 1 ||
+            state.items.effects[0].definition != (uint16_t)coffee) {
+            (void)fprintf(stderr, "FAIL selftest drink swallow\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 80 && state.action.active; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        /* Cancel before the swallow consumes nothing. */
+        if (!desk_use_item(&state, &world)) {
+            (void)fprintf(stderr, "FAIL selftest drink restart\n");
+            return EXIT_FAILURE;
+        }
+        desk_cancel(&state, &world);
+        if (state.action.active ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)coffee) != 1 ||
+            state.items.effect_count != 1 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest drink cancel: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        (void)desk_take_audio_events(&state, events);
+
+        seed = desk_item_make((uint16_t)plant, 2u);
+        if (plant <= 0 ||
+            !desk_inventory_plan_add(&state.items.inventory, &catalog,
+                                     &seed, &seed_plan) ||
+            !desk_inventory_commit_add(&state.items.inventory, &catalog,
+                                       &seed, &seed_plan)) {
+            (void)fprintf(stderr, "FAIL selftest plant inject\n");
+            return EXIT_FAILURE;
+        }
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)plant &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        state.player_x = 272.0f;
+        state.player_y = 210.0f;
+        state.facing = DESK_FACING_DOWN;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        desk_select_slot(&state, use_slot);
+        items_before = state.items.item_count;
+        if (!desk_placement_preview(&state, &world, &ghost_x, &ghost_y,
+                                    &ghost_valid) ||
+            !ghost_valid) {
+            (void)fprintf(stderr, "FAIL selftest placement preview\n");
+            return EXIT_FAILURE;
+        }
+        if (!desk_use_item(&state, &world) ||
+            state.items.item_count != items_before + 1 ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)plant) != 1 ||
+            !state.items.items[items_before].placed ||
+            state.items.items[items_before].x != ghost_x ||
+            state.items.items[items_before].y != ghost_y) {
+            (void)fprintf(stderr, "FAIL selftest placement commit\n");
+            return EXIT_FAILURE;
+        }
+        /* A blocked spot never decrements the stack. */
+        state.player_x = 322.0f;
+        state.player_y = 205.0f;
+        state.facing = DESK_FACING_UP;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (!desk_placement_preview(&state, &world, &ghost_x, &ghost_y,
+                                    &ghost_valid) ||
+            ghost_valid ||
+            !desk_use_item(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)plant) != 1 ||
+            state.items.item_count != items_before + 1) {
+            (void)fprintf(stderr, "FAIL selftest blocked placement\n");
+            return EXIT_FAILURE;
+        }
+        (void)desk_take_audio_events(&state, events);
+
+        /* Reinsert the record, save, and a fresh init must restore the
+         * receiver still holding it. */
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)record &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        state.player_x = 322.0f;
+        state.player_y = 200.0f;
+        state.facing = DESK_FACING_UP;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        desk_select_slot(&state, use_slot);
+        if (!desk_use_item(&state, &world) ||
+            desk_take_launch_request(&state) != DESK_TARGET_MUSIC ||
+            !desk_world_state_save(&state.items, &catalog)) {
+            (void)fprintf(stderr, "FAIL selftest receiver save\n");
+            return EXIT_FAILURE;
+        }
+        state.world_dirty = false;
+        desk_init(&fresh2, &world, &catalog);
+        receiver = desk_receiver_lookup(
+            &fresh2, living_room, &living_room->objects[stereo_index]);
+        if (!receiver ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_READY ||
+            receiver->item.definition != (uint16_t)record ||
+            desk_inventory_total(&fresh2.items.inventory,
+                                 (uint16_t)record) != 0 ||
+            fresh2.items.effect_count != 1) {
+            (void)fprintf(stderr, "FAIL selftest receiver persistence\n");
+            return EXIT_FAILURE;
+        }
+        (void)desk_take_audio_events(&state, events);
+    }
+
     state.player_x = 120.0f;
     state.player_y = 210.0f;
     desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
@@ -1123,7 +1334,8 @@ static int selftest_body(void)
         "door=bedroom->living launch=games dialogue=reveal-advance-close "
         "pause=quit-confirm walkbehinds=bad-rejected "
         "items=materialize-pickup-drop-persist tool=impact-timed "
-        "targets=%d\n",
+        "receiver=insert-eject-persist drink=swallow-frame "
+        "place=ghost-committed targets=%d\n",
         world.room_count, DESK_TARGET_COUNT - 1);
     return EXIT_SUCCESS;
 }

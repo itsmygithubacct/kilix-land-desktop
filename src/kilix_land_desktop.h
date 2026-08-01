@@ -439,6 +439,15 @@ void desk_cancel(desk_state *state, const desk_world *world);
 void desk_select_slot(desk_state *state, int slot);
 void desk_cycle_slot(desk_state *state, int delta);
 bool desk_drop_selected(desk_state *state, const desk_world *world);
+/* Render-side reads: the receiver state a fixture currently owns (NULL
+ * when none) and the placement ghost for the selected placeable item.
+ * Both are pure queries. */
+const desk_receiver_state *desk_receiver_lookup(const desk_state *state,
+                                                const desk_room *room,
+                                                const desk_object *object);
+bool desk_placement_preview(const desk_state *state,
+                            const desk_world *world, float *x, float *y,
+                            bool *valid);
 bool desk_text_input(desk_state *state, uint32_t codepoint);
 bool desk_text_backspace(desk_state *state);
 desk_target desk_take_launch_request(desk_state *state);

@@ -612,6 +612,84 @@ static void draw_world_entities(ki_td_soft_renderer *renderer,
     }
 }
 
+/* Render-only placement preview: the exact spot desk_use_item would
+ * commit, green when the plan is valid and red when blocked. Nothing
+ * here mutates state. */
+static void draw_placement_ghost(ki_td_soft_renderer *renderer,
+                                 const ki_td_view *view,
+                                 const desk_state *state,
+                                 const desk_world *world,
+                                 const desk_graphics *graphics)
+{
+    const desk_item *held;
+    const desk_item_def *def;
+    ki_td_rgba8 cell;
+    desk_sprite_metrics metrics;
+    float ghost_x;
+    float ghost_y;
+    bool valid;
+
+    if (!desk_placement_preview(state, world, &ghost_x, &ghost_y, &valid))
+        return;
+    held = &state->items.inventory.slots[state->items.inventory.selected];
+    def = desk_items_def(state->catalog, held->definition);
+    if (!def) return;
+    ki_td_soft_fill_ellipse(renderer, view, ghost_x, ghost_y, 10.0f,
+                            10.0f * 0.29f,
+                            valid ? UINT32_C(0x3c9a5e) :
+                                    UINT32_C(0xc93a52), 0.45f);
+    if (desk_graphics_item_cell(graphics, visible_cast(state),
+                                (int)def->sprite, &cell) &&
+        desk_graphics_item_cell_metrics(graphics, visible_cast(state),
+                                        (int)def->sprite, &metrics))
+        draw_foot_anchored(renderer, view, &cell, &metrics, ghost_x,
+                           ghost_y, ITEM_WORLD_RENDER_SIZE,
+                           ITEM_WORLD_RENDER_SIZE, 0.55f, NULL);
+}
+
+/* A small bubble over any fixture whose receiver holds an item: the
+ * owned item's icon with a gold bar, dimmed while still processing. */
+static void draw_receiver_markers(ki_td_soft_renderer *renderer,
+                                  const ki_td_view *view,
+                                  const desk_state *state,
+                                  const desk_graphics *graphics,
+                                  const desk_room *room)
+{
+    int index;
+
+    for (index = 0; index < clamp_int(room->object_count, 0,
+                                      DESK_MAX_OBJECTS_PER_ROOM);
+         ++index) {
+        const desk_object *object = &room->objects[index];
+        const desk_receiver_state *receiver;
+        const desk_item_def *def;
+        ki_td_rgba8 cell;
+        float marker_x;
+        float marker_y;
+
+        if (object->receiver[0] == '\0') continue;
+        receiver = desk_receiver_lookup(state, room, object);
+        if (!receiver || receiver->phase == (uint8_t)DESK_RECEIVER_EMPTY)
+            continue;
+        def = desk_items_def(state->catalog, receiver->item.definition);
+        marker_x = object->rect.x + object->rect.w - 10.0f;
+        marker_y = object->rect.y - 14.0f;
+        ki_td_soft_fill_rect(renderer, view, marker_x - 2.0f,
+                             marker_y - 2.0f, 16.0f, 16.0f,
+                             UINT32_C(0x070b13), 0.85f);
+        ki_td_soft_fill_rect(renderer, view, marker_x - 2.0f,
+                             marker_y - 2.0f, 16.0f, 2.0f, COLOR_GOLD,
+                             receiver->phase ==
+                                     (uint8_t)DESK_RECEIVER_READY ?
+                                 1.0f : 0.45f);
+        if (def &&
+            desk_graphics_item_cell(graphics, visible_cast(state),
+                                    (int)def->sprite, &cell))
+            ki_td_soft_rgba_resized(renderer, view, marker_x, marker_y,
+                                    &cell, 12, 12, 1.0f);
+    }
+}
+
 static void draw_npc_tags(ki_td_soft_renderer *renderer,
                           const ki_td_view *view, sr_canvas *canvas,
                           const desk_state *state, const desk_room *room)
@@ -825,6 +903,36 @@ static void draw_hotbar(ki_td_soft_renderer *renderer,
                 small_text(canvas, view, x + 9.0f, HOTBAR_TOP + 14.0f,
                            count, COLOR_INK);
             }
+        }
+    }
+    if (state->items.effect_count > 0) {
+        /* Active-effect chip: the causing item plus a draining bar. */
+        const desk_active_effect *effect = &state->items.effects[0];
+        const desk_item_def *def =
+            desk_items_def(state->catalog, effect->definition);
+        float chip_x = left +
+            (float)(DESK_INVENTORY_SLOTS * HOTBAR_SLOT_SIZE) + 4.0f;
+        ki_td_rgba8 cell;
+
+        ki_td_soft_fill_rect(renderer, view, chip_x - 2.0f,
+                             HOTBAR_TOP - 2.0f, 20.0f,
+                             (float)HOTBAR_SLOT_SIZE + 4.0f,
+                             UINT32_C(0x070b13), 0.78f);
+        if (def &&
+            desk_graphics_item_cell(graphics, visible_cast(state),
+                                    (int)def->sprite, &cell))
+            ki_td_soft_rgba_resized(renderer, view, chip_x,
+                                    HOTBAR_TOP + 2.0f, &cell, 14, 14,
+                                    1.0f);
+        if (def && def->parameter_a > 0) {
+            float fraction = (float)effect->remaining_ticks /
+                             (float)def->parameter_a;
+
+            if (fraction < 0.0f) fraction = 0.0f;
+            if (fraction > 1.0f) fraction = 1.0f;
+            ki_td_soft_fill_rect(renderer, view, chip_x,
+                                 HOTBAR_TOP + 19.0f, 14.0f * fraction,
+                                 2.0f, accent, 1.0f);
         }
     }
 }
@@ -1480,6 +1588,8 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
                             room, state->room);
             draw_world_entities(renderer, &view, state, graphics, room,
                                 state->room);
+            draw_receiver_markers(renderer, &view, state, graphics, room);
+            draw_placement_ghost(renderer, &view, state, world, graphics);
             draw_npc_tags(renderer, &view, canvas, state, room);
         }
     }

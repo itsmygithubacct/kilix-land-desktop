@@ -816,6 +816,128 @@ static int room_world_item_count(const desk_world_state *items, int room)
     return count;
 }
 
+static void front_of_player(const desk_state *state, float *x, float *y)
+{
+    switch (state->facing) {
+    case DESK_FACING_LEFT:
+        *x = state->player_x - 20.0f;
+        *y = state->player_y;
+        return;
+    case DESK_FACING_RIGHT:
+        *x = state->player_x + 20.0f;
+        *y = state->player_y;
+        return;
+    case DESK_FACING_UP:
+        *x = state->player_x;
+        *y = state->player_y - 14.0f;
+        return;
+    case DESK_FACING_DOWN:
+    default:
+        *x = state->player_x;
+        *y = state->player_y + 14.0f;
+        return;
+    }
+}
+
+/* Shared by drop, placement, and the placement ghost: one rulebook for
+ * where an item may stand. Returns false with a player-facing reason. */
+static bool placement_spot_clear(const desk_state *state,
+                                 const desk_room *room, float x, float y,
+                                 const char **reason)
+{
+    const char *why = NULL;
+    int index;
+
+    if (!position_clear(room, x, y))
+        why = "No clear spot to set that down.";
+    if (!why &&
+        (room_world_item_count(&state->items, state->room) >=
+             DESK_MAX_WORLD_ITEMS_PER_ROOM ||
+         state->items.item_count >= DESK_MAX_WORLD_ITEMS))
+        why = "This room holds enough already.";
+    for (index = 0; !why && index < room->door_count; ++index)
+        if (point_in_rect(x, y, &room->doors[index].rect))
+            why = "Not in the doorway.";
+    for (index = 0; !why && index < room->object_count; ++index)
+        if (point_in_rect(x, y, &room->objects[index].rect))
+            why = "That spot is taken.";
+    for (index = 0; !why && index < room->npc_count; ++index) {
+        float dx = x - room->npcs[index].x;
+        float dy = y - room->npcs[index].y;
+
+        if (dx * dx + dy * dy < DESK_NPC_SPAWN_EXCLUSION *
+                                DESK_NPC_SPAWN_EXCLUSION)
+            why = "Give them a little space.";
+    }
+    if (reason) *reason = why;
+    return why == NULL;
+}
+
+/* Creates a world item at a validated spot from an already-removed
+ * instance. The caller owns ordering (validate, then remove, then
+ * settle). */
+static void settle_world_item(desk_state *state, const desk_room *room,
+                              const desk_item *item, float x, float y,
+                              bool placed)
+{
+    desk_world_item *entry =
+        &state->items.items[state->items.item_count];
+
+    memset(entry, 0, sizeof *entry);
+    entry->item = *item;
+    entry->x = x;
+    entry->y = y;
+    entry->placed = placed;
+    entry->room = state->room;
+    (void)snprintf(entry->room_id, sizeof entry->room_id, "%s", room->id);
+    state->items.item_count++;
+    state->world_dirty = true;
+}
+
+static desk_receiver_state *receiver_state_for(desk_state *state,
+                                               const desk_room *room,
+                                               const desk_object *object,
+                                               bool create)
+{
+    desk_receiver_state *entry;
+    int index;
+
+    for (index = 0; index < state->items.receiver_count; ++index) {
+        entry = &state->items.receivers[index];
+        if (strcmp(entry->room_id, room->id) == 0 &&
+            strcmp(entry->object_id, object->id) == 0)
+            return entry;
+    }
+    if (!create ||
+        state->items.receiver_count >= DESK_MAX_RECEIVER_STATES)
+        return NULL;
+    entry = &state->items.receivers[state->items.receiver_count];
+    memset(entry, 0, sizeof *entry);
+    (void)snprintf(entry->room_id, sizeof entry->room_id, "%s", room->id);
+    (void)snprintf(entry->object_id, sizeof entry->object_id, "%s",
+                   object->id);
+    entry->phase = (uint8_t)DESK_RECEIVER_EMPTY;
+    state->items.receiver_count++;
+    return entry;
+}
+
+const desk_receiver_state *desk_receiver_lookup(const desk_state *state,
+                                                const desk_room *room,
+                                                const desk_object *object)
+{
+    int index;
+
+    if (!state || !room || !object) return NULL;
+    for (index = 0; index < state->items.receiver_count; ++index) {
+        const desk_receiver_state *entry = &state->items.receivers[index];
+
+        if (strcmp(entry->room_id, room->id) == 0 &&
+            strcmp(entry->object_id, object->id) == 0)
+            return entry;
+    }
+    return NULL;
+}
+
 void desk_select_slot(desk_state *state, int slot)
 {
     if (!state || state->mode != DESK_MODE_ROOM || slot < 0 ||
@@ -842,14 +964,13 @@ bool desk_drop_selected(desk_state *state, const desk_world *world)
 {
     const desk_room *room;
     const desk_item_def *def;
-    desk_world_item *entry;
+    const char *reason;
     desk_item_plan plan;
     desk_item removed;
     char message[64];
     float drop_x;
     float drop_y;
     int slot;
-    int index;
 
     if (!state || !state->catalog || state->mode != DESK_MODE_ROOM ||
         state->action.active)
@@ -863,51 +984,10 @@ bool desk_drop_selected(desk_state *state, const desk_world *world)
     def = desk_items_def(state->catalog,
                          state->items.inventory.slots[slot].definition);
     if (!def) return false;
-    switch (state->facing) {
-    case DESK_FACING_LEFT:
-        drop_x = state->player_x - 20.0f;
-        drop_y = state->player_y;
-        break;
-    case DESK_FACING_RIGHT:
-        drop_x = state->player_x + 20.0f;
-        drop_y = state->player_y;
-        break;
-    case DESK_FACING_UP:
-        drop_x = state->player_x;
-        drop_y = state->player_y - 14.0f;
-        break;
-    case DESK_FACING_DOWN:
-    default:
-        drop_x = state->player_x;
-        drop_y = state->player_y + 14.0f;
-        break;
-    }
-    if (!position_clear(room, drop_x, drop_y) ||
-        room_world_item_count(&state->items, state->room) >=
-            DESK_MAX_WORLD_ITEMS_PER_ROOM ||
-        state->items.item_count >= DESK_MAX_WORLD_ITEMS) {
-        set_toast(state, "No clear spot to set that down.");
+    front_of_player(state, &drop_x, &drop_y);
+    if (!placement_spot_clear(state, room, drop_x, drop_y, &reason)) {
+        set_toast(state, reason);
         return false;
-    }
-    for (index = 0; index < room->door_count; ++index)
-        if (point_in_rect(drop_x, drop_y, &room->doors[index].rect)) {
-            set_toast(state, "Not in the doorway.");
-            return false;
-        }
-    for (index = 0; index < room->object_count; ++index)
-        if (point_in_rect(drop_x, drop_y, &room->objects[index].rect)) {
-            set_toast(state, "That spot is taken.");
-            return false;
-        }
-    for (index = 0; index < room->npc_count; ++index) {
-        float dx = drop_x - room->npcs[index].x;
-        float dy = drop_y - room->npcs[index].y;
-
-        if (dx * dx + dy * dy < DESK_NPC_SPAWN_EXCLUSION *
-                                DESK_NPC_SPAWN_EXCLUSION) {
-            set_toast(state, "Give them a little space.");
-            return false;
-        }
     }
     if (!desk_inventory_plan_remove(
             &state->items.inventory, slot,
@@ -915,17 +995,8 @@ bool desk_drop_selected(desk_state *state, const desk_world *world)
         !desk_inventory_commit_remove(&state->items.inventory, &plan,
                                       &removed))
         return false;
-    entry = &state->items.items[state->items.item_count];
-    memset(entry, 0, sizeof *entry);
-    entry->item = removed;
-    entry->x = drop_x;
-    entry->y = drop_y;
-    entry->placed = false;
-    entry->room = state->room;
-    (void)snprintf(entry->room_id, sizeof entry->room_id, "%s", room->id);
-    state->items.item_count++;
-    state->world_dirty = true;
-    (void)snprintf(message, sizeof message, "Set down %s", def->name);
+    settle_world_item(state, room, &removed, drop_x, drop_y, false);
+    (void)snprintf(message, sizeof message, "Set down %.30s", def->name);
     set_toast(state, message);
     queue_audio(state, DESK_AUDIO_UI_CONFIRM);
     update_nearest(state, world);
@@ -1040,7 +1111,44 @@ static void action_apply(desk_state *state, const desk_world *world)
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return;
     }
-    case DESK_ACTION_DRINK:
+    case DESK_ACTION_DRINK: {
+        desk_item_plan split_plan;
+        desk_item one;
+        uint16_t definition = held->definition;
+
+        if (def->behavior != (uint16_t)DESK_BEHAVIOR_DRINK) return;
+        /* Removal and effect are one commit: the swallow frame either
+         * does both or neither. */
+        if (!desk_item_plan_split_one(&state->items.inventory,
+                                      plan->inventory_slot, &split_plan) ||
+            !desk_item_commit_split_one(&state->items.inventory,
+                                        &split_plan, &one))
+            return;
+        if (def->parameter_a > 0) {
+            int index;
+            int found = -1;
+
+            for (index = 0; index < state->items.effect_count; ++index)
+                if (state->items.effects[index].definition == definition)
+                    found = index;
+            if (found >= 0) {
+                state->items.effects[found].remaining_ticks =
+                    def->parameter_a;
+            } else if (state->items.effect_count <
+                       DESK_MAX_ACTIVE_EFFECTS) {
+                state->items.effects[state->items.effect_count]
+                    .definition = definition;
+                state->items.effects[state->items.effect_count]
+                    .remaining_ticks = def->parameter_a;
+                state->items.effect_count++;
+            }
+        }
+        state->world_dirty = true;
+        action->committed = true;
+        set_toast(state, "Warm. Focused. Ready.");
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return;
+    }
     case DESK_ACTION_GIVE:
     case DESK_ACTION_NONE:
     default:
@@ -1146,6 +1254,49 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
     if (state->toast_ticks > 0) state->toast_ticks--;
     if (state->door_cooldown_ticks > 0) state->door_cooldown_ticks--;
     if (state->mode == DESK_MODE_DIALOGUE) state->dialogue_age++;
+    if (state->mode == DESK_MODE_ROOM) {
+        bool processing = false;
+        int index = 0;
+
+        /* Effects and receiver timers count fixed simulation ticks and
+         * pause with the process; there is deliberately no wall-clock
+         * or offline progression. */
+        while (index < state->items.effect_count) {
+            state->items.effects[index].remaining_ticks--;
+            if (state->items.effects[index].remaining_ticks <= 0) {
+                int shift;
+
+                for (shift = index;
+                     shift < state->items.effect_count - 1; ++shift)
+                    state->items.effects[shift] =
+                        state->items.effects[shift + 1];
+                state->items.effect_count--;
+                set_toast(state, "The focus fades.");
+                state->world_dirty = true;
+            } else {
+                ++index;
+            }
+        }
+        for (index = 0; index < state->items.receiver_count; ++index) {
+            desk_receiver_state *receiver =
+                &state->items.receivers[index];
+
+            if (receiver->phase != (uint8_t)DESK_RECEIVER_PROCESSING)
+                continue;
+            receiver->remaining_ticks--;
+            if (receiver->remaining_ticks <= 0) {
+                receiver->remaining_ticks = 0;
+                receiver->phase = (uint8_t)DESK_RECEIVER_READY;
+                state->world_dirty = true;
+            } else {
+                processing = true;
+            }
+        }
+        /* Modest timer checkpoint: a crash replays at most a minute. */
+        if ((state->simulation_tick % 3600u) == 0u &&
+            (state->items.effect_count > 0 || processing))
+            state->world_dirty = true;
+    }
     if (state->mode == DESK_MODE_ROOM || state->mode == DESK_MODE_DIALOGUE ||
         state->mode == DESK_MODE_WIZARD)
         advance_player_animator(state, world);
@@ -1173,6 +1324,66 @@ bool desk_use_item(desk_state *state, const desk_world *world)
     if (held->definition == DESK_ITEM_DEF_MISSING) {
         set_toast(state, "Whatever this was, it stays a mystery.");
         return true;
+    }
+    /* Offer to a fixture receiver before any behavior: the fixture's
+     * data-defined rule decides, and an instant accept both moves the
+     * item and queues the fixture's own compiled target once. */
+    if (state->nearest_object >= 0 &&
+        state->nearest_object < room->object_count) {
+        const desk_object *object = &room->objects[state->nearest_object];
+        int rule_index = object->receiver[0] != '\0' ?
+            desk_items_find_receiver(state->catalog, object->receiver) :
+            -1;
+
+        if (rule_index >= 0) {
+            const desk_receiver_rule *rule =
+                &state->catalog->receivers[rule_index];
+
+            if (desk_receiver_accepts(state->catalog, rule, held)) {
+                desk_receiver_state *receiver =
+                    receiver_state_for(state, room, object, true);
+                desk_item_plan plan;
+                desk_item one;
+
+                if (!receiver) return false;
+                if (receiver->phase != (uint8_t)DESK_RECEIVER_EMPTY) {
+                    set_toast(state, "It's already holding something.");
+                    return true;
+                }
+                if (!desk_item_plan_split_one(
+                        &state->items.inventory,
+                        state->items.inventory.selected, &plan) ||
+                    !desk_item_commit_split_one(&state->items.inventory,
+                                                &plan, &one))
+                    return false;
+                if (rule->consume) {
+                    /* Consumed input is destroyed once, here. */
+                    desk_item_clear(&receiver->item);
+                } else {
+                    receiver->item = one;
+                }
+                if (rule->processing_ticks > 0) {
+                    receiver->phase = (uint8_t)DESK_RECEIVER_PROCESSING;
+                    receiver->remaining_ticks = rule->processing_ticks;
+                } else {
+                    receiver->phase = rule->consume ?
+                        (uint8_t)DESK_RECEIVER_EMPTY :
+                        (uint8_t)DESK_RECEIVER_READY;
+                    receiver->remaining_ticks = 0;
+                    if (rule->result ==
+                        DESK_RECEIVER_RESULT_ACTIVATE_FIXTURE) {
+                        state->pending_launch = object->target;
+                        (void)snprintf(state->pending_launch_object,
+                                       sizeof state->pending_launch_object,
+                                       "%s", object->id);
+                    }
+                }
+                state->world_dirty = true;
+                set_toast(state, "In it goes.");
+                queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+                return true;
+            }
+        }
     }
     switch ((desk_item_behavior)def->behavior) {
     case DESK_BEHAVIOR_USE_TOOL: {
@@ -1215,15 +1426,86 @@ bool desk_use_item(desk_state *state, const desk_world *world)
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         return true;
     }
-    case DESK_BEHAVIOR_HOLD:
     case DESK_BEHAVIOR_DRINK:
+        state->action_nonce++;
+        memset(&state->action, 0, sizeof state->action);
+        state->action.active = true;
+        state->action.plan.nonce = state->action_nonce;
+        state->action.plan.kind = (uint16_t)DESK_ACTION_DRINK;
+        state->action.plan.room = (uint16_t)state->room;
+        state->action.plan.inventory_slot =
+            (uint16_t)state->items.inventory.selected;
+        state->action.plan.inventory_generation =
+            state->items.inventory
+                .generation[state->items.inventory.selected];
+        state->action.plan.object_index = (uint16_t)UINT16_MAX;
+        state->action.plan.npc_index = (uint16_t)UINT16_MAX;
+        state->player_animator.clip = DESK_CLIP_DRINK;
+        state->player_animator.frame = 0;
+        state->player_animator.frame_ticks = 0;
+        state->player_animator.movement_locked = true;
+        state->player_moving = false;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    case DESK_BEHAVIOR_PLACE: {
+        const char *reason;
+        desk_item_plan plan;
+        desk_item one;
+        float place_x;
+        float place_y;
+
+        /* Placement is an instant plan/commit: the render-only ghost
+         * previews this exact spot, and a failed placement never
+         * consumes anything. */
+        front_of_player(state, &place_x, &place_y);
+        if (!placement_spot_clear(state, room, place_x, place_y,
+                                  &reason)) {
+            set_toast(state, reason);
+            return true;
+        }
+        if (!desk_item_plan_split_one(&state->items.inventory,
+                                      state->items.inventory.selected,
+                                      &plan) ||
+            !desk_item_commit_split_one(&state->items.inventory, &plan,
+                                        &one))
+            return false;
+        settle_world_item(state, room, &one, place_x, place_y, true);
+        set_toast(state, "There. Perfect spot.");
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        update_nearest(state, world);
+        return true;
+    }
+    case DESK_BEHAVIOR_HOLD:
     case DESK_BEHAVIOR_EQUIP:
-    case DESK_BEHAVIOR_PLACE:
     case DESK_BEHAVIOR_UNLOCK:
     default:
         set_toast(state, "Not the moment for that.");
         return true;
     }
+}
+
+bool desk_placement_preview(const desk_state *state,
+                            const desk_world *world, float *x, float *y,
+                            bool *valid)
+{
+    const desk_room *room;
+    const desk_item *held;
+    const desk_item_def *def;
+
+    if (!state || !world || !x || !y || !valid) return false;
+    if (state->mode != DESK_MODE_ROOM || state->action.active ||
+        !state->catalog)
+        return false;
+    room = current_room(state, world);
+    if (!room) return false;
+    held = &state->items.inventory.slots[state->items.inventory.selected];
+    if (desk_item_is_empty(held)) return false;
+    def = desk_items_def(state->catalog, held->definition);
+    if (!def || def->behavior != (uint16_t)DESK_BEHAVIOR_PLACE)
+        return false;
+    front_of_player(state, x, y);
+    *valid = placement_spot_clear(state, room, *x, *y, NULL);
+    return true;
 }
 
 /* One trimmed line from a /proc-style fact file; no subprocesses. */
@@ -1324,6 +1606,44 @@ static bool interact_pickup(desk_state *state)
     return true;
 }
 
+/* Collect a READY fixture receiver back into the inventory; a full
+ * inventory refuses without touching the receiver's contents. */
+static bool interact_collect(desk_state *state, const desk_room *room,
+                             const desk_object *object)
+{
+    desk_receiver_state *receiver =
+        receiver_state_for(state, room, object, false);
+    const desk_item_def *def;
+    desk_item_plan plan;
+    char message[64];
+
+    if (!receiver) return false;
+    if (receiver->phase == (uint8_t)DESK_RECEIVER_PROCESSING) {
+        set_toast(state, "Still working on it.");
+        return true;
+    }
+    if (receiver->phase != (uint8_t)DESK_RECEIVER_READY) return false;
+    def = desk_items_def(state->catalog, receiver->item.definition);
+    if (!def) return false;
+    if (!desk_inventory_plan_add(&state->items.inventory, state->catalog,
+                                 &receiver->item, &plan)) {
+        set_toast(state, "Hands full. Make room first.");
+        return true;
+    }
+    if (!desk_inventory_commit_add(&state->items.inventory,
+                                   state->catalog, &receiver->item, &plan))
+        return false;
+    desk_item_clear(&receiver->item);
+    receiver->phase = (uint8_t)DESK_RECEIVER_EMPTY;
+    receiver->remaining_ticks = 0;
+    state->world_dirty = true;
+    (void)snprintf(message, sizeof message, "Took back the %.28s",
+                   def->name);
+    set_toast(state, message);
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    return true;
+}
+
 static bool interact_room(desk_state *state, const desk_world *world,
                           const desk_room *room)
 {
@@ -1348,6 +1668,10 @@ static bool interact_room(desk_state *state, const desk_world *world,
         state->nearest_object >= room->object_count)
         return false;
     object = &room->objects[state->nearest_object];
+    /* A ready receiver collects before the fixture activates. */
+    if (object->receiver[0] != '\0' &&
+        interact_collect(state, room, object))
+        return true;
     switch (object->target) {
     case DESK_TARGET_WARDROBE:
         open_wizard_from_profile(state);
