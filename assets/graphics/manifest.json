@@ -141,6 +141,20 @@
         "cell_width": 32,
         "cell_height": 32
       }
+    },
+    {
+      "id": "desktop-item-actions",
+      "path": "assets/graphics/items/desktop-item-actions.png",
+      "sha256": "66e57ed5d9d054f16bb3189e105ca4add3465ad29db0858b794b46f1c48c2ed9",
+      "alpha_required": true,
+      "grid": {
+        "columns": 4,
+        "rows": 12,
+        "width": 128,
+        "height": 384,
+        "cell_width": 32,
+        "cell_height": 32
+      }
     }
   ],
   "bitmaps": []

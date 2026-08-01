@@ -62,6 +62,9 @@ parity-check:
 items-art:
 	$(PYTHON) tools/sync_item_art.py
 
+actions-art:
+	$(PYTHON) tools/sync_action_art.py
+
 audio-plan:
 	$(PYTHON) tools/validate_audio.py --plan
 
@@ -111,7 +114,7 @@ sanitize:
 clean:
 	$(RM) -r build $(BIN)
 
-.PHONY: all audio audio-plan audio-record audio-requests clean items-art \
-	parity-check parity-sync test test-deps sanitize
+.PHONY: all actions-art audio audio-plan audio-record audio-requests clean \
+	items-art parity-check parity-sync test test-deps sanitize
 
 -include $(DEPENDENCIES)

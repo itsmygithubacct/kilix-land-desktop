@@ -290,6 +290,42 @@ def check_art(items_path, definitions):
                 fail(f"provenance covers no cell for sprite column "
                      f"{item['sprite']} row {row} ('{item['id']}')")
 
+    actions_path = os.path.join(root, "assets", "graphics", "items",
+                                "desktop-item-actions.png")
+    actions_provenance = os.path.join(root, "assets", "graphics", "items",
+                                      "PROVENANCE-ACTIONS.json")
+    for required in (actions_path, actions_provenance):
+        if not os.path.exists(required):
+            fail(f"missing {os.path.relpath(required, root)} "
+                 "(run `make actions-art`)")
+    with Image.open(actions_path) as image:
+        if image.size != (128, 384):
+            fail(f"desktop-item-actions.png is "
+                 f"{image.size[0]}x{image.size[1]}, want 128x384")
+        if image.mode != "RGBA":
+            fail(f"desktop-item-actions.png mode '{image.mode}' is "
+                 "not RGBA")
+    entry = next((atlas for atlas in manifest.get("atlases", [])
+                  if atlas.get("id") == "desktop-item-actions"), None)
+    if entry is None:
+        fail("manifest.json has no desktop-item-actions atlas entry")
+    with open(actions_path, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+    if entry.get("sha256") != digest:
+        fail("manifest hash is stale for desktop-item-actions "
+             "(run `make actions-art`)")
+    grid = entry.get("grid", {})
+    if (grid.get("columns"), grid.get("rows")) != (4, 12) \
+            or (grid.get("cell_width"), grid.get("cell_height")) != (32, 32):
+        fail("manifest grid is wrong for desktop-item-actions")
+    with open(actions_provenance, encoding="utf-8") as handle:
+        action_cells = {(cell.get("row"), cell.get("column"))
+                        for cell in json.load(handle).get("cells", [])}
+    for row in range(12):
+        for column in range(4):
+            if (row, column) not in action_cells:
+                fail(f"action provenance covers no cell ({row}, {column})")
+
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "assets/world/items.json"

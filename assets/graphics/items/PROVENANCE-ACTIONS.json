@@ -1,0 +1,637 @@
+{
+  "tool": "tools/sync_action_art.py",
+  "atlas": "desktop-item-actions",
+  "source": "assets/graphics/items/desktop-items.png",
+  "grid": {
+    "columns": 4,
+    "rows": 12,
+    "cell_width": 32,
+    "cell_height": 32
+  },
+  "cells": [
+    {
+      "row": 0,
+      "column": 0,
+      "style": "legend",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -18,
+        -3,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 0,
+      "column": 1,
+      "style": "legend",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -42,
+        -5,
+        -4,
+        1.0
+      ]
+    },
+    {
+      "row": 0,
+      "column": 2,
+      "style": "legend",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        26,
+        4,
+        3,
+        1.0
+      ]
+    },
+    {
+      "row": 0,
+      "column": 3,
+      "style": "legend",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        10,
+        2,
+        4,
+        0.94
+      ]
+    },
+    {
+      "row": 1,
+      "column": 0,
+      "style": "legend",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 1,
+      "column": 1,
+      "style": "legend",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -14,
+        -1,
+        0,
+        0.97
+      ]
+    },
+    {
+      "row": 1,
+      "column": 2,
+      "style": "legend",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -38,
+        -2,
+        -2,
+        1.0
+      ]
+    },
+    {
+      "row": 1,
+      "column": 3,
+      "style": "legend",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        1,
+        0.94
+      ]
+    },
+    {
+      "row": 2,
+      "column": 0,
+      "style": "legend",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        4,
+        0.82
+      ]
+    },
+    {
+      "row": 2,
+      "column": 1,
+      "style": "legend",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        -6,
+        0,
+        0,
+        0.9
+      ]
+    },
+    {
+      "row": 2,
+      "column": 2,
+      "style": "legend",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -3,
+        1.0
+      ]
+    },
+    {
+      "row": 2,
+      "column": 3,
+      "style": "legend",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -2,
+        0.94
+      ]
+    },
+    {
+      "row": 3,
+      "column": 0,
+      "style": "chumrunner",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -18,
+        -3,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 3,
+      "column": 1,
+      "style": "chumrunner",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -42,
+        -5,
+        -4,
+        1.0
+      ]
+    },
+    {
+      "row": 3,
+      "column": 2,
+      "style": "chumrunner",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        26,
+        4,
+        3,
+        1.0
+      ]
+    },
+    {
+      "row": 3,
+      "column": 3,
+      "style": "chumrunner",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        10,
+        2,
+        4,
+        0.94
+      ]
+    },
+    {
+      "row": 4,
+      "column": 0,
+      "style": "chumrunner",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 4,
+      "column": 1,
+      "style": "chumrunner",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -14,
+        -1,
+        0,
+        0.97
+      ]
+    },
+    {
+      "row": 4,
+      "column": 2,
+      "style": "chumrunner",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -38,
+        -2,
+        -2,
+        1.0
+      ]
+    },
+    {
+      "row": 4,
+      "column": 3,
+      "style": "chumrunner",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        1,
+        0.94
+      ]
+    },
+    {
+      "row": 5,
+      "column": 0,
+      "style": "chumrunner",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        4,
+        0.82
+      ]
+    },
+    {
+      "row": 5,
+      "column": 1,
+      "style": "chumrunner",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        -6,
+        0,
+        0,
+        0.9
+      ]
+    },
+    {
+      "row": 5,
+      "column": 2,
+      "style": "chumrunner",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -3,
+        1.0
+      ]
+    },
+    {
+      "row": 5,
+      "column": 3,
+      "style": "chumrunner",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -2,
+        0.94
+      ]
+    },
+    {
+      "row": 6,
+      "column": 0,
+      "style": "fantasy",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -18,
+        -3,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 6,
+      "column": 1,
+      "style": "fantasy",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -42,
+        -5,
+        -4,
+        1.0
+      ]
+    },
+    {
+      "row": 6,
+      "column": 2,
+      "style": "fantasy",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        26,
+        4,
+        3,
+        1.0
+      ]
+    },
+    {
+      "row": 6,
+      "column": 3,
+      "style": "fantasy",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        10,
+        2,
+        4,
+        0.94
+      ]
+    },
+    {
+      "row": 7,
+      "column": 0,
+      "style": "fantasy",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 7,
+      "column": 1,
+      "style": "fantasy",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -14,
+        -1,
+        0,
+        0.97
+      ]
+    },
+    {
+      "row": 7,
+      "column": 2,
+      "style": "fantasy",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -38,
+        -2,
+        -2,
+        1.0
+      ]
+    },
+    {
+      "row": 7,
+      "column": 3,
+      "style": "fantasy",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        1,
+        0.94
+      ]
+    },
+    {
+      "row": 8,
+      "column": 0,
+      "style": "fantasy",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        4,
+        0.82
+      ]
+    },
+    {
+      "row": 8,
+      "column": 1,
+      "style": "fantasy",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        -6,
+        0,
+        0,
+        0.9
+      ]
+    },
+    {
+      "row": 8,
+      "column": 2,
+      "style": "fantasy",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -3,
+        1.0
+      ]
+    },
+    {
+      "row": 8,
+      "column": 3,
+      "style": "fantasy",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -2,
+        0.94
+      ]
+    },
+    {
+      "row": 9,
+      "column": 0,
+      "style": "pleb-bound",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -18,
+        -3,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 9,
+      "column": 1,
+      "style": "pleb-bound",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        -42,
+        -5,
+        -4,
+        1.0
+      ]
+    },
+    {
+      "row": 9,
+      "column": 2,
+      "style": "pleb-bound",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        26,
+        4,
+        3,
+        1.0
+      ]
+    },
+    {
+      "row": 9,
+      "column": 3,
+      "style": "pleb-bound",
+      "clip": "use-tool",
+      "item_column": 3,
+      "pose": [
+        10,
+        2,
+        4,
+        0.94
+      ]
+    },
+    {
+      "row": 10,
+      "column": 0,
+      "style": "pleb-bound",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        2,
+        0.94
+      ]
+    },
+    {
+      "row": 10,
+      "column": 1,
+      "style": "pleb-bound",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -14,
+        -1,
+        0,
+        0.97
+      ]
+    },
+    {
+      "row": 10,
+      "column": 2,
+      "style": "pleb-bound",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        -38,
+        -2,
+        -2,
+        1.0
+      ]
+    },
+    {
+      "row": 10,
+      "column": 3,
+      "style": "pleb-bound",
+      "clip": "drink",
+      "item_column": 2,
+      "pose": [
+        0,
+        0,
+        1,
+        0.94
+      ]
+    },
+    {
+      "row": 11,
+      "column": 0,
+      "style": "pleb-bound",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        4,
+        0.82
+      ]
+    },
+    {
+      "row": 11,
+      "column": 1,
+      "style": "pleb-bound",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        -6,
+        0,
+        0,
+        0.9
+      ]
+    },
+    {
+      "row": 11,
+      "column": 2,
+      "style": "pleb-bound",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -3,
+        1.0
+      ]
+    },
+    {
+      "row": 11,
+      "column": 3,
+      "style": "pleb-bound",
+      "clip": "give",
+      "item_column": 5,
+      "pose": [
+        0,
+        0,
+        -2,
+        0.94
+      ]
+    }
+  ]
+}

@@ -26,7 +26,7 @@
 
 #define DESK_CAST_COUNT 4
 #define DESK_ACTOR_COUNT 4
-#define DESK_GRAPHICS_COUNT 10
+#define DESK_GRAPHICS_COUNT 11
 #define DESK_AUDIO_EVENT_COUNT 3
 #define DESK_AUDIO_SOURCE_CUE_COUNT 12
 #define DESK_HERO_MOTION_VARIANT_COUNT 5
@@ -117,7 +117,11 @@ typedef enum desk_graphic {
     /* Project-owned item art: one row per house style, one column per
      * catalog sprite, column 0 = missing-item icon. Owned by
      * tools/sync_item_art.py + validate_items.py, not cast parity. */
-    DESK_GRAPHIC_ITEMS = 9
+    DESK_GRAPHIC_ITEMS = 9,
+    /* Held-item action frames: per style, three clip rows (use-tool,
+     * drink, give) of four frames, composed from desktop-items by
+     * tools/sync_action_art.py. */
+    DESK_GRAPHIC_ITEM_ACTIONS = 10
 } desk_graphic;
 
 typedef enum desk_hero_motion_variant {
@@ -538,6 +542,11 @@ bool desk_graphics_item_cell(const desk_graphics *graphics,
 bool desk_graphics_item_cell_metrics(const desk_graphics *graphics,
                                      desk_cast style, int column,
                                      desk_sprite_metrics *metrics);
+/* One frame of a held-item action clip; clip_row is 0 use-tool,
+ * 1 drink, 2 give, matching sync_action_art.py's row order. */
+bool desk_graphics_action_cell(const desk_graphics *graphics,
+                               desk_cast style, int clip_row, int frame,
+                               ki_td_rgba8 *image);
 uint32_t desk_outfit_color(desk_cast cast, int outfit);
 const char *desk_outfit_name(desk_cast cast, int outfit);
 

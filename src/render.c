@@ -324,6 +324,7 @@ static void draw_held_item(ki_td_soft_renderer *renderer,
     desk_sprite_metrics metrics;
     float offset_x;
     float offset_y;
+    int clip_row = -1;
     int frame = state->player_animator.frame;
 
     if (!state->action.active || !state->catalog) return;
@@ -336,6 +337,38 @@ static void draw_held_item(ki_td_soft_renderer *renderer,
     def = desk_items_def(state->catalog, held->definition);
     if (!def) return;
     if (frame < 0 || frame > 3) frame = 0;
+    switch ((desk_action_kind)state->action.plan.kind) {
+    case DESK_ACTION_USE_TOOL:
+        clip_row = 0;
+        break;
+    case DESK_ACTION_DRINK:
+        clip_row = 1;
+        break;
+    case DESK_ACTION_GIVE:
+        clip_row = 2;
+        break;
+    case DESK_ACTION_NONE:
+    default:
+        break;
+    }
+    /* Authored action cells carry the motion inside the frame, so they
+     * draw at one steady hand anchor; anything without a clip row falls
+     * back to the static icon walking the per-frame offsets. */
+    if (clip_row >= 0 &&
+        desk_graphics_action_cell(graphics, visible_cast(state), clip_row,
+                                  frame, &cell)) {
+        offset_x = state->facing == DESK_FACING_LEFT ? -7.0f : 7.0f;
+        if (state->facing == DESK_FACING_UP ||
+            state->facing == DESK_FACING_DOWN)
+            offset_x = 6.0f;
+        ki_td_soft_rgba_resized(renderer, view,
+                                state->player_x + offset_x - 12.0f,
+                                state->player_y - 34.0f, &cell, 24, 24,
+                                1.0f);
+        bounds_add(bounds, state->player_x + offset_x - 12.0f,
+                   state->player_y - 34.0f, 24.0f, 24.0f);
+        return;
+    }
     offset_x = HAND_OFFSETS[frame][0];
     offset_y = HAND_OFFSETS[frame][1];
     if (state->facing == DESK_FACING_LEFT) offset_x = -offset_x;

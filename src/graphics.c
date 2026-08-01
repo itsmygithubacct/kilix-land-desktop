@@ -53,8 +53,12 @@ static const graphic_spec GRAPHIC_SPECS[DESK_GRAPHICS_COUNT] = {
     {"fantasy-portraits", 1080u, 160u, 27u, 4u},
     {"pleb-bound-characters", 1776u, 888u, 8u, 4u},
     {"pleb-bound-portraits", 1776u, 888u, 4u, 2u},
-    {"desktop-items", 256u, 128u, 8u, 4u}
+    {"desktop-items", 256u, 128u, 8u, 4u},
+    {"desktop-item-actions", 128u, 384u, 4u, 12u}
 };
+
+/* sync_action_art.py's row order within one style block. */
+#define DESK_ACTION_CLIP_ROWS 3
 
 static const char *const OUTFIT_NAMES[DESK_OUTFIT_COUNT] = {
     "ORIGINAL", "CRIMSON", "COBALT", "FOREST", "AMBER", "VIOLET"
@@ -1280,6 +1284,21 @@ bool desk_graphics_item_cell(const desk_graphics *graphics,
         return false;
     return desk_graphics_cell(graphics, DESK_GRAPHIC_ITEMS, column,
                               (int)style, image);
+}
+
+bool desk_graphics_action_cell(const desk_graphics *graphics,
+                               desk_cast style, int clip_row, int frame,
+                               ki_td_rgba8 *image)
+{
+    if (image) *image = (ki_td_rgba8){0};
+    if (!graphics || !image || (int)style < 0 ||
+        (int)style >= DESK_CAST_COUNT || clip_row < 0 ||
+        clip_row >= DESK_ACTION_CLIP_ROWS || frame < 0 || frame > 3)
+        return false;
+    return desk_graphics_cell(graphics, DESK_GRAPHIC_ITEM_ACTIONS, frame,
+                              (int)style * DESK_ACTION_CLIP_ROWS +
+                                  clip_row,
+                              image);
 }
 
 bool desk_graphics_item_cell_metrics(const desk_graphics *graphics,
