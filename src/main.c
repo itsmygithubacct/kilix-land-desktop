@@ -1,4 +1,5 @@
 #include "kilix_land_desktop.h"
+#include "json_reader.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -796,6 +797,333 @@ static int selftest(void)
     return result;
 }
 
+/* Like make_temp_config, but without touching the config-home variable:
+ * the JSON tests only need a place to write fixture files. */
+static bool make_scratch_directory(char *directory, size_t size)
+{
+    const char *base = getenv("TMPDIR");
+    int written;
+    if (!base || base[0] == '\0') base = "/tmp";
+    written = snprintf(directory, size, "%s/kilix-land-desktop-json.XXXXXX",
+                       base);
+    if (written < 0 || (size_t)written >= size) return false;
+    return mkdtemp(directory) != NULL;
+}
+
+enum {
+    JSON_CASE_STRING = 0,
+    JSON_CASE_NUMBER = 1,
+    JSON_CASE_BOOL = 2,
+    JSON_CASE_OBJECT = 3,
+    JSON_CASE_ARRAY = 4
+};
+
+typedef struct json_case {
+    const char *label;
+    const char *text;
+    int kind;
+    bool expect_ok;
+    const char *expect_error;  /* exact message when expect_ok is false */
+    const char *expect_string; /* JSON_CASE_STRING */
+    float expect_number;       /* NUMBER value; OBJECT/ARRAY value sum */
+    bool expect_bool;
+    size_t expect_end;         /* reader offset after success */
+    size_t string_capacity;    /* JSON_CASE_STRING; 0 = full buffer */
+} json_case;
+
+/* The reader owns tokens only, so the schema-shaped walks below mirror how
+ * rooms.c drives it: known keys claim bits, unknown keys fail at the key
+ * offset, values are numbers. */
+static const json_case JSON_CASES[] = {
+    {.label = "string-plain", .text = "\"abc\"", .kind = JSON_CASE_STRING,
+     .expect_ok = true, .expect_string = "abc", .expect_end = 5u},
+    {.label = "string-escapes", .text = "\"a\\\"b\\\\c\\/d\\ne\\tf\"",
+     .kind = JSON_CASE_STRING, .expect_ok = true,
+     .expect_string = "a\"b\\c/d\ne\tf", .expect_end = 18u},
+    {.label = "string-leading-ws", .text = "  \"pad\"",
+     .kind = JSON_CASE_STRING, .expect_ok = true, .expect_string = "pad",
+     .expect_end = 7u},
+    {.label = "string-unterminated", .text = "\"abc",
+     .kind = JSON_CASE_STRING,
+     .expect_error = "t:0: unterminated string"},
+    {.label = "string-escape-at-eof", .text = "\"a\\",
+     .kind = JSON_CASE_STRING,
+     .expect_error = "t:0: unterminated string"},
+    {.label = "string-control-char", .text = "\"a\tb\"",
+     .kind = JSON_CASE_STRING,
+     .expect_error = "t:2: raw control character in string"},
+    {.label = "string-bad-escape", .text = "\"a\\qb\"",
+     .kind = JSON_CASE_STRING,
+     .expect_error = "t:3: unsupported escape sequence"},
+    {.label = "string-over-capacity", .text = "\"abcd\"",
+     .kind = JSON_CASE_STRING, .string_capacity = 4u,
+     .expect_error = "t:0: string longer than capacity 3"},
+    {.label = "string-not-a-string", .text = "123",
+     .kind = JSON_CASE_STRING, .expect_error = "t:0: expected string"},
+    {.label = "number-integer", .text = "42", .kind = JSON_CASE_NUMBER,
+     .expect_ok = true, .expect_number = 42.0f, .expect_end = 2u},
+    {.label = "number-negative-fraction", .text = "-12.5",
+     .kind = JSON_CASE_NUMBER, .expect_ok = true, .expect_number = -12.5f,
+     .expect_end = 5u},
+    {.label = "number-leading-ws", .text = " 7", .kind = JSON_CASE_NUMBER,
+     .expect_ok = true, .expect_number = 7.0f, .expect_end = 2u},
+    {.label = "number-bare-minus", .text = "-", .kind = JSON_CASE_NUMBER,
+     .expect_error = "t:0: expected number"},
+    {.label = "number-open-fraction", .text = "1.",
+     .kind = JSON_CASE_NUMBER,
+     .expect_error = "t:2: expected digit after decimal point"},
+    {.label = "number-leading-dot", .text = ".5", .kind = JSON_CASE_NUMBER,
+     .expect_error = "t:0: expected number"},
+    {.label = "number-too-long",
+     .text = "111111111111111111111111111111111111111111111111111111111111",
+     .kind = JSON_CASE_NUMBER, .expect_error = "t:0: number too long"},
+    {.label = "number-no-exponent", .text = "1e3", .kind = JSON_CASE_NUMBER,
+     .expect_ok = true, .expect_number = 1.0f, .expect_end = 1u},
+    {.label = "bool-true", .text = "true", .kind = JSON_CASE_BOOL,
+     .expect_ok = true, .expect_bool = true, .expect_end = 4u},
+    {.label = "bool-false", .text = "false", .kind = JSON_CASE_BOOL,
+     .expect_ok = true, .expect_bool = false, .expect_end = 5u},
+    {.label = "bool-leading-ws", .text = " true", .kind = JSON_CASE_BOOL,
+     .expect_ok = true, .expect_bool = true, .expect_end = 5u},
+    {.label = "bool-prefix-only", .text = "truex", .kind = JSON_CASE_BOOL,
+     .expect_ok = true, .expect_bool = true, .expect_end = 4u},
+    {.label = "bool-truncated", .text = "tru", .kind = JSON_CASE_BOOL,
+     .expect_error = "t:0: expected true or false"},
+    {.label = "object-two-keys", .text = "{\"a\":1,\"b\":2}",
+     .kind = JSON_CASE_OBJECT, .expect_ok = true, .expect_number = 3.0f,
+     .expect_end = 13u},
+    {.label = "object-empty", .text = "{}", .kind = JSON_CASE_OBJECT,
+     .expect_ok = true, .expect_number = 0.0f, .expect_end = 2u},
+    {.label = "object-missing-comma", .text = "{\"a\":1 \"b\":2}",
+     .kind = JSON_CASE_OBJECT, .expect_error = "t:7: expected ','"},
+    {.label = "object-duplicate-key", .text = "{\"a\":1,\"a\":2}",
+     .kind = JSON_CASE_OBJECT, .expect_error = "t:7: duplicate key 'a'"},
+    {.label = "object-missing-colon", .text = "{\"a\" 1}",
+     .kind = JSON_CASE_OBJECT, .expect_error = "t:5: expected ':'"},
+    {.label = "object-unterminated", .text = "{\"a\":1",
+     .kind = JSON_CASE_OBJECT,
+     .expect_error = "t:6: unterminated object"},
+    {.label = "object-unknown-key", .text = "{\"z\":1}",
+     .kind = JSON_CASE_OBJECT, .expect_error = "t:1: unknown key 'z'"},
+    {.label = "object-bare-comma", .text = "{,}",
+     .kind = JSON_CASE_OBJECT, .expect_error = "t:1: expected string"},
+    {.label = "array-three", .text = "[1,2,3]", .kind = JSON_CASE_ARRAY,
+     .expect_ok = true, .expect_number = 6.0f, .expect_end = 7u},
+    {.label = "array-empty", .text = "[]", .kind = JSON_CASE_ARRAY,
+     .expect_ok = true, .expect_number = 0.0f, .expect_end = 2u},
+    {.label = "array-missing-comma", .text = "[1 2]",
+     .kind = JSON_CASE_ARRAY, .expect_error = "t:3: expected ','"},
+    {.label = "array-unterminated", .text = "[1", .kind = JSON_CASE_ARRAY,
+     .expect_error = "t:2: unterminated array"},
+    {.label = "array-trailing-comma", .text = "[1,",
+     .kind = JSON_CASE_ARRAY, .expect_error = "t:3: expected number"},
+};
+
+static bool json_walk_object(desk_json_reader *reader, float *sum)
+{
+    static const char *const keys[4] = {"a", "b", "c", "d"};
+    bool first = true;
+    unsigned seen = 0u;
+    char key[8];
+
+    if (!desk_json_expect(reader, '{')) return false;
+    for (;;) {
+        float value = 0.0f;
+        size_t index;
+        int step = desk_json_next_key(reader, &first, key, sizeof key);
+
+        if (step < 0) return false;
+        if (step == 0) return true;
+        for (index = 0u; index < 4u; ++index)
+            if (strcmp(key, keys[index]) == 0) break;
+        if (index == 4u)
+            return desk_json_fail_at(reader, reader->key_offset,
+                                     "unknown key '%s'", key);
+        if (!desk_json_claim_key(reader, &seen, 1u << index,
+                                 keys[index]) ||
+            !desk_json_parse_number(reader, &value))
+            return false;
+        *sum += value;
+    }
+}
+
+static bool json_walk_array(desk_json_reader *reader, float *sum)
+{
+    bool first = true;
+
+    if (!desk_json_expect(reader, '[')) return false;
+    for (;;) {
+        float value = 0.0f;
+        int step = desk_json_next_element(reader, &first);
+
+        if (step < 0) return false;
+        if (step == 0) return true;
+        if (!desk_json_parse_number(reader, &value)) return false;
+        *sum += value;
+    }
+}
+
+static bool json_case_run(const json_case *test)
+{
+    desk_json_reader reader;
+    char error[DESK_ERROR_CAPACITY];
+    char out[32];
+    float number = 0.0f;
+    bool value = false;
+    bool ok = false;
+
+    (void)memset(&reader, 0, sizeof reader);
+    reader.text = test->text;
+    reader.length = strlen(test->text);
+    reader.name = "t";
+    reader.error = error;
+    reader.error_size = sizeof error;
+    error[0] = '\0';
+    out[0] = '\0';
+
+    switch (test->kind) {
+    case JSON_CASE_STRING:
+        ok = desk_json_parse_string(&reader, out,
+                                    test->string_capacity != 0u ?
+                                    test->string_capacity : sizeof out);
+        break;
+    case JSON_CASE_NUMBER:
+        ok = desk_json_parse_number(&reader, &number);
+        break;
+    case JSON_CASE_BOOL:
+        ok = desk_json_parse_bool(&reader, &value);
+        break;
+    case JSON_CASE_OBJECT:
+        ok = json_walk_object(&reader, &number);
+        break;
+    default:
+        ok = json_walk_array(&reader, &number);
+        break;
+    }
+    if (ok != test->expect_ok) {
+        (void)fprintf(stderr, "FAIL json %s: ok=%d want %d (error '%s')\n",
+                      test->label, ok ? 1 : 0, test->expect_ok ? 1 : 0,
+                      error);
+        return false;
+    }
+    if (!test->expect_ok) {
+        if (strcmp(error, test->expect_error) != 0) {
+            (void)fprintf(stderr, "FAIL json %s: error '%s' want '%s'\n",
+                          test->label, error, test->expect_error);
+            return false;
+        }
+        return true;
+    }
+    if (reader.offset != test->expect_end) {
+        (void)fprintf(stderr, "FAIL json %s: end %zu want %zu\n",
+                      test->label, reader.offset, test->expect_end);
+        return false;
+    }
+    if (test->kind == JSON_CASE_STRING &&
+        strcmp(out, test->expect_string) != 0) {
+        (void)fprintf(stderr, "FAIL json %s: string '%s'\n", test->label,
+                      out);
+        return false;
+    }
+    if ((test->kind == JSON_CASE_NUMBER || test->kind == JSON_CASE_OBJECT ||
+         test->kind == JSON_CASE_ARRAY) &&
+        number != test->expect_number) {
+        (void)fprintf(stderr, "FAIL json %s: number %g want %g\n",
+                      test->label, (double)number,
+                      (double)test->expect_number);
+        return false;
+    }
+    if (test->kind == JSON_CASE_BOOL && value != test->expect_bool) {
+        (void)fprintf(stderr, "FAIL json %s: bool %d\n", test->label,
+                      value ? 1 : 0);
+        return false;
+    }
+    return true;
+}
+
+static bool json_write_fixture(const char *directory, const char *name,
+                               const char *text, size_t length, char *path,
+                               size_t path_size)
+{
+    FILE *handle;
+    int written = snprintf(path, path_size, "%s/%s", directory, name);
+    if (written < 0 || (size_t)written >= path_size) return false;
+    handle = fopen(path, "wb");
+    if (!handle) return false;
+    if (fwrite(text, 1u, length, handle) != length) {
+        (void)fclose(handle);
+        return false;
+    }
+    return fclose(handle) == 0;
+}
+
+static bool json_open_cases(const char *directory)
+{
+    desk_json_reader reader;
+    char error[DESK_ERROR_CAPACITY];
+    char path[1024];
+    char small[8];
+    char buffer[64];
+    float sum = 0.0f;
+
+    if (desk_json_open(&reader, NULL, "fallback.json", buffer,
+                       sizeof buffer, error, sizeof error) ||
+        strcmp(error, "fallback.json:0: no path given") != 0) {
+        (void)fprintf(stderr, "FAIL json open null-path: '%s'\n", error);
+        return false;
+    }
+    if (snprintf(path, sizeof path, "%s/absent.json", directory) < 0 ||
+        desk_json_open(&reader, path, "absent.json", buffer, sizeof buffer,
+                       error, sizeof error) ||
+        strcmp(error, "absent.json:0: cannot open file") != 0) {
+        (void)fprintf(stderr, "FAIL json open absent: '%s'\n", error);
+        return false;
+    }
+    if (!json_write_fixture(directory, "over.json", "12345678", 8u, path,
+                            sizeof path))
+        return false;
+    if (desk_json_open(&reader, path, "over.json", small, sizeof small,
+                       error, sizeof error) ||
+        strcmp(error, "over.json:0: file larger than 7 bytes") != 0) {
+        (void)fprintf(stderr, "FAIL json open oversize: '%s'\n", error);
+        return false;
+    }
+    if (!json_write_fixture(directory, "ok.json", "{\"a\":4}", 7u, path,
+                            sizeof path))
+        return false;
+    if (!desk_json_open(&reader, path, "ok.json", buffer, sizeof buffer,
+                        error, sizeof error) ||
+        reader.length != 7u || !json_walk_object(&reader, &sum) ||
+        sum != 4.0f) {
+        (void)fprintf(stderr, "FAIL json open round-trip: '%s'\n", error);
+        return false;
+    }
+    return true;
+}
+
+static int json_test(void)
+{
+    char directory[1024];
+    size_t index;
+    size_t count = sizeof JSON_CASES / sizeof JSON_CASES[0];
+    bool ok = true;
+
+    for (index = 0u; index < count; ++index)
+        if (!json_case_run(&JSON_CASES[index])) ok = false;
+    if (!make_scratch_directory(directory, sizeof directory)) {
+        (void)fprintf(stderr, "FAIL json scratch directory\n");
+        return EXIT_FAILURE;
+    }
+    if (!json_open_cases(directory)) ok = false;
+    if (!remove_tree(directory)) {
+        (void)fprintf(stderr, "FAIL json scratch cleanup\n");
+        ok = false;
+    }
+    if (!ok) return EXIT_FAILURE;
+    (void)printf("PASS json-reader cases=%zu files=4\n", count);
+    return EXIT_SUCCESS;
+}
+
 typedef struct render_fixture {
     desk_world world;
     desk_graphics graphics;
@@ -1411,6 +1739,7 @@ static void usage(const char *program)
 {
     (void)fprintf(stderr,
         "usage: %s [--selftest | --audio-test | --graphics-test | "
+        "--json-test | "
         "--world-test | --profile-test | --wizard-render-test DIR | "
         "--room-render-test DIR | --outfit-render-test DIR | "
         "--walk-render-test DIR | "
@@ -1426,6 +1755,8 @@ int main(int argc, char **argv)
         return audio_test();
     if (argc == 2 && strcmp(argv[1], "--graphics-test") == 0)
         return graphics_test();
+    if (argc == 2 && strcmp(argv[1], "--json-test") == 0)
+        return json_test();
     if (argc == 2 && strcmp(argv[1], "--world-test") == 0)
         return world_test();
     if (argc == 2 && strcmp(argv[1], "--profile-test") == 0)
