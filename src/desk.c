@@ -1290,6 +1290,9 @@ static void action_apply(desk_state *state, const desk_world *world)
         desk_item_plan split_plan;
         desk_item one;
         char message[64];
+        const char *reaction = "nods a warm thanks.";
+        desk_taste taste;
+        int point_delta = 10;
         int giftable = desk_item_tag_index("giftable");
 
         if (plan->npc_index >= (uint16_t)room->npc_count) return;
@@ -1304,6 +1307,25 @@ static void action_apply(desk_state *state, const desk_world *world)
             (def->tags &
              ((desk_item_tags)1u << (unsigned int)giftable)) == 0u)
             return;
+        taste = desk_item_taste(state->catalog, (int)state->profile.cast,
+                                npc->actor, held);
+        switch (taste) {
+        case DESK_TASTE_LOVE:
+            point_delta = 50;
+            reaction = "treasures it.";
+            break;
+        case DESK_TASTE_LIKE:
+            point_delta = 25;
+            reaction = "is delighted.";
+            break;
+        case DESK_TASTE_DISLIKE:
+            point_delta = -10;
+            reaction = "pretends to like it.";
+            break;
+        case DESK_TASTE_NEUTRAL:
+        default:
+            break;
+        }
         /* The transfer and the friendship change land together at the
          * handoff frame; the reaction toast reads the same result. */
         if (!desk_item_plan_split_one(&state->items.inventory,
@@ -1314,13 +1336,19 @@ static void action_apply(desk_state *state, const desk_world *world)
         social = social_record_for(state, state->profile.cast, npc->actor,
                                    true);
         if (social) {
-            if (social->points <= 1000000 - 25) social->points += 25;
+            if (point_delta > 0 &&
+                social->points <= 1000000 - point_delta)
+                social->points += point_delta;
+            else if (point_delta < 0 &&
+                     social->points >= -1000000 - point_delta)
+                social->points += point_delta;
             if (social->gifts < UINT16_MAX) social->gifts++;
         }
         state->world_dirty = true;
         action->committed = true;
-        (void)snprintf(message, sizeof message, "%.20s is delighted.",
-                       desk_actor_name(state->profile.cast, npc->actor));
+        (void)snprintf(message, sizeof message, "%s %s",
+                       desk_actor_name(state->profile.cast, npc->actor),
+                       reaction);
         set_toast(state, message);
         queue_audio(state, DESK_AUDIO_DIALOGUE);
         return;

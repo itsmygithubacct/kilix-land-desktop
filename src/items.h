@@ -24,6 +24,8 @@
 #define DESK_MAX_WORLD_ITEMS_PER_ROOM 16
 #define DESK_MAX_RECEIVER_RULES 16
 #define DESK_RECEIVER_ID_CAPACITY 24
+#define DESK_MAX_TASTE_RULES 12
+#define DESK_MAX_TASTE_ENTRIES 8
 #define DESK_ITEM_MAX_STACK_LIMIT 99
 #define DESK_ITEM_SPRITE_COLUMNS 8
 /* Ten hours of 60 Hz simulation; bounds every authored tick count. */
@@ -61,6 +63,13 @@ typedef enum desk_item_behavior {
     DESK_BEHAVIOR_UNLOCK = 5
 } desk_item_behavior;
 #define DESK_ITEM_BEHAVIOR_COUNT 6
+
+typedef enum desk_taste {
+    DESK_TASTE_NEUTRAL = 0,
+    DESK_TASTE_LOVE = 1,
+    DESK_TASTE_LIKE = 2,
+    DESK_TASTE_DISLIKE = 3
+} desk_taste;
 
 typedef struct desk_item_def {
     char id[DESK_ITEM_ID_CAPACITY];
@@ -114,11 +123,27 @@ typedef struct desk_receiver_rule {
     desk_receiver_result result;
 } desk_receiver_rule;
 
+typedef struct desk_item_taste_match {
+    desk_item_tags tags;
+    uint16_t items[DESK_MAX_TASTE_ENTRIES];
+    uint8_t item_count;
+} desk_item_taste_match;
+
+typedef struct desk_item_taste_rule {
+    uint8_t cast;
+    uint8_t actor;
+    desk_item_taste_match love;
+    desk_item_taste_match like;
+    desk_item_taste_match dislike;
+} desk_item_taste_rule;
+
 typedef struct desk_item_catalog {
     desk_item_def definitions[DESK_MAX_ITEM_DEFS];
     int definition_count; /* includes definitions[0] = missing item */
     desk_receiver_rule receivers[DESK_MAX_RECEIVER_RULES];
     int receiver_count;
+    desk_item_taste_rule tastes[DESK_MAX_TASTE_RULES];
+    int taste_count;
 } desk_item_catalog;
 
 typedef struct desk_inventory {
@@ -169,6 +194,8 @@ int desk_items_find_receiver(const desk_item_catalog *catalog,
 bool desk_receiver_accepts(const desk_item_catalog *catalog,
                            const desk_receiver_rule *rule,
                            const desk_item *item);
+desk_taste desk_item_taste(const desk_item_catalog *catalog, int cast,
+                           int actor, const desk_item *item);
 
 /* instances */
 desk_item desk_item_make(uint16_t definition, uint16_t quantity);

@@ -1,5 +1,91 @@
 {
   "items": 1,
+  "tastes": [
+    {
+      "cast": "legend",
+      "actor": 1,
+      "love": ["core:gift/postcard"],
+      "like": ["tool"],
+      "dislike": ["giftable"]
+    },
+    {
+      "cast": "legend",
+      "actor": 2,
+      "love": ["media"],
+      "like": ["light"],
+      "dislike": ["giftable"]
+    },
+    {
+      "cast": "legend",
+      "actor": 3,
+      "love": ["giftable"],
+      "like": ["drink"],
+      "dislike": ["core:media/record"]
+    },
+    {
+      "cast": "chumrunner",
+      "actor": 1,
+      "love": ["core:gear/lantern-pin"],
+      "like": ["tool"],
+      "dislike": ["decor"]
+    },
+    {
+      "cast": "chumrunner",
+      "actor": 2,
+      "love": ["core:tool/toolbox", "core:drink/coffee"],
+      "like": ["tool"],
+      "dislike": ["media"]
+    },
+    {
+      "cast": "chumrunner",
+      "actor": 3,
+      "love": ["core:media/record"],
+      "like": ["core:gift/postcard"],
+      "dislike": ["placeable"]
+    },
+    {
+      "cast": "fantasy",
+      "actor": 1,
+      "love": ["core:decor/houseplant"],
+      "like": ["core:gift/postcard"],
+      "dislike": ["drink"]
+    },
+    {
+      "cast": "fantasy",
+      "actor": 2,
+      "love": ["core:gear/lantern-pin"],
+      "like": ["light"],
+      "dislike": ["decor"]
+    },
+    {
+      "cast": "fantasy",
+      "actor": 3,
+      "love": ["core:gift/postcard"],
+      "like": ["wearable"],
+      "dislike": ["media"]
+    },
+    {
+      "cast": "pleb-bound",
+      "actor": 1,
+      "love": ["media"],
+      "like": ["core:gift/postcard"],
+      "dislike": ["drink"]
+    },
+    {
+      "cast": "pleb-bound",
+      "actor": 2,
+      "love": ["core:tool/toolbox", "core:drink/coffee"],
+      "like": ["tool"],
+      "dislike": ["wearable"]
+    },
+    {
+      "cast": "pleb-bound",
+      "actor": 3,
+      "love": ["core:gear/lantern-pin"],
+      "like": ["decor"],
+      "dislike": ["media"]
+    }
+  ],
   "definitions": [
     {
       "id": "core:media/record",

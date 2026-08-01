@@ -1577,6 +1577,7 @@ static int selftest_body(void)
         desk_item_plan seed_plan;
         desk_item seed;
         int postcard = desk_items_find(&catalog, "core:gift/postcard");
+        int coffee = desk_items_find(&catalog, "core:drink/coffee");
         int toolbox = desk_items_find(&catalog, "core:tool/toolbox");
         int pin = desk_items_find(&catalog, "core:gear/lantern-pin");
         int use_slot;
@@ -1584,7 +1585,7 @@ static int selftest_body(void)
         int tick;
 
         seed = desk_item_make((uint16_t)postcard, 1u);
-        if (postcard <= 0 || pin <= 0 ||
+        if (postcard <= 0 || coffee <= 0 || toolbox <= 0 || pin <= 0 ||
             !desk_inventory_plan_add(&state.items.inventory, &catalog,
                                      &seed, &seed_plan) ||
             !desk_inventory_commit_add(&state.items.inventory, &catalog,
@@ -1631,8 +1632,9 @@ static int selftest_body(void)
                                  (uint16_t)postcard) != 0 ||
             state.items.social_count != 1 ||
             state.items.social[0].actor != 1u ||
-            state.items.social[0].points != 25 ||
+            state.items.social[0].points != 50 ||
             state.items.social[0].gifts != 1u ||
+            strcmp(state.toast, "EMBER BADGER treasures it.") != 0 ||
             !desk_validate(&state, &world, error, sizeof error)) {
             (void)fprintf(stderr, "FAIL selftest gift handoff: %s\n",
                           error);
@@ -1640,6 +1642,55 @@ static int selftest_body(void)
         }
         for (tick = 0; tick < 80 && state.action.active; ++tick)
             desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+
+        /* Ember Badger dislikes generic giftables. The coffee still
+         * leaves the inventory while friendship drops at the handoff. */
+        {
+            int coffee_before = desk_inventory_total(
+                &state.items.inventory, (uint16_t)coffee);
+
+            seed = desk_item_make((uint16_t)coffee, 1u);
+            if (!desk_inventory_plan_add(&state.items.inventory, &catalog,
+                                         &seed, &seed_plan) ||
+                !desk_inventory_commit_add(&state.items.inventory,
+                                           &catalog, &seed, &seed_plan)) {
+                (void)fprintf(stderr,
+                              "FAIL selftest dislike gift inject\n");
+                return EXIT_FAILURE;
+            }
+            use_slot = -1;
+            for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+                 ++slot_index)
+                if (state.items.inventory.slots[slot_index].definition ==
+                        (uint16_t)coffee &&
+                    state.items.inventory.slots[slot_index].quantity > 0u)
+                    use_slot = slot_index;
+            desk_select_slot(&state, use_slot);
+            if (use_slot < 0 || !desk_use_item(&state, &world) ||
+                !state.action.active ||
+                state.player_animator.clip != DESK_CLIP_GIVE) {
+                (void)fprintf(stderr,
+                              "FAIL selftest dislike gift start\n");
+                return EXIT_FAILURE;
+            }
+            for (tick = 0; tick < 80 && !state.action.committed; ++tick)
+                desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+            if (!state.action.committed ||
+                desk_inventory_total(&state.items.inventory,
+                                     (uint16_t)coffee) != coffee_before ||
+                state.items.social[0].points != 40 ||
+                state.items.social[0].gifts != 2u ||
+                strcmp(state.toast,
+                       "EMBER BADGER pretends to like it.") != 0 ||
+                !desk_validate(&state, &world, error, sizeof error)) {
+                (void)fprintf(stderr,
+                              "FAIL selftest dislike gift handoff: %s\n",
+                              error);
+                return EXIT_FAILURE;
+            }
+            for (tick = 0; tick < 80 && state.action.active; ++tick)
+                desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        }
 
         /* Equip, then swap: exclusive ownership both ways. Step out of
          * gift reach first — the pin is giftable too. */
@@ -1708,7 +1759,7 @@ static int selftest_body(void)
         state.world_dirty = false;
         desk_init(&fresh3, &world, &catalog);
         if (fresh3.items.social_count != 1 ||
-            fresh3.items.social[0].points != 25 ||
+            fresh3.items.social[0].points != 40 ||
             fresh3.items.equipment[DESK_EQUIP_ACCESSORY].definition !=
                 (uint16_t)pin) {
             (void)fprintf(stderr, "FAIL selftest social persistence\n");
@@ -2342,6 +2393,42 @@ static const catalog_case CATALOG_CASES[] = {
      "{\"id\":\"r\",\"accept_any_tag\":[\"tool\"],\"consume\":true,"
      "\"result\":\"activate-fixture\"}]}",
      "duplicate receiver id"},
+    {"taste-unknown-cast",
+     "{\"items\":1,\"definitions\":[],\"tastes\":[{\"cast\":\"myth\","
+     "\"actor\":1}]}",
+     "unknown taste cast 'myth'"},
+    {"taste-actor-zero",
+     "{\"items\":1,\"definitions\":[],\"tastes\":[{\"cast\":"
+     "\"legend\",\"actor\":0}]}",
+     "taste actor out of range"},
+    {"taste-duplicate-pair",
+     "{\"items\":1,\"definitions\":[],\"tastes\":[{\"cast\":"
+     "\"legend\",\"actor\":1},{\"cast\":\"legend\",\"actor\":1}]}",
+     "duplicate taste pair"},
+    {"taste-unknown-entry",
+     "{\"items\":1,\"definitions\":[],\"tastes\":[{\"cast\":"
+     "\"legend\",\"actor\":1,\"love\":[\"sparkly\"]}]}",
+     "unknown taste entry 'sparkly'"},
+    {"taste-unknown-item",
+     "{\"items\":1,\"tastes\":[{\"cast\":\"legend\",\"actor\":1,"
+     "\"love\":[\"core:test/ghost\"]}],\"definitions\":[]}",
+     "unknown taste entry 'core:test/ghost'"},
+    {"taste-list-over-cap",
+     "{\"items\":1,\"definitions\":[],\"tastes\":[{\"cast\":"
+     "\"legend\",\"actor\":1,\"love\":[\"drink\",\"food\",\"media\","
+     "\"tool\",\"wearable\",\"placeable\",\"decor\",\"key\","
+     "\"giftable\"]}]}",
+     "more than 8 taste entries"},
+    {"taste-records-over-cap",
+     "{\"items\":1,\"definitions\":[],\"tastes\":["
+     "{\"cast\":\"legend\",\"actor\":1},{\"cast\":\"legend\",\"actor\":2},"
+     "{\"cast\":\"legend\",\"actor\":3},{\"cast\":\"chumrunner\",\"actor\":1},"
+     "{\"cast\":\"chumrunner\",\"actor\":2},{\"cast\":\"chumrunner\",\"actor\":3},"
+     "{\"cast\":\"fantasy\",\"actor\":1},{\"cast\":\"fantasy\",\"actor\":2},"
+     "{\"cast\":\"fantasy\",\"actor\":3},{\"cast\":\"pleb-bound\",\"actor\":1},"
+     "{\"cast\":\"pleb-bound\",\"actor\":2},{\"cast\":\"pleb-bound\",\"actor\":3},"
+     "{\"cast\":\"legend\",\"actor\":1}]}",
+     "more than 12 tastes"},
 };
 
 static bool items_catalog_cases(const char *directory)
@@ -2576,6 +2663,65 @@ static bool items_stack_cases(const desk_item_catalog *catalog)
     return true;
 }
 
+static bool items_taste_cases(const desk_item_catalog *catalog)
+{
+    int postcard = desk_items_find(catalog, "core:gift/postcard");
+    int coffee = desk_items_find(catalog, "core:drink/coffee");
+    int record = desk_items_find(catalog, "core:media/record");
+    int toolbox = desk_items_find(catalog, "core:tool/toolbox");
+    int pin = desk_items_find(catalog, "core:gear/lantern-pin");
+    desk_item item;
+
+    if (postcard <= 0 || coffee <= 0 || record <= 0 || toolbox <= 0 ||
+        pin <= 0) {
+        (void)fprintf(stderr, "FAIL items taste lookup\n");
+        return false;
+    }
+    item = desk_item_make((uint16_t)record, 1u);
+    /* Hare Courier's exact dislike outranks the record's loved giftable
+     * tag; Beacon Keeper's loved media tag outranks disliked giftable. */
+    if (desk_item_taste(catalog, DESK_CAST_LEGEND, DESK_ACTOR_ALLY_3,
+                        &item) != DESK_TASTE_DISLIKE ||
+        desk_item_taste(catalog, DESK_CAST_LEGEND, DESK_ACTOR_ALLY_2,
+                        &item) != DESK_TASTE_LOVE) {
+        (void)fprintf(stderr, "FAIL items taste id/tag precedence\n");
+        return false;
+    }
+    item = desk_item_make((uint16_t)pin, 1u);
+    if (desk_item_taste(catalog, DESK_CAST_LEGEND, DESK_ACTOR_ALLY_2,
+                        &item) != DESK_TASTE_LIKE) {
+        (void)fprintf(stderr, "FAIL items taste like precedence\n");
+        return false;
+    }
+    item = desk_item_make((uint16_t)postcard, 1u);
+    if (desk_item_taste(catalog, DESK_CAST_LEGEND, DESK_ACTOR_ALLY_1,
+                        &item) != DESK_TASTE_LOVE) {
+        (void)fprintf(stderr, "FAIL items taste postcard love\n");
+        return false;
+    }
+    item = desk_item_make((uint16_t)coffee, 1u);
+    if (desk_item_taste(catalog, DESK_CAST_LEGEND, DESK_ACTOR_ALLY_1,
+                        &item) != DESK_TASTE_DISLIKE) {
+        (void)fprintf(stderr, "FAIL items taste dislike\n");
+        return false;
+    }
+    item = desk_item_make((uint16_t)toolbox, 1u);
+    if (desk_item_taste(catalog, DESK_CAST_LEGEND, DESK_ACTOR_ALLY_3,
+                        &item) != DESK_TASTE_NEUTRAL) {
+        (void)fprintf(stderr, "FAIL items taste neutral default\n");
+        return false;
+    }
+    item = desk_item_make((uint16_t)DESK_ITEM_DEF_MISSING, 1u);
+    if (desk_item_taste(catalog, DESK_CAST_LEGEND, DESK_ACTOR_ALLY_1,
+                        &item) != DESK_TASTE_NEUTRAL ||
+        desk_item_taste(catalog, -1, DESK_ACTOR_ALLY_1, &item) !=
+            DESK_TASTE_NEUTRAL) {
+        (void)fprintf(stderr, "FAIL items taste missing/unknown neutral\n");
+        return false;
+    }
+    return true;
+}
+
 static bool world_states_equal(const desk_world_state *a,
                                const desk_world_state *b)
 {
@@ -2798,6 +2944,7 @@ static int items_test(void)
     }
     if (ok &&
         (catalog.definition_count != 9 || catalog.receiver_count != 3 ||
+         catalog.taste_count != 12 ||
          desk_items_find(&catalog, DESK_ITEM_MISSING_ID) !=
              (int)DESK_ITEM_DEF_MISSING ||
          desk_items_find(&catalog, "core:media/record") <= 0)) {
@@ -2805,6 +2952,7 @@ static int items_test(void)
         ok = false;
     }
     if (ok && !items_catalog_cases(directory)) ok = false;
+    if (ok && !items_taste_cases(&catalog)) ok = false;
     if (ok && !items_stack_cases(&catalog)) ok = false;
     if (ok && !items_state_cases(directory, &catalog)) ok = false;
     if (!remove_tree(directory)) {
@@ -2813,10 +2961,11 @@ static int items_test(void)
     }
     if (!ok) return EXIT_FAILURE;
     (void)printf(
-        "PASS items definitions=%d receivers=%d negative-cases=%zu "
-        "move=empty+merge-spill+swap+same "
+        "PASS items definitions=%d receivers=%d tastes=%d "
+        "negative-cases=%zu move=empty+merge-spill+swap+same "
         "state=round-trip+orphan+corruption\n",
         catalog.definition_count, catalog.receiver_count,
+        catalog.taste_count,
         sizeof CATALOG_CASES / sizeof CATALOG_CASES[0] - 1u);
     return EXIT_SUCCESS;
 }

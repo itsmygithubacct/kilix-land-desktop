@@ -16,6 +16,8 @@ import sys
 
 MAX_DEFINITIONS = 63  # catalog slot 0 is the compiled missing item
 MAX_RECEIVERS = 16
+MAX_TASTES = 12
+MAX_TASTE_ENTRIES = 8
 ID_CAPACITY = 48
 NAME_CAPACITY = 40
 DESCRIPTION_CAPACITY = 96
@@ -31,12 +33,14 @@ BEHAVIORS = ("hold", "drink", "use-tool", "equip", "place", "unlock")
 TAGS = ("drink", "food", "media", "tool", "wearable", "placeable", "decor",
         "key", "giftable", "quest", "light", "discardable",
         "receiver-input")
+TASTE_CASTS = ("legend", "chumrunner", "fantasy", "pleb-bound")
 
 ITEM_KEYS = {"id", "name", "description", "family", "behavior", "sprite",
              "max_stack", "tags", "effect_ticks"}
 RECEIVER_KEYS = {"id", "accept_any_tag", "accept_all_tags", "accept_item",
                  "accept_family", "consume", "processing_ticks", "result",
                  "output"}
+TASTE_KEYS = {"cast", "actor", "love", "like", "dislike"}
 ACCEPT_KEYS = ("accept_any_tag", "accept_all_tags", "accept_item",
                "accept_family")
 
@@ -194,6 +198,49 @@ def check_receiver(index, receiver, ids, item_ids):
                  "in receiver")
 
 
+def check_taste_entries(value, label, item_ids):
+    if not isinstance(value, list):
+        fail(f"{label}: must be an array of taste entries")
+    if len(value) > MAX_TASTE_ENTRIES:
+        fail(f"{label}: more than {MAX_TASTE_ENTRIES} taste entries")
+    seen = set()
+    for entry in value:
+        if not isinstance(entry, str):
+            fail(f"{label}: taste entry must be a string")
+        if entry in seen:
+            fail(f"{label}: duplicate taste entry '{entry}'")
+        seen.add(entry)
+        if ":" in entry:
+            if entry not in item_ids:
+                fail(f"{label}: unknown taste entry '{entry}'")
+        elif entry not in TAGS:
+            fail(f"{label}: unknown taste entry '{entry}'")
+
+
+def check_taste(index, taste, pairs, item_ids):
+    label = f"tastes[{index}]"
+    if not isinstance(taste, dict):
+        fail(f"{label}: must be an object")
+    unknown = set(taste) - TASTE_KEYS
+    if unknown:
+        fail(f"{label}: unknown keys {', '.join(sorted(unknown))}")
+    if "cast" not in taste:
+        fail(f"{label}: missing 'cast'")
+    if "actor" not in taste:
+        fail(f"{label}: missing 'actor'")
+    cast = taste["cast"]
+    if not isinstance(cast, str) or cast not in TASTE_CASTS:
+        fail(f"{label}: unknown taste cast '{cast}'")
+    check_int(taste["actor"], f"{label}.actor", 1, 3)
+    pair = (cast, taste["actor"])
+    if pair in pairs:
+        fail(f"{label}: duplicate taste pair '{cast}' actor {taste['actor']}")
+    pairs.add(pair)
+    for tier in ("love", "like", "dislike"):
+        if tier in taste:
+            check_taste_entries(taste[tier], f"{label}.{tier}", item_ids)
+
+
 def check_art(items_path, definitions):
     """The committed desktop-items artifacts: atlas geometry, manifest
     hash, provenance record, and a sprite column for every definition."""
@@ -251,7 +298,8 @@ def main():
     check_c_parser_subset(text)
     catalog = json.loads(text, object_pairs_hook=reject_duplicate_keys)
 
-    unknown = set(catalog) - {"items", "definitions", "receivers"}
+    unknown = set(catalog) - {"items", "definitions", "receivers",
+                              "tastes"}
     if unknown:
         fail(f"unknown keys {', '.join(sorted(unknown))} at top level")
     if catalog.get("items") != 1:
@@ -266,6 +314,15 @@ def main():
     for index, item in enumerate(definitions):
         check_definition(index, item, item_ids)
 
+    tastes = catalog.get("tastes", [])
+    if not isinstance(tastes, list):
+        fail("tastes must be an array")
+    if len(tastes) > MAX_TASTES:
+        fail(f"more than {MAX_TASTES} tastes")
+    taste_pairs = set()
+    for index, taste in enumerate(tastes):
+        check_taste(index, taste, taste_pairs, item_ids)
+
     receivers = catalog.get("receivers", [])
     if not isinstance(receivers, list):
         fail("receivers must be an array")
@@ -278,7 +335,8 @@ def main():
     check_art(path, definitions)
 
     print(f"items: OK ({len(definitions)} definitions, "
-          f"{len(receivers)} receivers, art verified)")
+          f"{len(receivers)} receivers, {len(tastes)} tastes, "
+          "art verified)")
 
 
 if __name__ == "__main__":

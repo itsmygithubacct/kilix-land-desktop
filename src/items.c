@@ -48,6 +48,12 @@ static const char *const ITEM_BEHAVIOR_NAMES[DESK_ITEM_BEHAVIOR_COUNT] = {
     "hold", "drink", "use-tool", "equip", "place", "unlock"
 };
 
+static const char *const ITEM_TASTE_CAST_NAMES[] = {
+    "legend", "chumrunner", "fantasy", "pleb-bound"
+};
+#define ITEM_TASTE_CAST_COUNT \
+    ((int)(sizeof ITEM_TASTE_CAST_NAMES / sizeof ITEM_TASTE_CAST_NAMES[0]))
+
 int desk_item_tag_index(const char *name)
 {
     int index;
@@ -79,6 +85,15 @@ static int behavior_from_string(const char *name)
 
     for (index = 0; index < DESK_ITEM_BEHAVIOR_COUNT; ++index)
         if (strcmp(ITEM_BEHAVIOR_NAMES[index], name) == 0) return index;
+    return -1;
+}
+
+static int taste_cast_from_string(const char *name)
+{
+    int index;
+
+    for (index = 0; index < ITEM_TASTE_CAST_COUNT; ++index)
+        if (strcmp(ITEM_TASTE_CAST_NAMES[index], name) == 0) return index;
     return -1;
 }
 
@@ -190,6 +205,51 @@ bool desk_receiver_accepts(const desk_item_catalog *catalog,
     return false;
 }
 
+static bool taste_matches_item(const desk_item_taste_match *match,
+                               uint16_t definition)
+{
+    int index;
+
+    for (index = 0; index < (int)match->item_count; ++index)
+        if (match->items[index] == definition) return true;
+    return false;
+}
+
+desk_taste desk_item_taste(const desk_item_catalog *catalog, int cast,
+                           int actor, const desk_item *item)
+{
+    const desk_item_taste_rule *rule = NULL;
+    const desk_item_def *def;
+    int index;
+
+    if (!catalog || desk_item_is_empty(item) ||
+        item->definition == (uint16_t)DESK_ITEM_DEF_MISSING)
+        return DESK_TASTE_NEUTRAL;
+    def = desk_items_def(catalog, item->definition);
+    if (!def) return DESK_TASTE_NEUTRAL;
+    for (index = 0; index < catalog->taste_count; ++index)
+        if ((int)catalog->tastes[index].cast == cast &&
+            (int)catalog->tastes[index].actor == actor) {
+            rule = &catalog->tastes[index];
+            break;
+        }
+    if (!rule) return DESK_TASTE_NEUTRAL;
+
+    /* Exact item matches outrank every tag match. Within either
+     * specificity the warmer reaction wins. */
+    if (taste_matches_item(&rule->love, item->definition))
+        return DESK_TASTE_LOVE;
+    if (taste_matches_item(&rule->like, item->definition))
+        return DESK_TASTE_LIKE;
+    if (taste_matches_item(&rule->dislike, item->definition))
+        return DESK_TASTE_DISLIKE;
+    if ((def->tags & rule->love.tags) != 0u) return DESK_TASTE_LOVE;
+    if ((def->tags & rule->like.tags) != 0u) return DESK_TASTE_LIKE;
+    if ((def->tags & rule->dislike.tags) != 0u)
+        return DESK_TASTE_DISLIKE;
+    return DESK_TASTE_NEUTRAL;
+}
+
 /* ---- catalog parsing ---------------------------------------------------- */
 
 /* Receiver accept_item/output references may appear before their
@@ -202,6 +262,19 @@ typedef struct receiver_staging {
     size_t output_offset;
     bool output_seen;
 } receiver_staging;
+
+typedef struct taste_list_staging {
+    char item_ids[DESK_MAX_TASTE_ENTRIES][DESK_ITEM_ID_CAPACITY];
+    size_t offsets[DESK_MAX_TASTE_ENTRIES];
+    uint8_t item_count;
+    uint8_t entry_count;
+} taste_list_staging;
+
+typedef struct taste_staging {
+    taste_list_staging love;
+    taste_list_staging like;
+    taste_list_staging dislike;
+} taste_staging;
 
 static void install_missing_definition(desk_item_catalog *catalog)
 {
@@ -274,6 +347,133 @@ static bool parse_tag_array(desk_json_reader *p, desk_item_tags *tags)
                                      name);
         *tags |= (desk_item_tags)1u << (unsigned int)tag;
     }
+}
+
+static bool parse_taste_array(desk_json_reader *p,
+                              desk_item_taste_match *match,
+                              taste_list_staging *staging,
+                              const char *tier)
+{
+    bool first = true;
+
+    if (!desk_json_expect(p, '['))
+        return false;
+    for (;;) {
+        char name[DESK_ITEM_ID_CAPACITY];
+        size_t value_offset;
+        int index;
+        int step = desk_json_next_element(p, &first);
+
+        if (step < 0)
+            return false;
+        if (step == 0)
+            return true;
+        desk_json_skip_ws(p);
+        value_offset = p->offset;
+        if (staging->entry_count >= (uint8_t)DESK_MAX_TASTE_ENTRIES)
+            return desk_json_fail_at(
+                p, value_offset, "more than %d taste entries in %s",
+                DESK_MAX_TASTE_ENTRIES, tier);
+        if (!desk_json_parse_string(p, name, sizeof name))
+            return false;
+        if (strchr(name, ':')) {
+            for (index = 0; index < (int)staging->item_count; ++index)
+                if (strcmp(staging->item_ids[index], name) == 0)
+                    return desk_json_fail_at(
+                        p, value_offset,
+                        "duplicate taste entry '%s' in %s", name, tier);
+            (void)snprintf(staging->item_ids[staging->item_count],
+                           sizeof staging->item_ids[staging->item_count],
+                           "%s", name);
+            staging->offsets[staging->item_count] = value_offset;
+            staging->item_count++;
+        } else {
+            int tag = desk_item_tag_index(name);
+            desk_item_tags bit;
+
+            if (tag < 0)
+                return desk_json_fail_at(p, value_offset,
+                                         "unknown taste entry '%s'", name);
+            bit = (desk_item_tags)1u << (unsigned int)tag;
+            if ((match->tags & bit) != 0u)
+                return desk_json_fail_at(
+                    p, value_offset,
+                    "duplicate taste entry '%s' in %s", name, tier);
+            match->tags |= bit;
+        }
+        staging->entry_count++;
+    }
+}
+
+static bool parse_taste(desk_json_reader *p, desk_item_taste_rule *rule,
+                        taste_staging *staging)
+{
+    bool first = true;
+    unsigned seen = 0u;
+    size_t start;
+    char key[32];
+
+    memset(rule, 0, sizeof *rule);
+    memset(staging, 0, sizeof *staging);
+    desk_json_skip_ws(p);
+    start = p->offset;
+    if (!desk_json_expect(p, '{'))
+        return false;
+    for (;;) {
+        int step = desk_json_next_key(p, &first, key, sizeof key);
+
+        if (step < 0)
+            return false;
+        if (step == 0)
+            break;
+        if (strcmp(key, "cast") == 0) {
+            char name[24];
+            size_t value_offset;
+            int cast;
+
+            if (!desk_json_claim_key(p, &seen, 1u << 0, key))
+                return false;
+            desk_json_skip_ws(p);
+            value_offset = p->offset;
+            if (!desk_json_parse_string(p, name, sizeof name))
+                return false;
+            cast = taste_cast_from_string(name);
+            if (cast < 0)
+                return desk_json_fail_at(p, value_offset,
+                                         "unknown taste cast '%s'", name);
+            rule->cast = (uint8_t)cast;
+        } else if (strcmp(key, "actor") == 0) {
+            int32_t actor = 0;
+
+            if (!desk_json_claim_key(p, &seen, 1u << 1, key) ||
+                !parse_bounded_int(p, 1, 3, &actor, "taste actor"))
+                return false;
+            rule->actor = (uint8_t)actor;
+        } else if (strcmp(key, "love") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 2, key) ||
+                !parse_taste_array(p, &rule->love, &staging->love,
+                                   "love"))
+                return false;
+        } else if (strcmp(key, "like") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 3, key) ||
+                !parse_taste_array(p, &rule->like, &staging->like,
+                                   "like"))
+                return false;
+        } else if (strcmp(key, "dislike") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 4, key) ||
+                !parse_taste_array(p, &rule->dislike, &staging->dislike,
+                                   "dislike"))
+                return false;
+        } else {
+            return desk_json_fail_at(p, p->key_offset,
+                                     "unknown key '%s' in taste", key);
+        }
+    }
+    if ((seen & (1u << 0)) == 0u)
+        return desk_json_fail_at(p, start, "taste missing 'cast'");
+    if ((seen & (1u << 1)) == 0u)
+        return desk_json_fail_at(p, start, "taste missing 'actor'");
+    return true;
 }
 
 static bool parse_definition(desk_json_reader *p, desk_item_def *def)
@@ -551,12 +751,33 @@ static bool parse_receiver(desk_json_reader *p, desk_receiver_rule *rule,
     return true;
 }
 
+static bool resolve_taste_array(desk_json_reader *p,
+                                const desk_item_catalog *catalog,
+                                desk_item_taste_match *match,
+                                const taste_list_staging *staging)
+{
+    int index;
+
+    for (index = 0; index < (int)staging->item_count; ++index) {
+        int found = desk_items_find(catalog, staging->item_ids[index]);
+
+        if (found <= 0)
+            return desk_json_fail_at(p, staging->offsets[index],
+                                     "unknown taste entry '%s'",
+                                     staging->item_ids[index]);
+        match->items[match->item_count] = (uint16_t)found;
+        match->item_count++;
+    }
+    return true;
+}
+
 bool desk_items_load(desk_item_catalog *catalog, const char *path,
                      char *error, size_t error_size)
 {
     /* Bounded read: items.json is a few KiB; 64 KiB is a hard ceiling. */
     static char file_text[DESK_ITEMS_FILE_CAPACITY + 1u];
-    receiver_staging staging[DESK_MAX_RECEIVER_RULES];
+    receiver_staging receiver_stages[DESK_MAX_RECEIVER_RULES];
+    taste_staging taste_stages[DESK_MAX_TASTE_RULES];
     desk_json_reader parser_state;
     bool first = true;
     unsigned seen = 0u;
@@ -568,6 +789,8 @@ bool desk_items_load(desk_item_catalog *catalog, const char *path,
     if (!catalog)
         return false;
     memset(catalog, 0, sizeof *catalog);
+    memset(receiver_stages, 0, sizeof receiver_stages);
+    memset(taste_stages, 0, sizeof taste_stages);
     install_missing_definition(catalog);
 
     if (!desk_json_open(&parser_state, path, "items.json", file_text,
@@ -664,7 +887,8 @@ bool desk_items_load(desk_item_catalog *catalog, const char *path,
                 desk_json_skip_ws(&parser_state);
                 entry_offset = parser_state.offset;
                 if (!parse_receiver(&parser_state, rule,
-                                    &staging[catalog->receiver_count]))
+                                    &receiver_stages[
+                                        catalog->receiver_count]))
                     return false;
                 for (duplicate = 0; duplicate < catalog->receiver_count;
                      ++duplicate)
@@ -674,6 +898,46 @@ bool desk_items_load(desk_item_catalog *catalog, const char *path,
                             &parser_state, entry_offset,
                             "duplicate receiver id '%s'", rule->id);
                 catalog->receiver_count++;
+            }
+        } else if (strcmp(key, "tastes") == 0) {
+            bool array_first = true;
+
+            if (!desk_json_claim_key(&parser_state, &seen, 1u << 3, key))
+                return false;
+            if (!desk_json_expect(&parser_state, '['))
+                return false;
+            for (;;) {
+                desk_item_taste_rule *rule;
+                size_t entry_offset;
+                int duplicate;
+                int step2 = desk_json_next_element(&parser_state,
+                                                   &array_first);
+
+                if (step2 < 0)
+                    return false;
+                if (step2 == 0)
+                    break;
+                if (catalog->taste_count >= DESK_MAX_TASTE_RULES)
+                    return desk_json_fail_at(&parser_state,
+                                             parser_state.offset,
+                                             "more than %d tastes",
+                                             DESK_MAX_TASTE_RULES);
+                rule = &catalog->tastes[catalog->taste_count];
+                desk_json_skip_ws(&parser_state);
+                entry_offset = parser_state.offset;
+                if (!parse_taste(&parser_state, rule,
+                                 &taste_stages[catalog->taste_count]))
+                    return false;
+                for (duplicate = 0; duplicate < catalog->taste_count;
+                     ++duplicate)
+                    if (catalog->tastes[duplicate].cast == rule->cast &&
+                        catalog->tastes[duplicate].actor == rule->actor)
+                        return desk_json_fail_at(
+                            &parser_state, entry_offset,
+                            "duplicate taste pair '%s' actor %u",
+                            ITEM_TASTE_CAST_NAMES[rule->cast],
+                            (unsigned int)rule->actor);
+                catalog->taste_count++;
             }
         } else {
             return desk_json_fail_at(&parser_state, parser_state.key_offset,
@@ -696,25 +960,38 @@ bool desk_items_load(desk_item_catalog *catalog, const char *path,
         desk_receiver_rule *rule = &catalog->receivers[index];
 
         if (rule->match == DESK_RECEIVER_MATCH_ITEM) {
-            int found = desk_items_find(catalog, staging[index].item_id);
+            int found = desk_items_find(
+                catalog, receiver_stages[index].item_id);
 
             if (found <= 0)
                 return desk_json_fail_at(&parser_state,
-                                         staging[index].offset,
+                                         receiver_stages[index].offset,
                                          "unknown item '%s' in receiver",
-                                         staging[index].item_id);
+                                         receiver_stages[index].item_id);
             rule->item = (uint16_t)found;
         }
-        if (staging[index].output_seen) {
-            int found = desk_items_find(catalog, staging[index].output_id);
+        if (receiver_stages[index].output_seen) {
+            int found = desk_items_find(
+                catalog, receiver_stages[index].output_id);
 
             if (found <= 0)
                 return desk_json_fail_at(
-                    &parser_state, staging[index].output_offset,
+                    &parser_state, receiver_stages[index].output_offset,
                     "unknown output item '%s' in receiver",
-                    staging[index].output_id);
+                    receiver_stages[index].output_id);
             rule->output = (uint16_t)found;
         }
+    }
+    for (index = 0; index < catalog->taste_count; ++index) {
+        desk_item_taste_rule *rule = &catalog->tastes[index];
+
+        if (!resolve_taste_array(&parser_state, catalog, &rule->love,
+                                 &taste_stages[index].love) ||
+            !resolve_taste_array(&parser_state, catalog, &rule->like,
+                                 &taste_stages[index].like) ||
+            !resolve_taste_array(&parser_state, catalog, &rule->dislike,
+                                 &taste_stages[index].dislike))
+            return false;
     }
     return true;
 }
