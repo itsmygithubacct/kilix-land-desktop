@@ -86,7 +86,8 @@ typedef enum desk_mode {
     DESK_MODE_DIALOGUE = 2,
     DESK_MODE_PAUSE = 3,
     DESK_MODE_CONFIRM = 4,
-    DESK_MODE_STATUS = 5
+    DESK_MODE_STATUS = 5,
+    DESK_MODE_INVENTORY = 6
 } desk_mode;
 
 typedef enum desk_wizard_step {
@@ -333,6 +334,8 @@ typedef struct desk_state {
     desk_confirm confirm;
     int confirm_cursor;
     int pause_cursor;
+    int inventory_cursor;
+    int inventory_mark; /* -1 = none */
     bool debug_menu;  /* desktop.conf debug_menu flag, read at pause open */
     bool pause_debug; /* inside the Debug submenu */
     char status_lines[DESK_STATUS_LINE_COUNT][DESK_STATUS_LINE_CAPACITY];
@@ -438,9 +441,10 @@ bool desk_interact(desk_state *state, const desk_world *world);
  * placement). Falls back to desk_interact while the slot is empty. */
 bool desk_use_item(desk_state *state, const desk_world *world);
 void desk_cancel(desk_state *state, const desk_world *world);
-/* Hotbar selection and the explicit drop action; all no-ops outside room
- * mode. Drop places the whole selected stack on clear floor in front of
- * the player and never happens implicitly. */
+/* The full inventory panel toggles only from room mode and never while an
+ * action owns the player. Hotbar selection also remains live in the panel;
+ * the explicit drop action remains room-only. */
+bool desk_toggle_inventory(desk_state *state, const desk_world *world);
 void desk_select_slot(desk_state *state, int slot);
 void desk_cycle_slot(desk_state *state, int delta);
 bool desk_drop_selected(desk_state *state, const desk_world *world);

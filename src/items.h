@@ -190,6 +190,12 @@ bool desk_inventory_commit_add(desk_inventory *inventory,
                                const desk_item_catalog *catalog,
                                const desk_item *item,
                                const desk_item_plan *plan);
+/* Rearrange two slots in place: no-op when equal, move onto empty,
+ * merge compatible stacks up to max_stack (remainder stays at from),
+ * otherwise swap. Returns false only on invalid input. */
+bool desk_inventory_move(desk_inventory *inventory,
+                         const desk_item_catalog *catalog, int from,
+                         int to);
 bool desk_inventory_plan_remove(const desk_inventory *inventory, int slot,
                                 uint16_t count, desk_item_plan *plan);
 bool desk_inventory_commit_remove(desk_inventory *inventory,

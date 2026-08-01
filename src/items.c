@@ -921,6 +921,53 @@ bool desk_inventory_commit_add(desk_inventory *inventory,
     return true;
 }
 
+bool desk_inventory_move(desk_inventory *inventory,
+                         const desk_item_catalog *catalog, int from,
+                         int to)
+{
+    desk_item *source;
+    desk_item *destination;
+
+    if (!inventory || !catalog || from < 0 ||
+        from >= DESK_INVENTORY_SLOTS || to < 0 ||
+        to >= DESK_INVENTORY_SLOTS)
+        return false;
+    source = &inventory->slots[from];
+    destination = &inventory->slots[to];
+    if (!desk_item_valid(catalog, source) ||
+        !desk_item_valid(catalog, destination))
+        return false;
+    if (from == to || desk_item_is_empty(source)) return true;
+    if (desk_item_is_empty(destination)) {
+        *destination = *source;
+        desk_item_clear(source);
+    } else if (desk_item_can_stack(catalog, source, destination)) {
+        const desk_item_def *def =
+            desk_items_def(catalog, source->definition);
+        uint16_t space;
+        uint16_t moved;
+
+        if (!def || destination->quantity > def->max_stack) return false;
+        space = (uint16_t)(def->max_stack - destination->quantity);
+        if (space == 0u) return true;
+        moved = source->quantity < space ? source->quantity : space;
+        destination->quantity =
+            (uint16_t)(destination->quantity + moved);
+        source->quantity = (uint16_t)(source->quantity - moved);
+        if (source->quantity == 0u) desk_item_clear(source);
+    } else {
+        desk_item swap = *destination;
+
+        *destination = *source;
+        *source = swap;
+    }
+    inventory->generation[from] =
+        (uint16_t)(inventory->generation[from] + 1u);
+    inventory->generation[to] =
+        (uint16_t)(inventory->generation[to] + 1u);
+    return true;
+}
+
 static bool plan_take(const desk_inventory *inventory, int slot,
                       uint16_t count, desk_item_plan_kind kind,
                       desk_item_plan *plan)

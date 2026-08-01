@@ -29,11 +29,12 @@ typedef struct desk_key_input {
     bool enter_pressed;
     bool space_pressed;
     bool cancel_pressed;
-    /* Hotbar intents; desk.c ignores them outside room mode, so digits
-     * typed into the wizard name field stay plain text. */
+    /* Hotbar intents; desk.c accepts selection in room/inventory modes,
+     * so digits typed into the wizard name field stay plain text. */
     int select_slot; /* -1 = none; 0..11 from 1..9, 0, -, = */
     int cycle_slot;  /* sum of [ (-1) and ] (+1) presses */
     bool drop_pressed;
+    bool open_inventory;
     int backspace_count;
     int text_count;
     uint32_t text[DESK_TEXT_QUEUE_CAPACITY];
@@ -160,6 +161,9 @@ static bool poll_input(desk_key_input *input, bool *quit_requested)
                 if (codepoint == (uint32_t)'q' ||
                     codepoint == (uint32_t)'Q')
                     input->drop_pressed = true;
+                if (codepoint == (uint32_t)'i' ||
+                    codepoint == (uint32_t)'I')
+                    input->open_inventory = true;
             }
             if (codepoint >= 32u && codepoint <= 126u &&
                 input->text_count < DESK_TEXT_QUEUE_CAPACITY)
@@ -201,6 +205,8 @@ static void merge_pending_input(desk_key_input *pending,
     pending->cycle_slot += current->cycle_slot;
     pending->drop_pressed = pending->drop_pressed ||
                             current->drop_pressed;
+    pending->open_inventory = pending->open_inventory ||
+                              current->open_inventory;
     pending->backspace_count += current->backspace_count;
     for (index = 0; index < current->text_count; ++index) {
         if (pending->text_count >= DESK_TEXT_QUEUE_CAPACITY) break;
@@ -218,6 +224,7 @@ static void consume_edge_input(desk_key_input *input)
     input->select_slot = -1;
     input->cycle_slot = 0;
     input->drop_pressed = false;
+    input->open_inventory = false;
     input->backspace_count = 0;
     input->text_count = 0;
 }
@@ -784,6 +791,129 @@ static int selftest_body(void)
     state.outfit_dirty = false;
     (void)desk_take_audio_events(&state, events);
 
+    /* Full inventory panel: movement is independent of the selected
+     * hotbar index, and Enter drives move, merge, and swap in place. */
+    {
+        int coffee = desk_items_find(&catalog, "core:drink/coffee");
+        int record = desk_items_find(&catalog, "core:media/record");
+
+        if (coffee <= 0 || record <= 0) {
+            (void)fprintf(stderr, "FAIL selftest inventory lookup\n");
+            return EXIT_FAILURE;
+        }
+        desk_inventory_init(&state.items.inventory);
+        state.items.inventory.slots[0] =
+            desk_item_make((uint16_t)coffee, 3u);
+        state.items.inventory.slots[2] =
+            desk_item_make((uint16_t)coffee, 6u);
+        state.items.inventory.slots[3] =
+            desk_item_make((uint16_t)coffee, 5u);
+        state.items.inventory.slots[4] =
+            desk_item_make((uint16_t)record, 1u);
+        state.items.inventory.selected = 9;
+        state.inventory_cursor = 0;
+        if (!desk_toggle_inventory(&state, &world) ||
+            state.mode != DESK_MODE_INVENTORY ||
+            state.inventory_mark != -1 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest inventory open: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_select_slot(&state, 8);
+        desk_cycle_slot(&state, 1);
+        if (state.items.inventory.selected != 9 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest inventory hotbar keys: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        if (state.inventory_cursor != 1 ||
+            state.items.inventory.selected != 9 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest inventory cursor: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, -1, 0, DESK_TICK_SECONDS);
+        if (state.inventory_cursor != 0 ||
+            !desk_interact(&state, &world) ||
+            state.inventory_mark != 0 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest inventory mark: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        if (!desk_interact(&state, &world) ||
+            state.inventory_mark != -1 ||
+            !desk_item_is_empty(&state.items.inventory.slots[0]) ||
+            state.items.inventory.slots[1].quantity != 3u ||
+            state.items.inventory.generation[0] != 1u ||
+            state.items.inventory.generation[1] != 1u ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest inventory move: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        if (state.inventory_cursor != 3 ||
+            !desk_interact(&state, &world) ||
+            state.inventory_mark != 3 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest inventory merge mark: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, -1, 0, DESK_TICK_SECONDS);
+        if (!desk_interact(&state, &world) ||
+            state.items.inventory.slots[2].quantity != 8u ||
+            state.items.inventory.slots[3].quantity != 3u ||
+            state.inventory_mark != -1 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest inventory merge: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        if (!desk_interact(&state, &world) ||
+            state.inventory_mark != 3 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest inventory swap mark: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        if (!desk_interact(&state, &world) ||
+            state.items.inventory.slots[3].definition !=
+                (uint16_t)record ||
+            state.items.inventory.slots[4].definition !=
+                (uint16_t)coffee ||
+            state.items.inventory.slots[4].quantity != 3u ||
+            state.items.inventory.selected != 9 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest inventory swap: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_cancel(&state, &world);
+        if (state.mode != DESK_MODE_ROOM || state.inventory_mark != -1 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest inventory close: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        desk_inventory_init(&state.items.inventory);
+        state.inventory_cursor = 0;
+        state.world_dirty = false;
+        (void)desk_take_audio_events(&state, events);
+    }
+
     desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
     if (!state.player_moving || state.facing != DESK_FACING_RIGHT ||
         !desk_validate(&state, &world, error, sizeof error)) {
@@ -961,7 +1091,8 @@ static int selftest_body(void)
         locked_x = state.player_x;
         if (desk_use_item(&state, &world) ||
             desk_interact(&state, &world) ||
-            desk_drop_selected(&state, &world)) {
+            desk_drop_selected(&state, &world) ||
+            desk_toggle_inventory(&state, &world)) {
             (void)fprintf(stderr, "FAIL selftest mid-swing refusal\n");
             return EXIT_FAILURE;
         }
@@ -1698,7 +1829,7 @@ static int selftest_body(void)
         "receiver=insert-eject-persist drink=swallow-frame "
         "receivers=trash-consume+kettle-brew "
         "place=ghost-committed gift=handoff-frame equip=swap-persist "
-        "targets=%d\n",
+        "inventory=panel-move-merge-swap targets=%d\n",
         world.room_count, DESK_TARGET_COUNT - 1);
     return EXIT_SUCCESS;
 }
@@ -2255,8 +2386,9 @@ static bool items_stack_cases(const desk_item_catalog *catalog)
     desk_item taken;
     int coffee = desk_items_find(catalog, "core:drink/coffee");
     int record = desk_items_find(catalog, "core:media/record");
+    int plant = desk_items_find(catalog, "core:decor/houseplant");
 
-    if (coffee <= 0 || record <= 0) {
+    if (coffee <= 0 || record <= 0 || plant <= 0) {
         (void)fprintf(stderr, "FAIL items lookup\n");
         return false;
     }
@@ -2357,6 +2489,66 @@ static bool items_stack_cases(const desk_item_catalog *catalog)
         !desk_item_is_empty(&inventory.slots[2])) {
         (void)fprintf(stderr, "FAIL items split last\n");
         return false;
+    }
+
+    /* Direct rearrangement: move onto empty, merge with a spill remainder,
+     * swap incompatible items, preserve selection, and leave a same-slot
+     * no-op byte-identical. Every actual two-slot write bumps both
+     * generations. */
+    {
+        desk_inventory moved;
+        desk_inventory unchanged;
+
+        desk_inventory_init(&moved);
+        moved.selected = 0;
+        moved.slots[0] = desk_item_make((uint16_t)coffee, 3u);
+        moved.generation[0] = 4u;
+        moved.generation[1] = 9u;
+        if (!desk_inventory_move(&moved, catalog, 0, 1) ||
+            !desk_item_is_empty(&moved.slots[0]) ||
+            moved.slots[1].definition != (uint16_t)coffee ||
+            moved.slots[1].quantity != 3u || moved.generation[0] != 5u ||
+            moved.generation[1] != 10u || moved.selected != 0) {
+            (void)fprintf(stderr, "FAIL items move to empty\n");
+            return false;
+        }
+
+        desk_inventory_init(&moved);
+        moved.slots[0] = desk_item_make((uint16_t)coffee, 5u);
+        moved.slots[1] = desk_item_make((uint16_t)coffee, 6u);
+        moved.generation[0] = 12u;
+        moved.generation[1] = 20u;
+        if (!desk_inventory_move(&moved, catalog, 0, 1) ||
+            moved.slots[0].quantity != 3u ||
+            moved.slots[1].quantity != 8u ||
+            moved.generation[0] != 13u ||
+            moved.generation[1] != 21u) {
+            (void)fprintf(stderr, "FAIL items move merge spill\n");
+            return false;
+        }
+
+        desk_inventory_init(&moved);
+        moved.slots[0] = desk_item_make((uint16_t)coffee, 2u);
+        moved.slots[1] = desk_item_make((uint16_t)plant, 1u);
+        moved.generation[0] = 2u;
+        moved.generation[1] = 6u;
+        if (!desk_inventory_move(&moved, catalog, 0, 1) ||
+            moved.slots[0].definition != (uint16_t)plant ||
+            moved.slots[0].quantity != 1u ||
+            moved.slots[1].definition != (uint16_t)coffee ||
+            moved.slots[1].quantity != 2u ||
+            moved.generation[0] != 3u ||
+            moved.generation[1] != 7u) {
+            (void)fprintf(stderr, "FAIL items move incompatible swap\n");
+            return false;
+        }
+
+        unchanged = moved;
+        if (!desk_inventory_move(&moved, catalog, 1, 1) ||
+            memcmp(&moved, &unchanged, sizeof moved) != 0) {
+            (void)fprintf(stderr, "FAIL items move same-slot no-op\n");
+            return false;
+        }
     }
 
     /* Receiver rule matrix on the shipped catalog. */
@@ -2622,6 +2814,7 @@ static int items_test(void)
     if (!ok) return EXIT_FAILURE;
     (void)printf(
         "PASS items definitions=%d receivers=%d negative-cases=%zu "
+        "move=empty+merge-spill+swap+same "
         "state=round-trip+orphan+corruption\n",
         catalog.definition_count, catalog.receiver_count,
         sizeof CATALOG_CASES / sizeof CATALOG_CASES[0] - 1u);
@@ -3017,6 +3210,20 @@ static int items_render_test(const char *directory)
         }
     }
     if (success) {
+        /* Full panel: populated slots, independent hotbar selection, and
+         * an occupied source marked for rearrangement. */
+        state.inventory_cursor = 0;
+        success = desk_toggle_inventory(&state, &fixture.world) &&
+                  state.mode == DESK_MODE_INVENTORY &&
+                  desk_interact(&state, &fixture.world) &&
+                  state.inventory_mark == 0 &&
+                  fixture_snapshot(&fixture, &state, directory,
+                                   "inventory-panel");
+        if (success)
+            success = desk_toggle_inventory(&state, &fixture.world) &&
+                      state.mode == DESK_MODE_ROOM;
+    }
+    if (success) {
         /* The raised-tool frame of the swing, held item drawn at the
          * hand offset over the idle pose. */
         int toolbox = desk_items_find(&fixture.catalog,
@@ -3048,8 +3255,9 @@ static int items_render_test(const char *directory)
     fixture_close(&fixture);
     if (!success) return EXIT_FAILURE;
     (void)printf(
-        "PASS render scene=items files=4 depth=front+behind "
-        "hotbar=stack+missing tool=swing size=%dx%d directory=%s\n",
+        "PASS render scene=items files=5 depth=front+behind "
+        "hotbar=stack+missing inventory=panel-marked tool=swing "
+        "size=%dx%d directory=%s\n",
         DESK_LOGICAL_WIDTH, DESK_LOGICAL_HEIGHT, directory);
     return EXIT_SUCCESS;
 }
@@ -3182,7 +3390,9 @@ static int run_interactive(void)
             /* Enter is the interact intent, Space the use-item intent;
              * menus treat both as confirm and an empty hand falls back
              * inside desk_use_item. */
-            if (pending_input.cancel_pressed)
+            if (pending_input.open_inventory)
+                (void)desk_toggle_inventory(&state, &world);
+            else if (pending_input.cancel_pressed)
                 desk_cancel(&state, &world);
             else if (pending_input.enter_pressed)
                 (void)desk_interact(&state, &world);

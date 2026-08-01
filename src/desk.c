@@ -540,6 +540,25 @@ static bool move_cursor(int *cursor, int delta, int count)
     return true;
 }
 
+static bool move_inventory_cursor(desk_state *state, int move_x,
+                                  int move_y)
+{
+    int delta = 0;
+    int next;
+
+    if (move_y < 0) delta = -6;
+    else if (move_y > 0) delta = 6;
+    else if (move_x < 0) delta = -1;
+    else if (move_x > 0) delta = 1;
+    if (delta == 0) return false;
+    next = state->inventory_cursor + delta;
+    while (next < 0) next += DESK_INVENTORY_SLOTS;
+    while (next >= DESK_INVENTORY_SLOTS) next -= DESK_INVENTORY_SLOTS;
+    if (next == state->inventory_cursor) return false;
+    state->inventory_cursor = next;
+    return true;
+}
+
 static void sync_profile_position(desk_state *state, const desk_world *world)
 {
     const desk_room *room = current_room(state, world);
@@ -744,6 +763,7 @@ void desk_init(desk_state *state, const desk_world *world,
     state->nearest_npc = -1;
     state->nearest_world_item = -1;
     state->conversation_npc = -1;
+    state->inventory_mark = -1;
     state->facing = DESK_FACING_DOWN;
     state->pending_launch = DESK_TARGET_NONE;
     state->catalog = catalog;
@@ -1025,10 +1045,34 @@ const desk_receiver_state *desk_receiver_lookup(const desk_state *state,
     return NULL;
 }
 
+bool desk_toggle_inventory(desk_state *state, const desk_world *world)
+{
+    if (!state) return false;
+    if (state->mode == DESK_MODE_INVENTORY) {
+        state->inventory_mark = -1;
+        state->mode = DESK_MODE_ROOM;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        update_nearest(state, world);
+        return true;
+    }
+    if (state->mode != DESK_MODE_ROOM || state->action.active)
+        return false;
+    state->mode = DESK_MODE_INVENTORY;
+    state->inventory_mark = -1;
+    state->player_moving = false;
+    state->nearest_object = -1;
+    state->nearest_npc = -1;
+    state->nearest_world_item = -1;
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+    return true;
+}
+
 void desk_select_slot(desk_state *state, int slot)
 {
-    if (!state || state->mode != DESK_MODE_ROOM || slot < 0 ||
-        slot >= DESK_INVENTORY_SLOTS)
+    if (!state ||
+        (state->mode != DESK_MODE_ROOM &&
+         state->mode != DESK_MODE_INVENTORY) ||
+        slot < 0 || slot >= DESK_INVENTORY_SLOTS)
         return;
     if (state->items.inventory.selected == slot) return;
     state->items.inventory.selected = slot;
@@ -1039,7 +1083,11 @@ void desk_cycle_slot(desk_state *state, int delta)
 {
     int next;
 
-    if (!state || state->mode != DESK_MODE_ROOM || delta == 0) return;
+    if (!state ||
+        (state->mode != DESK_MODE_ROOM &&
+         state->mode != DESK_MODE_INVENTORY) ||
+        delta == 0)
+        return;
     next = state->items.inventory.selected + (delta < 0 ? -1 : 1);
     if (next < 0) next = DESK_INVENTORY_SLOTS - 1;
     if (next >= DESK_INVENTORY_SLOTS) next = 0;
@@ -1371,6 +1419,9 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
         delta = move_y != 0 ? move_y : move_x;
         if (move_cursor(&state->pause_cursor, delta,
                         desk_pause_item_count(state)))
+            queue_audio(state, DESK_AUDIO_UI_MOVE);
+    } else if (state->mode == DESK_MODE_INVENTORY) {
+        if (move_inventory_cursor(state, move_x, move_y))
             queue_audio(state, DESK_AUDIO_UI_MOVE);
     } else if (state->mode == DESK_MODE_CONFIRM) {
         delta = move_y != 0 ? move_y : move_x;
@@ -2131,6 +2182,42 @@ static bool interact_confirm(desk_state *state, const desk_world *world)
     return false;
 }
 
+static bool interact_inventory(desk_state *state)
+{
+    desk_inventory *inventory = &state->items.inventory;
+    int cursor = state->inventory_cursor;
+
+    if (cursor < 0 || cursor >= DESK_INVENTORY_SLOTS) return false;
+    if (state->inventory_mark < 0) {
+        if (desk_item_is_empty(&inventory->slots[cursor])) {
+            set_toast(state, "That inventory slot is empty.");
+            return true;
+        }
+        state->inventory_mark = cursor;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    }
+    {
+        int from = state->inventory_mark;
+        uint16_t from_generation;
+        uint16_t to_generation;
+        bool moved;
+
+        if (from < 0 || from >= DESK_INVENTORY_SLOTS) return false;
+        from_generation = inventory->generation[from];
+        to_generation = inventory->generation[cursor];
+        moved = desk_inventory_move(inventory, state->catalog, from,
+                                    cursor);
+        state->inventory_mark = -1;
+        if (!moved) return false;
+        if (inventory->generation[from] != from_generation ||
+            inventory->generation[cursor] != to_generation)
+            state->world_dirty = true;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    }
+}
+
 bool desk_interact(desk_state *state, const desk_world *world)
 {
     if (!state || !world) return false;
@@ -2150,6 +2237,8 @@ bool desk_interact(desk_state *state, const desk_world *world)
         update_nearest(state, world);
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         return true;
+    case DESK_MODE_INVENTORY:
+        return interact_inventory(state);
     }
     return false;
 }
@@ -2198,6 +2287,16 @@ void desk_cancel(desk_state *state, const desk_world *world)
         update_nearest(state, world);
         return;
     case DESK_MODE_STATUS:
+        state->mode = DESK_MODE_ROOM;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        update_nearest(state, world);
+        return;
+    case DESK_MODE_INVENTORY:
+        if (state->inventory_mark >= 0) {
+            state->inventory_mark = -1;
+            queue_audio(state, DESK_AUDIO_UI_MOVE);
+            return;
+        }
         state->mode = DESK_MODE_ROOM;
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         update_nearest(state, world);
@@ -2320,7 +2419,7 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         state->player_y > room->walk.y + room->walk.h)
         return validate_fail(error, error_size, "player outside walk rect");
     if ((int)state->mode < (int)DESK_MODE_WIZARD ||
-        (int)state->mode > (int)DESK_MODE_STATUS)
+        (int)state->mode > (int)DESK_MODE_INVENTORY)
         return validate_fail(error, error_size, "mode out of range");
     if (state->status_line_count < 0 ||
         state->status_line_count > DESK_STATUS_LINE_COUNT)
@@ -2358,6 +2457,18 @@ bool desk_validate(const desk_state *state, const desk_world *world,
                              "wizard confirm cursor out of range");
     if (state->pause_cursor < 0 || state->pause_cursor > 3)
         return validate_fail(error, error_size, "pause cursor out of range");
+    if (state->inventory_cursor < 0 ||
+        state->inventory_cursor >= DESK_INVENTORY_SLOTS)
+        return validate_fail(error, error_size,
+                             "inventory cursor out of range");
+    if (state->inventory_mark < -1 ||
+        state->inventory_mark >= DESK_INVENTORY_SLOTS)
+        return validate_fail(error, error_size,
+                             "inventory mark out of range");
+    if (state->inventory_mark >= 0 &&
+        state->mode != DESK_MODE_INVENTORY)
+        return validate_fail(error, error_size,
+                             "inventory mark outside inventory mode");
     if (state->confirm_cursor < 0 || state->confirm_cursor > 1)
         return validate_fail(error, error_size, "confirm cursor out of range");
     if ((int)state->confirm < (int)DESK_CONFIRM_NONE ||

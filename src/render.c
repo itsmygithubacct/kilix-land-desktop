@@ -9,6 +9,7 @@
 #define COLOR_PANEL UINT32_C(0x0b1020)
 #define COLOR_PANEL_LIGHT UINT32_C(0x18233a)
 #define COLOR_GOLD UINT32_C(0xf0c36b)
+#define COLOR_MARKED UINT32_C(0xb69cff)
 #define LEGEND_PLAYER_RENDER_SIZE 64
 #define STANDARD_PLAYER_RENDER_SIZE 92
 #define FANTASY_PLAYER_RENDER_WIDTH 61
@@ -1207,6 +1208,165 @@ static void draw_pause(ki_td_soft_renderer *renderer, const ki_td_view *view,
                 COLOR_MUTED, 1);
 }
 
+#define INVENTORY_SLOT_SIZE 28
+#define INVENTORY_COLUMNS 6
+
+static void inventory_description_lines(const char *text,
+                                        char lines[3][48])
+{
+    const size_t width = 43u;
+    size_t offset = 0u;
+    size_t length = text ? strlen(text) : 0u;
+    size_t line;
+
+    (void)memset(lines, 0, 3u * 48u);
+    for (line = 0u; line < 3u && offset < length; ++line) {
+        size_t remaining = length - offset;
+        size_t take = remaining < width ? remaining : width;
+
+        if (take < remaining) {
+            size_t split = take;
+
+            while (split > 20u && text[offset + split] != ' ') --split;
+            if (split > 20u) take = split;
+        }
+        (void)snprintf(lines[line], 48u, "%.*s", (int)take,
+                       text + offset);
+        offset += take;
+        while (offset < length && text[offset] == ' ') ++offset;
+    }
+}
+
+static void draw_inventory(ki_td_soft_renderer *renderer,
+                           const ki_td_view *view, sr_canvas *canvas,
+                           const desk_state *state,
+                           const desk_graphics *graphics)
+{
+    const desk_inventory *inventory = &state->items.inventory;
+    uint32_t accent = desk_actor_color(visible_cast(state),
+                                       DESK_ACTOR_HERO);
+    kilix_ui_style panel_style;
+    int cursor = clamp_int(state->inventory_cursor, 0,
+                           DESK_INVENTORY_SLOTS - 1);
+    const desk_item *cursor_item = &inventory->slots[cursor];
+    const desk_item_def *cursor_def = NULL;
+    char description[3][48];
+    char mark_label[24];
+    int slot;
+
+    ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
+                         (float)DESK_LOGICAL_WIDTH,
+                         (float)DESK_LOGICAL_HEIGHT,
+                         UINT32_C(0x02040a), 0.55f);
+    base_style(&panel_style, accent);
+    panel_style.border_color = COLOR_GOLD;
+    panel_style.padding = 8;
+    kilix_ui_draw_panel(renderer, view, (ki_td_rect){38, 25, 404, 205},
+                        &panel_style, NULL);
+    ki_td_soft_fill_rect(renderer, view, 41.0f, 28.0f, 398.0f, 3.0f,
+                         accent, 1.0f);
+    center_text(canvas, view, 240.0f, 36.0f, "INVENTORY", COLOR_INK,
+                text_scale(view));
+    if (state->inventory_mark >= 0) {
+        (void)snprintf(mark_label, sizeof mark_label, "MARKED %02d",
+                       state->inventory_mark + 1);
+        small_text(canvas, view, 350.0f, 38.0f, mark_label, COLOR_MARKED);
+    }
+    for (slot = 0; slot < DESK_INVENTORY_SLOTS; ++slot) {
+        const desk_item *item = &inventory->slots[slot];
+        int column = slot % INVENTORY_COLUMNS;
+        int row = slot / INVENTORY_COLUMNS;
+        float x = 156.0f + (float)(column * INVENTORY_SLOT_SIZE);
+        float y = 57.0f + (float)(row * INVENTORY_SLOT_SIZE);
+        bool selected = slot == inventory->selected;
+        bool marked = slot == state->inventory_mark;
+
+        ki_td_soft_fill_rect(renderer, view, x + 1.0f, y + 1.0f,
+                             (float)INVENTORY_SLOT_SIZE - 2.0f,
+                             (float)INVENTORY_SLOT_SIZE - 2.0f,
+                             COLOR_PANEL_LIGHT, 1.0f);
+        if (marked)
+            ki_td_soft_fill_rect(renderer, view, x + 2.0f, y + 2.0f,
+                                 (float)INVENTORY_SLOT_SIZE - 4.0f,
+                                 (float)INVENTORY_SLOT_SIZE - 4.0f,
+                                 COLOR_MARKED, 0.28f);
+        if (selected)
+            ki_td_soft_fill_rect(renderer, view, x + 10.0f,
+                                 y + (float)INVENTORY_SLOT_SIZE - 3.0f,
+                                 8.0f, 1.0f, COLOR_GOLD, 0.65f);
+        if (!desk_item_is_empty(item)) {
+            const desk_item_def *def =
+                desk_items_def(state->catalog, item->definition);
+            int sprite = def ? (int)def->sprite : 0;
+            ki_td_rgba8 cell;
+
+            if (desk_graphics_item_cell(graphics, visible_cast(state),
+                                        sprite, &cell))
+                ki_td_soft_rgba_resized(renderer, view, x + 3.0f,
+                                        y + 3.0f, &cell, 22, 22, 1.0f);
+            if (item->quantity > 1u) {
+                char count[8];
+
+                (void)snprintf(count, sizeof count, "x%u",
+                               (unsigned)item->quantity);
+                small_text(canvas, view, x + 13.0f, y + 17.0f, count,
+                           COLOR_INK);
+            }
+        }
+        if (marked) {
+            ki_td_soft_fill_rect(renderer, view, x, y,
+                                 (float)INVENTORY_SLOT_SIZE, 1.0f,
+                                 COLOR_MARKED, 1.0f);
+            ki_td_soft_fill_rect(renderer, view, x, y, 1.0f,
+                                 (float)INVENTORY_SLOT_SIZE,
+                                 COLOR_MARKED, 1.0f);
+            ki_td_soft_fill_rect(renderer, view,
+                                 x + (float)INVENTORY_SLOT_SIZE - 1.0f,
+                                 y, 1.0f, (float)INVENTORY_SLOT_SIZE,
+                                 COLOR_MARKED, 1.0f);
+            ki_td_soft_fill_rect(renderer, view, x,
+                                 y + (float)INVENTORY_SLOT_SIZE - 1.0f,
+                                 (float)INVENTORY_SLOT_SIZE, 1.0f,
+                                 COLOR_MARKED, 1.0f);
+        }
+        if (slot == cursor) {
+            ki_td_soft_fill_rect(renderer, view, x, y,
+                                 (float)INVENTORY_SLOT_SIZE, 2.0f,
+                                 accent, 1.0f);
+            ki_td_soft_fill_rect(renderer, view, x, y, 2.0f,
+                                 (float)INVENTORY_SLOT_SIZE, accent, 1.0f);
+            ki_td_soft_fill_rect(renderer, view,
+                                 x + (float)INVENTORY_SLOT_SIZE - 2.0f,
+                                 y, 2.0f, (float)INVENTORY_SLOT_SIZE,
+                                 accent, 1.0f);
+            ki_td_soft_fill_rect(renderer, view, x,
+                                 y + (float)INVENTORY_SLOT_SIZE - 2.0f,
+                                 (float)INVENTORY_SLOT_SIZE, 2.0f,
+                                 accent, 1.0f);
+        }
+    }
+    ki_td_soft_fill_rect(renderer, view, 54.0f, 123.0f, 372.0f, 1.0f,
+                         COLOR_PANEL_LIGHT, 1.0f);
+    if (!desk_item_is_empty(cursor_item))
+        cursor_def = desk_items_def(state->catalog,
+                                    cursor_item->definition);
+    if (cursor_def) {
+        small_text(canvas, view, 58.0f, 131.0f, cursor_def->name,
+                   COLOR_GOLD);
+        inventory_description_lines(cursor_def->description, description);
+        for (slot = 0; slot < 3; ++slot)
+            small_text(canvas, view, 58.0f, 146.0f + (float)(slot * 13),
+                       description[slot], COLOR_INK);
+    } else {
+        center_text(canvas, view, 240.0f, 152.0f,
+                    "EMPTY SLOT - CHOOSE AN OCCUPIED SLOT TO MARK",
+                    COLOR_MUTED, 1);
+    }
+    center_text(canvas, view, 240.0f, 211.0f,
+                "ARROWS MOVE  ENTER MARK/PLACE  I CLOSE  ESC BACK",
+                COLOR_MUTED, 1);
+}
+
 static void draw_confirm(ki_td_soft_renderer *renderer,
                          const ki_td_view *view, sr_canvas *canvas,
                          const desk_state *state)
@@ -1631,7 +1791,8 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
     }
     draw_hotbar(renderer, &view, canvas, state, graphics);
     draw_interact_prompt(renderer, &view, canvas, state, world);
-    draw_toast(renderer, &view, canvas, state);
+    if (state->mode != DESK_MODE_INVENTORY)
+        draw_toast(renderer, &view, canvas, state);
     if (state->mode == DESK_MODE_DIALOGUE)
         draw_dialogue(renderer, &view, canvas, state, graphics);
     else if (state->mode == DESK_MODE_PAUSE)
@@ -1640,5 +1801,9 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
         draw_confirm(renderer, &view, canvas, state);
     else if (state->mode == DESK_MODE_STATUS)
         draw_status(renderer, &view, canvas, state);
+    else if (state->mode == DESK_MODE_INVENTORY) {
+        draw_inventory(renderer, &view, canvas, state, graphics);
+        draw_toast(renderer, &view, canvas, state);
+    }
     return ki_td_soft_pack_rgba(renderer) != NULL;
 }
