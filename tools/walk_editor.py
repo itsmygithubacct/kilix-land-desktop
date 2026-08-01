@@ -3,12 +3,12 @@
 
 Shows a room plate on a 6-logical-pixel grid with the walkable area tinted
 translucent white, plus context markers (doors blue, object rects amber
-outlines, NPC anchors magenta, incoming door spawns green). Paint with the
-mouse: left button paints walkable, right button paints blocked. Saving
-decomposes the painted cells into the world.json model — one walk bounding
-rect plus obstacle rects (greedy exact cover) — and rewrites the file, then
-runs tools/validate_world.py so a spawn painted into a wall is caught
-immediately.
+outlines and receiver hints, NPC anchors magenta, incoming door spawns green,
+item spawns cyan). Paint with the mouse: left button paints walkable, right
+button paints blocked. Saving decomposes the painted cells into the world.json
+model — one walk bounding rect plus obstacle rects (greedy exact cover) — and
+rewrites the file, then runs tools/validate_world.py so a spawn painted into a
+wall is caught immediately.
 
 Runs inside kitty (kitty graphics protocol + SGR pixel mouse). Kitty hides
 the system pointer over the drawn image, so the editor tracks hover motion
@@ -321,6 +321,13 @@ def incoming_spawns(world, room_id):
                 spawn = door.get("spawn", {})
                 points.append((spawn.get("x", 0), spawn.get("y", 0)))
     return points
+
+
+def item_spawn_label(spawn):
+    """Compact display label: spawn id, item leaf, and non-unit count."""
+    item = spawn["item"].rsplit("/", 1)[-1]
+    quantity = f" x{spawn['quantity']}" if spawn["quantity"] > 1 else ""
+    return f"{spawn['id']}: {item}{quantity}"
 
 
 # --------------------------------------------------------------------------
@@ -701,9 +708,9 @@ def walk_tint(grid, c0x=0, c0y=0, cols=COLS, rows=ROWS):
 
 def scene_overlay(world, room, show_grid=True):
     """-> RGBA overlay of grid lines + context markers (doors, object
-    rects, NPC anchors, incoming spawns) — the layer compose_scene
-    stacks above the tinted plate.  Cached by the run loop alongside the
-    scene so painting can recomposite single regions."""
+    rects, NPC anchors, incoming door spawns, item spawns) — the layer
+    compose_scene stacks above the tinted plate.  Cached by the run loop
+    alongside the scene so painting can recomposite single regions."""
     from PIL import Image, ImageDraw
     overlay = Image.new("RGBA", (DISPLAY_W, DISPLAY_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -721,18 +728,38 @@ def scene_overlay(world, room, show_grid=True):
                 (rect["x"] + rect["w"]) * SCALE,
                 (rect["y"] + rect["h"]) * SCALE]
 
+    def label(x, y, text, color):
+        """Draw default-font text with its ink clamped to the canvas."""
+        left, top, right, bottom = draw.textbbox((0, 0), text)
+        width, height = right - left, bottom - top
+        x = max(0, min(int(round(x)), max(0, DISPLAY_W - width)))
+        y = max(0, min(int(round(y)), max(0, DISPLAY_H - height)))
+        draw.text((x - left, y - top), text, fill=color)
+
     for door in room.get("doors", []):
         draw.rectangle(scaled(door["rect"]), fill=(80, 140, 255, 90),
                        outline=(120, 170, 255, 200))
     for entry in room.get("objects", []):
-        draw.rectangle(scaled(entry["rect"]), outline=(255, 210, 80, 200),
-                       width=2)
+        bounds = scaled(entry["rect"])
+        color = (255, 210, 80, 255)
+        draw.rectangle(bounds, outline=(255, 210, 80, 200), width=2)
+        text = entry["id"]
+        if "receiver" in entry:
+            text += f" [R {entry['receiver']}]"
+        label(bounds[0] + 2, bounds[1] - 12, text, color)
     for npc in room.get("npcs", []):
         x, y = npc["x"] * SCALE, npc["y"] * SCALE
         draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(240, 80, 220, 220))
     for x, y in incoming_spawns(world, room["id"]):
         x, y = x * SCALE, y * SCALE
         draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(90, 230, 120, 230))
+    for spawn in room.get("item_spawns", []):
+        x, y = spawn["x"] * SCALE, spawn["y"] * SCALE
+        color = (80, 235, 245, 255)
+        draw.polygon([(x, y - 6), (x + 6, y),
+                      (x, y + 6), (x - 6, y)],
+                     fill=(25, 90, 100, 230), outline=color)
+        label(x + 9, y - 5, item_spawn_label(spawn), color)
     return overlay
 
 
