@@ -851,7 +851,8 @@ bool desk_drop_selected(desk_state *state, const desk_world *world)
     int slot;
     int index;
 
-    if (!state || !state->catalog || state->mode != DESK_MODE_ROOM)
+    if (!state || !state->catalog || state->mode != DESK_MODE_ROOM ||
+        state->action.active)
         return false;
     room = current_room(state, world);
     if (!room) return false;
@@ -963,6 +964,136 @@ static void update_wizard_cursors(desk_state *state, int move_x, int move_y)
     }
 }
 
+/* Logical clip descriptors shared by every cast: frame counts, uniform
+ * per-frame tick durations, loop flags, and the authored APPLY frame for
+ * one-shot action clips. Which atlas cell a frame shows stays with
+ * render.c per cast; gameplay only ever sees these numbers. */
+typedef struct desk_clip_descriptor {
+    int frames;
+    int frame_ticks;
+    bool looping;
+    int apply_frame; /* -1 = no gameplay event */
+} desk_clip_descriptor;
+
+static const desk_clip_descriptor CLIP_TABLE[DESK_CLIP_COUNT] = {
+    {4, 11, true, -1}, /* idle */
+    {4, 7, true, -1},  /* walk */
+    {4, 8, false, 2},  /* use-tool: impact on the strike frame */
+    {4, 9, false, 2},  /* drink: swallow near the cup-up frame */
+    {4, 8, false, 2},  /* give: transfer at the handoff frame */
+};
+
+static void action_reset(desk_state *state)
+{
+    memset(&state->action, 0, sizeof state->action);
+    state->player_animator.movement_locked = false;
+    if (state->player_animator.clip != DESK_CLIP_IDLE &&
+        state->player_animator.clip != DESK_CLIP_WALK) {
+        state->player_animator.clip = DESK_CLIP_IDLE;
+        state->player_animator.frame = 0;
+        state->player_animator.frame_ticks = 0;
+    }
+}
+
+/* The exactly-once world mutation, fired by the clip's APPLY frame. Every
+ * assumption the plan recorded is re-verified; a stale plan does nothing
+ * and the clip simply finishes as presentation. */
+static void action_apply(desk_state *state, const desk_world *world)
+{
+    desk_action_state *action = &state->action;
+    const desk_action_plan *plan = &action->plan;
+    const desk_room *room = current_room(state, world);
+    const desk_item *held;
+    const desk_item_def *def;
+
+    if (!action->active || action->committed || !room ||
+        (int)plan->room != state->room || !state->catalog)
+        return;
+    if (plan->inventory_slot >= (uint16_t)DESK_INVENTORY_SLOTS ||
+        state->items.inventory.generation[plan->inventory_slot] !=
+            plan->inventory_generation)
+        return;
+    held = &state->items.inventory.slots[plan->inventory_slot];
+    def = desk_items_def(state->catalog, held->definition);
+    if (desk_item_is_empty(held) || !def) return;
+    switch ((desk_action_kind)plan->kind) {
+    case DESK_ACTION_USE_TOOL: {
+        const desk_object *object;
+
+        if (def->behavior != (uint16_t)DESK_BEHAVIOR_USE_TOOL) return;
+        if (plan->object_index >= (uint16_t)room->object_count) return;
+        object = &room->objects[plan->object_index];
+        if (object->target != plan->launch ||
+            strcmp(object->id, plan->object_id) != 0)
+            return;
+        if (object_distance_sq(state, object) >
+            DESK_INTERACT_RADIUS * DESK_INTERACT_RADIUS)
+            return;
+        /* The impact queues the fixture's own compiled target through
+         * the ordinary take-and-clear host path; the tool is not
+         * consumed. */
+        state->pending_launch = object->target;
+        (void)snprintf(state->pending_launch_object,
+                       sizeof state->pending_launch_object, "%s",
+                       object->id);
+        action->committed = true;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return;
+    }
+    case DESK_ACTION_DRINK:
+    case DESK_ACTION_GIVE:
+    case DESK_ACTION_NONE:
+    default:
+        return;
+    }
+}
+
+static void action_complete(desk_state *state)
+{
+    memset(&state->action, 0, sizeof state->action);
+    state->player_animator.movement_locked = false;
+}
+
+static void advance_player_animator(desk_state *state,
+                                    const desk_world *world)
+{
+    desk_animator *animator = &state->player_animator;
+    const desk_clip_descriptor *clip;
+    desk_clip_id desired;
+
+    if (state->action.active) {
+        /* One-shot action clips run to completion once started. */
+        desired = animator->clip;
+    } else {
+        desired = state->player_moving ? DESK_CLIP_WALK : DESK_CLIP_IDLE;
+    }
+    if (animator->clip != desired) {
+        animator->clip = desired;
+        animator->frame = 0;
+        animator->frame_ticks = 0;
+        return;
+    }
+    clip = &CLIP_TABLE[animator->clip];
+    animator->frame_ticks++;
+    if (animator->frame_ticks < clip->frame_ticks) return;
+    animator->frame_ticks = 0;
+    animator->frame++;
+    if (animator->frame >= clip->frames) {
+        if (clip->looping) {
+            animator->frame = 0;
+            return;
+        }
+        animator->frame = clip->frames - 1;
+        if (state->action.active) action_complete(state);
+        animator->clip = DESK_CLIP_IDLE;
+        animator->frame = 0;
+        animator->frame_ticks = 0;
+        return;
+    }
+    if (state->action.active && animator->frame == clip->apply_frame)
+        action_apply(state, world);
+}
+
 void desk_update(desk_state *state, const desk_world *world, int move_x,
                  int move_y, float seconds)
 {
@@ -973,7 +1104,10 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
         return;
     state->player_moving = false;
     room = current_room(state, world);
-    if (state->mode == DESK_MODE_ROOM && room) {
+    if (state->mode == DESK_MODE_ROOM && room &&
+        state->player_animator.movement_locked) {
+        /* An action clip owns the body until COMPLETE. */
+    } else if (state->mode == DESK_MODE_ROOM && room) {
         if (move_x < 0) {
             state->facing = DESK_FACING_LEFT;
             state->player_x -= DESK_PARITY_LEGEND_PLAYER_SPEED * seconds;
@@ -1012,7 +1146,84 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
     if (state->toast_ticks > 0) state->toast_ticks--;
     if (state->door_cooldown_ticks > 0) state->door_cooldown_ticks--;
     if (state->mode == DESK_MODE_DIALOGUE) state->dialogue_age++;
+    if (state->mode == DESK_MODE_ROOM || state->mode == DESK_MODE_DIALOGUE ||
+        state->mode == DESK_MODE_WIZARD)
+        advance_player_animator(state, world);
     update_nearest(state, world);
+}
+
+bool desk_use_item(desk_state *state, const desk_world *world)
+{
+    const desk_room *room;
+    const desk_item *held;
+    const desk_item_def *def;
+
+    if (!state || !world) return false;
+    if (state->mode != DESK_MODE_ROOM)
+        return desk_interact(state, world);
+    room = current_room(state, world);
+    if (!room || !state->catalog) return false;
+    if (state->action.active) return false;
+    held = &state->items.inventory.slots[state->items.inventory.selected];
+    /* Compatibility: an empty hand keeps Space as a second interact
+     * button until the hotbar is second nature. */
+    if (desk_item_is_empty(held)) return desk_interact(state, world);
+    def = desk_items_def(state->catalog, held->definition);
+    if (!def) return false;
+    if (held->definition == DESK_ITEM_DEF_MISSING) {
+        set_toast(state, "Whatever this was, it stays a mystery.");
+        return true;
+    }
+    switch ((desk_item_behavior)def->behavior) {
+    case DESK_BEHAVIOR_USE_TOOL: {
+        const desk_object *object = NULL;
+
+        /* Tool-to-target dispatch: the tool requests a maintain impact
+         * and only the maintenance fixture accepts it today. */
+        if (state->nearest_object >= 0 &&
+            state->nearest_object < room->object_count &&
+            room->objects[state->nearest_object].target ==
+                DESK_TARGET_MAINTENANCE)
+            object = &room->objects[state->nearest_object];
+        if (!object) {
+            set_toast(state, "Nothing here needs the toolbox.");
+            return true;
+        }
+        state->action_nonce++;
+        memset(&state->action, 0, sizeof state->action);
+        state->action.active = true;
+        state->action.plan.nonce = state->action_nonce;
+        state->action.plan.kind = (uint16_t)DESK_ACTION_USE_TOOL;
+        state->action.plan.room = (uint16_t)state->room;
+        state->action.plan.inventory_slot =
+            (uint16_t)state->items.inventory.selected;
+        state->action.plan.inventory_generation =
+            state->items.inventory
+                .generation[state->items.inventory.selected];
+        state->action.plan.object_index =
+            (uint16_t)state->nearest_object;
+        state->action.plan.npc_index = (uint16_t)UINT16_MAX;
+        state->action.plan.launch = object->target;
+        (void)snprintf(state->action.plan.object_id,
+                       sizeof state->action.plan.object_id, "%s",
+                       object->id);
+        state->player_animator.clip = DESK_CLIP_USE_TOOL;
+        state->player_animator.frame = 0;
+        state->player_animator.frame_ticks = 0;
+        state->player_animator.movement_locked = true;
+        state->player_moving = false;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
+    case DESK_BEHAVIOR_HOLD:
+    case DESK_BEHAVIOR_DRINK:
+    case DESK_BEHAVIOR_EQUIP:
+    case DESK_BEHAVIOR_PLACE:
+    case DESK_BEHAVIOR_UNLOCK:
+    default:
+        set_toast(state, "Not the moment for that.");
+        return true;
+    }
 }
 
 /* One trimmed line from a /proc-style fact file; no subprocesses. */
@@ -1118,6 +1329,8 @@ static bool interact_room(desk_state *state, const desk_world *world,
 {
     const desk_object *object;
     if (!room) return false;
+    /* The body is busy until the action clip completes or cancels. */
+    if (state->action.active) return false;
     if (world_item_selected(state, room))
         return interact_pickup(state);
     if (npc_selected(state, room)) {
@@ -1415,6 +1628,15 @@ void desk_cancel(desk_state *state, const desk_world *world)
         update_nearest(state, world);
         return;
     case DESK_MODE_ROOM:
+        if (state->action.active) {
+            /* Escape during a swing: an uncommitted plan is discarded
+             * with no world effect; a committed one already queued its
+             * launch, so only the tail presentation is shortened. */
+            if (state->action.committed) action_complete(state);
+            else action_reset(state);
+            queue_audio(state, DESK_AUDIO_UI_MOVE);
+            return;
+        }
         state->mode = DESK_MODE_PAUSE;
         state->pause_cursor = 0;
         state->pause_debug = false;
@@ -1650,6 +1872,19 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         state->items.inventory.selected >= DESK_INVENTORY_SLOTS)
         return validate_fail(error, error_size,
                              "selected slot out of range");
+    if ((int)state->player_animator.clip < 0 ||
+        (int)state->player_animator.clip >= DESK_CLIP_COUNT ||
+        state->player_animator.frame < 0 ||
+        state->player_animator.frame >= 8 ||
+        state->player_animator.frame_ticks < 0)
+        return validate_fail(error, error_size, "animator out of range");
+    if (state->action.committed && !state->action.active)
+        return validate_fail(error, error_size,
+                             "committed action without an active one");
+    if (state->action.active &&
+        !state->player_animator.movement_locked)
+        return validate_fail(error, error_size,
+                             "active action without a movement lock");
     if (state->door_cooldown_ticks < 0 ||
         state->door_cooldown_ticks > DESK_DOOR_COOLDOWN_TICKS)
         return validate_fail(error, error_size,

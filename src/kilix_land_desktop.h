@@ -253,6 +253,52 @@ typedef struct desk_profile {
     bool first_run_done;
 } desk_profile;
 
+/* Local animation clips. Item data may select a logical clip id; frame
+ * timing and typed events are compiled, never authored callbacks. */
+typedef enum desk_clip_id {
+    DESK_CLIP_IDLE = 0,
+    DESK_CLIP_WALK = 1,
+    DESK_CLIP_USE_TOOL = 2,
+    DESK_CLIP_DRINK = 3,
+    DESK_CLIP_GIVE = 4
+} desk_clip_id;
+#define DESK_CLIP_COUNT 5
+
+typedef struct desk_animator {
+    desk_clip_id clip;
+    int frame;
+    int frame_ticks;
+    bool movement_locked;
+} desk_animator;
+
+typedef enum desk_action_kind {
+    DESK_ACTION_NONE = 0,
+    DESK_ACTION_USE_TOOL = 1,
+    DESK_ACTION_DRINK = 2,
+    DESK_ACTION_GIVE = 3
+} desk_action_kind;
+
+/* A pure plan produced by the use-item query and committed exactly once
+ * at the clip's authored APPLY frame. Generations let a stale commit
+ * refuse instead of mutating changed state. */
+typedef struct desk_action_plan {
+    uint32_t nonce;
+    uint16_t kind; /* desk_action_kind */
+    uint16_t room;
+    uint16_t inventory_slot;
+    uint16_t inventory_generation;
+    uint16_t object_index; /* fixture target, or UINT16_MAX */
+    uint16_t npc_index;    /* gift target, or UINT16_MAX */
+    desk_target launch;    /* fixture's compiled target (USE_TOOL) */
+    char object_id[DESK_ID_CAPACITY];
+} desk_action_plan;
+
+typedef struct desk_action_state {
+    bool active;
+    bool committed;
+    desk_action_plan plan;
+} desk_action_state;
+
 typedef struct desk_state {
     desk_profile profile;
     int room;
@@ -301,6 +347,9 @@ typedef struct desk_state {
     const desk_item_catalog *catalog;
     desk_world_state items;
     bool world_dirty;
+    desk_animator player_animator;
+    desk_action_state action;
+    uint32_t action_nonce;
 } desk_state;
 
 /* Opaque-pixel measurements of one sprite cell, captured when the cell is
@@ -380,6 +429,9 @@ void desk_init(desk_state *state, const desk_world *world,
 void desk_update(desk_state *state, const desk_world *world, int move_x,
                  int move_y, float seconds);
 bool desk_interact(desk_state *state, const desk_world *world);
+/* The Space intent: act with the selected item (tool, consumable, gift,
+ * placement). Falls back to desk_interact while the slot is empty. */
+bool desk_use_item(desk_state *state, const desk_world *world);
 void desk_cancel(desk_state *state, const desk_world *world);
 /* Hotbar selection and the explicit drop action; all no-ops outside room
  * mode. Drop places the whole selected stack on clear floor in front of

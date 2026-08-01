@@ -125,33 +125,23 @@ static desk_graphic portrait_graphic(desk_cast cast)
     return DESK_GRAPHIC_PLEB_PORTRAITS;
 }
 
-static int clip_frame(uint64_t tick, const int *durations,
-                      int duration_count)
-{
-    int total = 0;
-    int elapsed;
-    int index;
-    for (index = 0; index < duration_count; ++index)
-        total += durations[index];
-    elapsed = (int)(((tick % UINT64_C(2160)) * UINT64_C(1000) /
-                     (uint64_t)DESK_SIMULATION_HZ) % (uint64_t)total);
-    for (index = 0; index < duration_count - 1; ++index) {
-        if (elapsed < durations[index]) return index;
-        elapsed -= durations[index];
-    }
-    return duration_count - 1;
-}
-
+/* Player frames come from the local animator, so walking always begins
+ * at its first phase and one-shot action clips can reset and complete
+ * instead of joining a global phase. */
 static int player_idle_frame(const desk_state *state)
 {
-    static const int idle_durations[] = {180, 180, 180, 180};
-    return clip_frame(state->simulation_tick, idle_durations, 4);
+    int frame = state->player_animator.clip == DESK_CLIP_IDLE ?
+                state->player_animator.frame : 0;
+    if (frame < 0 || frame > 3) frame = 0;
+    return frame;
 }
 
 static int standard_walk_phase(const desk_state *state)
 {
-    static const int durations[] = {120, 120, 120, 120};
-    return clip_frame(state->simulation_tick, durations, 4);
+    int frame = state->player_animator.clip == DESK_CLIP_WALK ?
+                state->player_animator.frame : 0;
+    if (frame < 0 || frame > 3) frame = 0;
+    return frame;
 }
 
 /* Logical-space bbox of everything an entity draw touched (sprite plus
@@ -315,15 +305,61 @@ static bool standard_player_cell(const desk_state *state,
                                            metrics);
 }
 
+/* The held/tool subpass of the actor composite: during an action clip
+ * the selected item follows per-frame hand offsets, drawn behind the
+ * body when the player faces away and in front otherwise, and masked by
+ * walk-behinds as part of the same silhouette. */
+static void draw_held_item(ki_td_soft_renderer *renderer,
+                           const ki_td_view *view, const desk_state *state,
+                           const desk_graphics *graphics,
+                           desk_bounds *bounds)
+{
+    static const float HAND_OFFSETS[4][2] = {
+        {3.0f, -30.0f}, {5.0f, -38.0f}, {13.0f, -14.0f}, {11.0f, -8.0f}
+    };
+    const desk_item *held;
+    const desk_item_def *def;
+    ki_td_rgba8 cell;
+    desk_sprite_metrics metrics;
+    float offset_x;
+    float offset_y;
+    int frame = state->player_animator.frame;
+
+    if (!state->action.active || !state->catalog) return;
+    if (state->action.plan.inventory_slot >=
+        (uint16_t)DESK_INVENTORY_SLOTS)
+        return;
+    held = &state->items.inventory
+                .slots[state->action.plan.inventory_slot];
+    if (desk_item_is_empty(held)) return;
+    def = desk_items_def(state->catalog, held->definition);
+    if (!def) return;
+    if (frame < 0 || frame > 3) frame = 0;
+    offset_x = HAND_OFFSETS[frame][0];
+    offset_y = HAND_OFFSETS[frame][1];
+    if (state->facing == DESK_FACING_LEFT) offset_x = -offset_x;
+    if (desk_graphics_item_cell(graphics, visible_cast(state),
+                                (int)def->sprite, &cell) &&
+        desk_graphics_item_cell_metrics(graphics, visible_cast(state),
+                                        (int)def->sprite, &metrics))
+        draw_foot_anchored(renderer, view, &cell, &metrics,
+                           state->player_x + offset_x,
+                           state->player_y + offset_y, 18, 18, 1.0f,
+                           bounds);
+}
+
 static void draw_player(ki_td_soft_renderer *renderer, const ki_td_view *view,
                         const desk_state *state,
                         const desk_graphics *graphics, desk_bounds *bounds)
 {
     desk_cast cast = visible_cast(state);
+    bool tool_behind = state->facing == DESK_FACING_UP;
     ki_td_rgba8 cell;
     desk_sprite_metrics metrics;
     draw_shadow(renderer, view, state->player_x, state->player_y, 18.0f,
                 bounds);
+    if (tool_behind)
+        draw_held_item(renderer, view, state, graphics, bounds);
     if (cast == DESK_CAST_LEGEND) {
         if (legend_player_cell(state, graphics, &cell, &metrics))
             draw_foot_anchored(renderer, view, &cell, &metrics,
@@ -339,6 +375,8 @@ static void draw_player(ki_td_soft_renderer *renderer, const ki_td_view *view,
                            render_width,
                            STANDARD_PLAYER_RENDER_SIZE, 1.0f, bounds);
     }
+    if (!tool_behind)
+        draw_held_item(renderer, view, state, graphics, bounds);
 }
 
 static void draw_npc(ki_td_soft_renderer *renderer, const ki_td_view *view,

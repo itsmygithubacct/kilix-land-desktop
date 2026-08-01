@@ -907,6 +907,114 @@ static int selftest_body(void)
         }
     }
 
+    /* Animation-timed tool action: inject the toolbox, stand at the
+     * shed, and prove the impact lands exactly once on the authored
+     * frame, movement stays locked until COMPLETE, and cancel before
+     * impact has no world effect. */
+    {
+        desk_item_plan tool_plan;
+        desk_item toolbox_item;
+        int toolbox = desk_items_find(&catalog, "core:tool/toolbox");
+        int yard = desk_world_room_index(&world, "yard");
+        float locked_x;
+        int tool_slot = -1;
+        int slot_index;
+        int tick;
+
+        toolbox_item = desk_item_make((uint16_t)toolbox, 1u);
+        if (toolbox <= 0 || yard < 0 ||
+            !desk_inventory_plan_add(&state.items.inventory, &catalog,
+                                     &toolbox_item, &tool_plan) ||
+            !desk_inventory_commit_add(&state.items.inventory, &catalog,
+                                       &toolbox_item, &tool_plan)) {
+            (void)fprintf(stderr, "FAIL selftest toolbox inject\n");
+            return EXIT_FAILURE;
+        }
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)toolbox &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                tool_slot = slot_index;
+        state.room = yard;
+        state.player_x = 386.0f;
+        state.player_y = 214.0f;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        desk_select_slot(&state, tool_slot);
+        if (tool_slot < 0 || state.nearest_object < 0 ||
+            world.rooms[yard].objects[state.nearest_object].target !=
+                DESK_TARGET_MAINTENANCE) {
+            (void)fprintf(stderr, "FAIL selftest shed targeting\n");
+            return EXIT_FAILURE;
+        }
+        if (!desk_use_item(&state, &world) || !state.action.active ||
+            state.action.committed ||
+            state.player_animator.clip != DESK_CLIP_USE_TOOL ||
+            !state.player_animator.movement_locked ||
+            desk_take_launch_request(&state) != DESK_TARGET_NONE) {
+            (void)fprintf(stderr, "FAIL selftest tool start\n");
+            return EXIT_FAILURE;
+        }
+        /* A second press and other interactions are refused mid-swing,
+         * and held movement input moves nothing. */
+        locked_x = state.player_x;
+        if (desk_use_item(&state, &world) ||
+            desk_interact(&state, &world) ||
+            desk_drop_selected(&state, &world)) {
+            (void)fprintf(stderr, "FAIL selftest mid-swing refusal\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 60 && !state.action.committed; ++tick)
+            desk_update(&state, &world, 1, 0, DESK_TICK_SECONDS);
+        if (!state.action.committed || state.player_x != locked_x ||
+            state.pending_launch != DESK_TARGET_MAINTENANCE ||
+            strcmp(state.pending_launch_object, "shed") != 0 ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)toolbox) != 1 ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest tool impact: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        if (desk_take_launch_request(&state) != DESK_TARGET_MAINTENANCE) {
+            (void)fprintf(stderr, "FAIL selftest tool launch take\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 60 && state.action.active; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (state.action.active || state.player_animator.movement_locked ||
+            desk_take_launch_request(&state) != DESK_TARGET_NONE) {
+            (void)fprintf(stderr, "FAIL selftest tool complete\n");
+            return EXIT_FAILURE;
+        }
+        /* Cancel before impact: no launch, no lock, still in the room. */
+        if (!desk_use_item(&state, &world) || !state.action.active) {
+            (void)fprintf(stderr, "FAIL selftest tool restart\n");
+            return EXIT_FAILURE;
+        }
+        desk_cancel(&state, &world);
+        if (state.action.active || state.mode != DESK_MODE_ROOM ||
+            state.player_animator.movement_locked ||
+            desk_take_launch_request(&state) != DESK_TARGET_NONE ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest tool cancel: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        /* Walking must begin at the first walk phase now. */
+        desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+        if (!state.player_moving ||
+            state.player_animator.clip != DESK_CLIP_WALK ||
+            state.player_animator.frame != 0) {
+            (void)fprintf(stderr, "FAIL selftest walk phase reset\n");
+            return EXIT_FAILURE;
+        }
+        state.room = living;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        (void)desk_take_audio_events(&state, events);
+    }
+
     state.player_x = 120.0f;
     state.player_y = 210.0f;
     desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
@@ -1014,7 +1122,8 @@ static int selftest_body(void)
         "PASS selftest rooms=%d wizard=cast-actor-name-outfit-confirm "
         "door=bedroom->living launch=games dialogue=reveal-advance-close "
         "pause=quit-confirm walkbehinds=bad-rejected "
-        "items=materialize-pickup-drop-persist targets=%d\n",
+        "items=materialize-pickup-drop-persist tool=impact-timed "
+        "targets=%d\n",
         world.room_count, DESK_TARGET_COUNT - 1);
     return EXIT_SUCCESS;
 }
@@ -2314,11 +2423,40 @@ static int items_render_test(const char *directory)
                                        "hotbar");
         }
     }
+    if (success) {
+        /* The raised-tool frame of the swing, held item drawn at the
+         * hand offset over the idle pose. */
+        int toolbox = desk_items_find(&fixture.catalog,
+                                      "core:tool/toolbox");
+        int yard = desk_world_room_index(&fixture.world, "yard");
+        int tick;
+
+        success = toolbox > 0 && yard >= 0;
+        if (success) {
+            state.items.inventory.slots[3] =
+                desk_item_make((uint16_t)toolbox, 1u);
+            state.items.inventory.selected = 3;
+            state.room = yard;
+            state.player_x = 386.0f;
+            state.player_y = 214.0f;
+            state.facing = DESK_FACING_RIGHT;
+            state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+            desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
+            success = desk_use_item(&state, &fixture.world);
+            for (tick = 0; success && tick < 9; ++tick)
+                desk_update(&state, &fixture.world, 0, 0,
+                            DESK_TICK_SECONDS);
+            state.toast_ticks = 0;
+            success = success && state.action.active &&
+                      fixture_snapshot(&fixture, &state, directory,
+                                       "tool-swing");
+        }
+    }
     fixture_close(&fixture);
     if (!success) return EXIT_FAILURE;
     (void)printf(
-        "PASS render scene=items files=3 depth=front+behind "
-        "hotbar=stack+missing size=%dx%d directory=%s\n",
+        "PASS render scene=items files=4 depth=front+behind "
+        "hotbar=stack+missing tool=swing size=%dx%d directory=%s\n",
         DESK_LOGICAL_WIDTH, DESK_LOGICAL_HEIGHT, directory);
     return EXIT_SUCCESS;
 }
@@ -2448,11 +2586,15 @@ static int run_interactive(void)
                      ++text_index)
                     (void)desk_text_backspace(&state);
             }
+            /* Enter is the interact intent, Space the use-item intent;
+             * menus treat both as confirm and an empty hand falls back
+             * inside desk_use_item. */
             if (pending_input.cancel_pressed)
                 desk_cancel(&state, &world);
-            else if (pending_input.enter_pressed ||
-                     (!name_entry && pending_input.space_pressed))
+            else if (pending_input.enter_pressed)
                 (void)desk_interact(&state, &world);
+            else if (!name_entry && pending_input.space_pressed)
+                (void)desk_use_item(&state, &world);
             if (pending_input.select_slot >= 0)
                 desk_select_slot(&state, pending_input.select_slot);
             if (pending_input.cycle_slot != 0)
