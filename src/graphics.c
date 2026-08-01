@@ -22,14 +22,6 @@
 #define DESK_GARMENT_HUE_WINDOW 40.0f
 #define DESK_LEGEND_CLUSTER_WINDOW 30.0f
 
-typedef struct sprite_metrics {
-    int left;
-    int right;
-    int top;
-    int bottom;
-    double spine_x;
-} sprite_metrics;
-
 typedef struct graphic_spec {
     const char *id;
     uint32_t width;
@@ -135,12 +127,14 @@ static void make_limits(kilix_asset_limits *limits)
     limits->max_dimension = 2048u;
 }
 
-static bool measure_sprite(const ki_td_rgba8 *image, sprite_metrics *metrics)
+static bool measure_sprite(const ki_td_rgba8 *image,
+                           desk_sprite_metrics *metrics)
 {
     uint64_t spine_total = 0u;
     uint64_t spine_pixels = 0u;
     int y;
     if (!ki_td_rgba8_is_valid(image) || !metrics) return false;
+    metrics->valid = false;
     metrics->left = image->width;
     metrics->right = -1;
     metrics->top = image->height;
@@ -177,6 +171,7 @@ static bool measure_sprite(const ki_td_rgba8 *image, sprite_metrics *metrics)
     metrics->spine_x = spine_pixels > 0u ?
         (double)spine_total / (double)spine_pixels :
         ((double)metrics->left + (double)metrics->right) * 0.5;
+    metrics->valid = true;
     return true;
 }
 
@@ -195,8 +190,8 @@ static bool build_leg_motion_cell(uint8_t *destination,
                                   const ki_td_rgba8 *step,
                                   bool mirror_step)
 {
-    sprite_metrics base_metrics;
-    sprite_metrics step_metrics;
+    desk_sprite_metrics base_metrics;
+    desk_sprite_metrics step_metrics;
     int half_width;
     int left;
     int right;
@@ -259,7 +254,7 @@ static bool build_straight_step_cell(uint8_t *destination,
                                      const ki_td_rgba8 *base,
                                      bool lift_left)
 {
-    sprite_metrics metrics;
+    desk_sprite_metrics metrics;
     int half_width;
     int center;
     int left;
@@ -320,7 +315,7 @@ static bool build_straight_step_cell(uint8_t *destination,
 static bool build_opposite_step_cell(uint8_t *destination,
                                      const ki_td_rgba8 *step)
 {
-    sprite_metrics metrics;
+    desk_sprite_metrics metrics;
     int center;
     int half_width;
     int left;
@@ -676,6 +671,9 @@ static bool rebuild_legend_steps(desk_graphics *graphics)
         graphics->legend_opposite_step_cells[facing] =
             ki_td_rgba8_make(destination, (int)DESK_LEGEND_CELL,
                              (int)DESK_LEGEND_CELL);
+        (void)measure_sprite(
+            &graphics->legend_opposite_step_cells[facing],
+            &graphics->legend_opposite_step_metrics[facing]);
     }
     return true;
 }
@@ -724,6 +722,9 @@ static bool rebuild_hero_motion_cast(desk_graphics *graphics, desk_cast cast)
         graphics->hero_motion_cells[cast_index][variant] =
             ki_td_rgba8_make(destination, (int)DESK_CHARACTER_CELL,
                              (int)DESK_CHARACTER_CELL);
+        (void)measure_sprite(
+            &graphics->hero_motion_cells[cast_index][variant],
+            &graphics->hero_motion_metrics[cast_index][variant]);
     }
     return true;
 }
@@ -1119,6 +1120,12 @@ bool desk_graphics_set_outfit(desk_graphics *graphics, desk_cast cast,
                                   hue_offset(swatch_hsv.hue, garment_hue));
         }
     }
+    /* Outfit recolors only rewrite RGB, so alpha-derived metrics measured
+     * here stay correct for every swatch; an all-transparent sheet cell
+     * simply records valid = false and is never drawn. */
+    for (index = 0; index < (int)total_cells; ++index)
+        (void)measure_sprite(&graphics->outfit_cells[index],
+                             &graphics->outfit_metrics[index]);
     graphics->outfit_cast = cast;
     graphics->outfit_index = outfit;
     graphics->outfit_columns = columns;
@@ -1185,6 +1192,64 @@ bool desk_graphics_legend_opposite_step(const desk_graphics *graphics,
         return false;
     *image = graphics->legend_opposite_step_cells[facing];
     return ki_td_rgba8_is_valid(image);
+}
+
+bool desk_graphics_hero_cell_metrics(const desk_graphics *graphics,
+                                     desk_cast cast, int column, int row,
+                                     desk_sprite_metrics *metrics)
+{
+    int columns;
+    int rows;
+    if (metrics) (void)memset(metrics, 0, sizeof *metrics);
+    if (!graphics || !metrics || (int)cast < 0 ||
+        (int)cast >= DESK_CAST_COUNT || column < 0 || row < 0)
+        return false;
+    columns = hero_columns(cast);
+    rows = hero_rows(cast);
+    if (column >= columns || row >= rows) return false;
+    if (graphics->outfit_ready && graphics->outfit_cast == cast) {
+        *metrics = graphics->outfit_metrics[
+            (size_t)row * (size_t)graphics->outfit_columns +
+            (size_t)column];
+        return metrics->valid;
+    }
+    {
+        /* Cold path (a cast whose recolored cells are not loaded): measure
+         * on demand. The synced render path always hits the cache above. */
+        ki_td_rgba8 cell;
+
+        if (!desk_graphics_hero_cell(graphics, cast, column, row, &cell))
+            return false;
+        return measure_sprite(&cell, metrics);
+    }
+}
+
+bool desk_graphics_hero_motion_metrics(const desk_graphics *graphics,
+                                       desk_cast cast,
+                                       desk_hero_motion_variant variant,
+                                       desk_sprite_metrics *metrics)
+{
+    int cast_index;
+    if (metrics) (void)memset(metrics, 0, sizeof *metrics);
+    if (!graphics || !metrics || (int)cast < (int)DESK_CAST_CHUMRUNNER ||
+        (int)cast > (int)DESK_CAST_PLEB_BOUND || (int)variant < 0 ||
+        (int)variant >= DESK_HERO_MOTION_VARIANT_COUNT)
+        return false;
+    cast_index = (int)cast - 1;
+    *metrics = graphics->hero_motion_metrics[cast_index][variant];
+    return metrics->valid;
+}
+
+bool desk_graphics_legend_opposite_step_metrics(
+    const desk_graphics *graphics, desk_facing facing,
+    desk_sprite_metrics *metrics)
+{
+    if (metrics) (void)memset(metrics, 0, sizeof *metrics);
+    if (!graphics || !metrics || (int)facing < 0 ||
+        (int)facing > (int)DESK_FACING_UP)
+        return false;
+    *metrics = graphics->legend_opposite_step_metrics[facing];
+    return metrics->valid;
 }
 
 uint32_t desk_outfit_color(desk_cast cast, int outfit)

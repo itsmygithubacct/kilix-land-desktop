@@ -270,6 +270,19 @@ typedef struct desk_state {
     bool profile_dirty; /* main persists via desk_profile_save */
 } desk_state;
 
+/* Opaque-pixel measurements of one sprite cell, captured when the cell is
+ * loaded or rebuilt so drawing never rescans pixels. spine_x is the mean x
+ * of the opaque pixels in the top 2/5 of the bounds (head/torso), the
+ * anchor render.c centers on; bottom is the foot row. */
+typedef struct desk_sprite_metrics {
+    bool valid; /* cell has at least one opaque pixel */
+    int left;
+    int right;
+    int top;
+    int bottom;
+    double spine_x;
+} desk_sprite_metrics;
+
 typedef struct desk_graphics {
     kilix_asset_cache cache;
     kilix_asset_manifest manifest;
@@ -287,15 +300,19 @@ typedef struct desk_graphics {
     int outfit_index;
     uint8_t *outfit_pixels;
     ki_td_rgba8 outfit_cells[16 * 8]; /* covers every imported hero sheet */
+    desk_sprite_metrics outfit_metrics[16 * 8];
     int outfit_columns;
     int outfit_rows;
     bool outfit_ready;
     /* synthesized motion cells (built from the recolored hero cells) */
     uint8_t *legend_opposite_step_pixels;
     ki_td_rgba8 legend_opposite_step_cells[4];
+    desk_sprite_metrics legend_opposite_step_metrics[4];
     uint8_t *hero_motion_pixels;
     ki_td_rgba8 hero_motion_cells[DESK_CAST_COUNT - 1]
                                  [DESK_HERO_MOTION_VARIANT_COUNT];
+    desk_sprite_metrics hero_motion_metrics[DESK_CAST_COUNT - 1]
+                                           [DESK_HERO_MOTION_VARIANT_COUNT];
     bool cache_ready;
 } desk_graphics;
 
@@ -382,6 +399,18 @@ bool desk_graphics_hero_motion_cell(const desk_graphics *graphics,
 bool desk_graphics_legend_opposite_step(const desk_graphics *graphics,
                                         desk_facing facing,
                                         ki_td_rgba8 *image);
+/* Cached measurements for the cells served by the getters above; each
+ * returns false when the cell is unavailable or has no opaque pixels. */
+bool desk_graphics_hero_cell_metrics(const desk_graphics *graphics,
+                                     desk_cast cast, int column, int row,
+                                     desk_sprite_metrics *metrics);
+bool desk_graphics_hero_motion_metrics(const desk_graphics *graphics,
+                                       desk_cast cast,
+                                       desk_hero_motion_variant variant,
+                                       desk_sprite_metrics *metrics);
+bool desk_graphics_legend_opposite_step_metrics(
+    const desk_graphics *graphics, desk_facing facing,
+    desk_sprite_metrics *metrics);
 uint32_t desk_outfit_color(desk_cast cast, int outfit);
 const char *desk_outfit_name(desk_cast cast, int outfit);
 

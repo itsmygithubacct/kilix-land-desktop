@@ -191,52 +191,13 @@ static void draw_shadow(ki_td_soft_renderer *renderer, const ki_td_view *view,
                radius * 0.58f);
 }
 
-static bool sprite_anchor(const ki_td_rgba8 *image, float *anchor_x,
-                          float *anchor_y)
-{
-    uint64_t head_x_total = 0u;
-    uint64_t head_pixels = 0u;
-    int top;
-    int bottom;
-    int y;
-    if (!ki_td_rgba8_is_valid(image) || !anchor_x || !anchor_y)
-        return false;
-    top = image->height;
-    bottom = -1;
-    for (y = 0; y < image->height; ++y) {
-        const uint8_t *row =
-            image->pixels + (size_t)y * image->stride;
-        int x;
-        for (x = 0; x < image->width; ++x) {
-            if (row[(size_t)x * 4u + 3u] < UINT8_C(8)) continue;
-            if (y < top) top = y;
-            if (y > bottom) bottom = y;
-        }
-    }
-    if (bottom < top) return false;
-    {
-        int head_bottom = top + (bottom - top + 1) * 2 / 5;
-        for (y = top; y <= head_bottom; ++y) {
-            const uint8_t *row =
-                image->pixels + (size_t)y * image->stride;
-            int x;
-            for (x = 0; x < image->width; ++x) {
-                if (row[(size_t)x * 4u + 3u] < UINT8_C(8)) continue;
-                head_x_total += (uint64_t)(unsigned int)x;
-                ++head_pixels;
-            }
-        }
-    }
-    *anchor_x = head_pixels > 0u ?
-        (float)((double)head_x_total / (double)head_pixels) :
-        (float)image->width * 0.5f;
-    *anchor_y = (float)bottom;
-    return true;
-}
-
+/* The anchor comes from the cell's load-time measurements (the spine
+ * centroid and foot row desk_graphics caches when cells are built), so
+ * presentation never rescans sprite pixels. */
 static void draw_foot_anchored(ki_td_soft_renderer *renderer,
                                const ki_td_view *view,
                                const ki_td_rgba8 *image,
+                               const desk_sprite_metrics *metrics,
                                float foot_x, float foot_y,
                                int width, int height, float alpha,
                                desk_bounds *bounds)
@@ -245,7 +206,9 @@ static void draw_foot_anchored(ki_td_soft_renderer *renderer,
     float anchor_y;
     float scale_x;
     float scale_y;
-    if (!sprite_anchor(image, &anchor_x, &anchor_y)) return;
+    if (!ki_td_rgba8_is_valid(image) || !metrics || !metrics->valid) return;
+    anchor_x = (float)metrics->spine_x;
+    anchor_y = (float)metrics->bottom;
     scale_x = (float)width / (float)image->width;
     scale_y = (float)height / (float)image->height;
     ki_td_soft_rgba_resized(renderer, view,
@@ -258,27 +221,39 @@ static void draw_foot_anchored(ki_td_soft_renderer *renderer,
 
 static bool legend_player_cell(const desk_state *state,
                                const desk_graphics *graphics,
-                               ki_td_rgba8 *cell)
+                               ki_td_rgba8 *cell,
+                               desk_sprite_metrics *metrics)
 {
     int column;
     int phase;
     if (!state->player_moving) {
         column = player_idle_frame(state);
         return desk_graphics_hero_cell(graphics, DESK_CAST_LEGEND, column,
-                                       (int)state->facing * 2, cell);
+                                       (int)state->facing * 2, cell) &&
+               desk_graphics_hero_cell_metrics(graphics, DESK_CAST_LEGEND,
+                                               column,
+                                               (int)state->facing * 2,
+                                               metrics);
     }
     phase = standard_walk_phase(state);
     if (phase == 3)
         return desk_graphics_legend_opposite_step(graphics, state->facing,
-                                                  cell);
+                                                  cell) &&
+               desk_graphics_legend_opposite_step_metrics(graphics,
+                                                          state->facing,
+                                                          metrics);
     column = phase == 1 ? 4 : 0;
     return desk_graphics_hero_cell(graphics, DESK_CAST_LEGEND, column,
-                                   (int)state->facing * 2, cell);
+                                   (int)state->facing * 2, cell) &&
+           desk_graphics_hero_cell_metrics(graphics, DESK_CAST_LEGEND,
+                                           column, (int)state->facing * 2,
+                                           metrics);
 }
 
 static bool standard_player_cell(const desk_state *state,
                                  const desk_graphics *graphics,
-                                 desk_cast cast, ki_td_rgba8 *cell)
+                                 desk_cast cast, ki_td_rgba8 *cell,
+                                 desk_sprite_metrics *metrics)
 {
     static const int fantasy_idle_columns[] = {0, 1, 2, 3};
     static const int fantasy_walk_columns[][4] = {
@@ -298,22 +273,28 @@ static bool standard_player_cell(const desk_state *state,
         column = state->player_moving ?
             fantasy_walk_columns[state->facing][phase] :
             fantasy_idle_columns[state->facing];
-        return desk_graphics_hero_cell(graphics, cast, column, 0, cell);
+        return desk_graphics_hero_cell(graphics, cast, column, 0, cell) &&
+               desk_graphics_hero_cell_metrics(graphics, cast, column, 0,
+                                               metrics);
     }
     if (state->facing == DESK_FACING_DOWN) {
         if (!state->player_moving || (phase & 1) == 0)
             column = 0;
-        else
-            return desk_graphics_hero_motion_cell(
-                graphics, cast,
-                phase == 1 ? DESK_HERO_MOTION_DOWN_A :
-                             DESK_HERO_MOTION_DOWN_B,
-                cell);
+        else {
+            variant = phase == 1 ? DESK_HERO_MOTION_DOWN_A :
+                                   DESK_HERO_MOTION_DOWN_B;
+            return desk_graphics_hero_motion_cell(graphics, cast, variant,
+                                                  cell) &&
+                   desk_graphics_hero_motion_metrics(graphics, cast,
+                                                     variant, metrics);
+        }
     } else if (state->facing == DESK_FACING_UP) {
         column = 3;
         if (state->player_moving && (phase & 1) != 0)
             return desk_graphics_hero_motion_cell(
-                graphics, cast, DESK_HERO_MOTION_UP_STEP, cell);
+                       graphics, cast, DESK_HERO_MOTION_UP_STEP, cell) &&
+                   desk_graphics_hero_motion_metrics(
+                       graphics, cast, DESK_HERO_MOTION_UP_STEP, metrics);
     } else if (state->facing == DESK_FACING_LEFT) {
         column = state->player_moving ? side_columns[phase] : 4;
         mirrored = authored_side_faces_right;
@@ -324,9 +305,14 @@ static bool standard_player_cell(const desk_state *state,
     if (mirrored) {
         variant = column == 4 ? DESK_HERO_MOTION_MIRRORED_SIDE :
                                 DESK_HERO_MOTION_MIRRORED_WALK;
-        return desk_graphics_hero_motion_cell(graphics, cast, variant, cell);
+        return desk_graphics_hero_motion_cell(graphics, cast, variant,
+                                              cell) &&
+               desk_graphics_hero_motion_metrics(graphics, cast, variant,
+                                                 metrics);
     }
-    return desk_graphics_hero_cell(graphics, cast, column, 0, cell);
+    return desk_graphics_hero_cell(graphics, cast, column, 0, cell) &&
+           desk_graphics_hero_cell_metrics(graphics, cast, column, 0,
+                                           metrics);
 }
 
 static void draw_player(ki_td_soft_renderer *renderer, const ki_td_view *view,
@@ -335,18 +321,20 @@ static void draw_player(ki_td_soft_renderer *renderer, const ki_td_view *view,
 {
     desk_cast cast = visible_cast(state);
     ki_td_rgba8 cell;
+    desk_sprite_metrics metrics;
     draw_shadow(renderer, view, state->player_x, state->player_y, 18.0f,
                 bounds);
     if (cast == DESK_CAST_LEGEND) {
-        if (legend_player_cell(state, graphics, &cell))
-            draw_foot_anchored(renderer, view, &cell,
+        if (legend_player_cell(state, graphics, &cell, &metrics))
+            draw_foot_anchored(renderer, view, &cell, &metrics,
                                state->player_x, state->player_y,
                                LEGEND_PLAYER_RENDER_SIZE,
                                LEGEND_PLAYER_RENDER_SIZE, 1.0f, bounds);
-    } else if (standard_player_cell(state, graphics, cast, &cell)) {
+    } else if (standard_player_cell(state, graphics, cast, &cell,
+                                    &metrics)) {
         int render_width = cast == DESK_CAST_FANTASY ?
             FANTASY_PLAYER_RENDER_WIDTH : STANDARD_PLAYER_RENDER_SIZE;
-        draw_foot_anchored(renderer, view, &cell,
+        draw_foot_anchored(renderer, view, &cell, &metrics,
                            state->player_x, state->player_y,
                            render_width,
                            STANDARD_PLAYER_RENDER_SIZE, 1.0f, bounds);
@@ -1140,6 +1128,7 @@ static void draw_wizard_outfit(ki_td_soft_renderer *renderer,
     int preview_width = cast == DESK_CAST_FANTASY ?
         FANTASY_PLAYER_RENDER_WIDTH * 2 : preview_size;
     ki_td_rgba8 cell;
+    desk_sprite_metrics cell_metrics;
     bool cell_ok;
     int outfit;
     wizard_frame(renderer, view, canvas,
@@ -1166,15 +1155,21 @@ static void draw_wizard_outfit(ki_td_soft_renderer *renderer,
         small_text(canvas, view, 70.0f, y + 3.0f, line,
                    selected ? COLOR_INK : COLOR_MUTED);
     }
-    cell_ok = cast == DESK_CAST_LEGEND ?
-        desk_graphics_hero_cell(graphics, cast, player_idle_frame(state),
-                                0, &cell) :
-        desk_graphics_hero_cell(graphics, cast, 0, 0, &cell);
+    {
+        int preview_column = cast == DESK_CAST_LEGEND ?
+            player_idle_frame(state) : 0;
+        cell_ok = desk_graphics_hero_cell(graphics, cast, preview_column,
+                                          0, &cell) &&
+                  desk_graphics_hero_cell_metrics(graphics, cast,
+                                                  preview_column, 0,
+                                                  &cell_metrics);
+    }
     draw_shadow(renderer, view, 350.0f, 218.0f,
                 cast == DESK_CAST_LEGEND ? 26.0f : 30.0f, NULL);
     if (cell_ok)
-        draw_foot_anchored(renderer, view, &cell, 350.0f, 218.0f,
-                           preview_width, preview_size, 1.0f, NULL);
+        draw_foot_anchored(renderer, view, &cell, &cell_metrics, 350.0f,
+                           218.0f, preview_width, preview_size, 1.0f,
+                           NULL);
     small_text(canvas, view, 308.0f, 64.0f, "OUTFIT PREVIEW",
                COLOR_MUTED);
 }
