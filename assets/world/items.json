@@ -82,6 +82,33 @@
         "light",
         "giftable"
       ]
+    },
+    {
+      "id": "core:drink/tea-leaves",
+      "name": "Tea Leaves",
+      "description": "A fragrant bundle ready for the kitchen kettle.",
+      "family": "portable",
+      "behavior": "hold",
+      "sprite": 4,
+      "max_stack": 4,
+      "tags": [
+        "receiver-input",
+        "discardable"
+      ]
+    },
+    {
+      "id": "core:drink/fresh-tea",
+      "name": "Fresh Tea",
+      "description": "A freshly brewed cup with a calming warmth.",
+      "family": "consumable",
+      "behavior": "drink",
+      "sprite": 2,
+      "max_stack": 4,
+      "tags": [
+        "drink",
+        "giftable"
+      ],
+      "effect_ticks": 2400
     }
   ],
   "receivers": [
@@ -93,6 +120,22 @@
       "consume": false,
       "processing_ticks": 0,
       "result": "activate-fixture"
+    },
+    {
+      "id": "trash-chute",
+      "accept_any_tag": [
+        "discardable"
+      ],
+      "consume": true,
+      "result": "none"
+    },
+    {
+      "id": "kettle-brew",
+      "accept_item": "core:drink/tea-leaves",
+      "consume": true,
+      "processing_ticks": 1800,
+      "result": "none",
+      "output": "core:drink/fresh-tea"
     }
   ]
 }

@@ -42,7 +42,8 @@ static const target_entry target_table[DESK_TARGET_COUNT] = {
     [DESK_TARGET_BED] = { "bed", "Bed" },
     [DESK_TARGET_STATUS_BOARD] = { "status-board", "Status board" },
     [DESK_TARGET_GATE_LOCKED] = { "gate-locked", "Locked gate" },
-    [DESK_TARGET_WALK_EDITOR] = { "walk-editor", "Walk editor" }
+    [DESK_TARGET_WALK_EDITOR] = { "walk-editor", "Walk editor" },
+    [DESK_TARGET_KETTLE] = { "kettle", "Kettle" }
 };
 
 desk_target desk_target_from_string(const char *name)

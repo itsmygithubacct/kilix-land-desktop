@@ -39,6 +39,7 @@ TARGETS = {
     "terminal", "coding-agents", "files", "manuals", "models", "games",
     "music", "voice", "trash", "mailbox", "maintenance",
     "wardrobe", "bed", "status-board", "gate-locked", "walk-editor",
+    "kettle",
 }
 
 

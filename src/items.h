@@ -95,7 +95,8 @@ typedef enum desk_receiver_match {
 } desk_receiver_match;
 
 typedef enum desk_receiver_result {
-    DESK_RECEIVER_RESULT_ACTIVATE_FIXTURE = 0
+    DESK_RECEIVER_RESULT_ACTIVATE_FIXTURE = 0,
+    DESK_RECEIVER_RESULT_NONE = 1
 } desk_receiver_result;
 
 /* A data-defined accept/output rule for one fixture receiver. The result
@@ -106,6 +107,7 @@ typedef struct desk_receiver_rule {
     desk_receiver_match match;
     desk_item_tags tags;     /* ANY_TAG / ALL_TAGS */
     uint16_t item;           /* MATCH_ITEM: resolved definition index */
+    uint16_t output;         /* resolved definition index; NONE if absent */
     desk_item_family family; /* MATCH_FAMILY */
     bool consume;
     int32_t processing_ticks; /* 0 = instant */

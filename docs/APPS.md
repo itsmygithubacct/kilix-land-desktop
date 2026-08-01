@@ -70,6 +70,7 @@ open in the file-manager candidate table at that path. Deleting the line
 | `bed` | bed (bedroom) | confirm → save profile → clean exit |
 | `status-board` | notice board (kitchen) | in-process status panel (reads files only) |
 | `gate-locked` | gate (yard) | toast — the street extension point |
+| `kettle` | kettle (kitchen) | receiver fixture; empty interaction shows a patient hum toast |
 
 Dialogue with housemate NPCs is proximity + interact, also fully in-process.
 

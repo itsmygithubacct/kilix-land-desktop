@@ -921,6 +921,67 @@ static desk_receiver_state *receiver_state_for(desk_state *state,
     return entry;
 }
 
+/* Timed receivers carry only their durable room/object identity. Resolve
+ * that pair back through the bounded world tables when the timer completes
+ * so authored rules can change without leaving cached pointers in state. */
+static const desk_receiver_rule *receiver_rule_for_state(
+    const desk_state *state, const desk_world *world,
+    const desk_receiver_state *receiver, const desk_object **object_out)
+{
+    int room_index;
+
+    if (object_out) *object_out = NULL;
+    if (!state || !state->catalog || !world || !receiver) return NULL;
+    for (room_index = 0;
+         room_index < world->room_count && room_index < DESK_MAX_ROOMS;
+         ++room_index) {
+        const desk_room *room = &world->rooms[room_index];
+        int object_index;
+
+        if (strcmp(room->id, receiver->room_id) != 0) continue;
+        for (object_index = 0;
+             object_index < room->object_count &&
+                 object_index < DESK_MAX_OBJECTS_PER_ROOM;
+             ++object_index) {
+            const desk_object *object = &room->objects[object_index];
+            int rule_index;
+
+            if (strcmp(object->id, receiver->object_id) != 0) continue;
+            rule_index = object->receiver[0] != '\0' ?
+                desk_items_find_receiver(state->catalog,
+                                         object->receiver) : -1;
+            if (rule_index < 0) return NULL;
+            if (object_out) *object_out = object;
+            return &state->catalog->receivers[rule_index];
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+static void receiver_complete(desk_state *state,
+                              const desk_object *object,
+                              const desk_receiver_rule *rule,
+                              desk_receiver_state *receiver)
+{
+    if (!state || !rule || !receiver) return;
+    if (rule->output != (uint16_t)DESK_ITEM_NONE)
+        receiver->item = desk_item_make(rule->output, 1u);
+    if (rule->consume && rule->output == (uint16_t)DESK_ITEM_NONE) {
+        desk_item_clear(&receiver->item);
+        receiver->phase = (uint8_t)DESK_RECEIVER_EMPTY;
+    } else {
+        receiver->phase = (uint8_t)DESK_RECEIVER_READY;
+    }
+    receiver->remaining_ticks = 0;
+    if (rule->result == DESK_RECEIVER_RESULT_ACTIVATE_FIXTURE && object) {
+        state->pending_launch = object->target;
+        (void)snprintf(state->pending_launch_object,
+                       sizeof state->pending_launch_object, "%s",
+                       object->id);
+    }
+}
+
 static desk_social_record *social_record_for(desk_state *state,
                                              desk_cast cast, int actor,
                                              bool create)
@@ -1351,8 +1412,19 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
                 continue;
             receiver->remaining_ticks--;
             if (receiver->remaining_ticks <= 0) {
-                receiver->remaining_ticks = 0;
-                receiver->phase = (uint8_t)DESK_RECEIVER_READY;
+                const desk_object *object = NULL;
+                const desk_receiver_rule *rule =
+                    receiver_rule_for_state(state, world, receiver,
+                                            &object);
+
+                if (rule) {
+                    receiver_complete(state, object, rule, receiver);
+                } else {
+                    /* Preserve the owned item if its authored fixture was
+                     * removed while a save was in flight. */
+                    receiver->remaining_ticks = 0;
+                    receiver->phase = (uint8_t)DESK_RECEIVER_READY;
+                }
                 state->world_dirty = true;
             } else {
                 processing = true;
@@ -1459,27 +1531,23 @@ bool desk_use_item(desk_state *state, const desk_world *world)
                     !desk_item_commit_split_one(&state->items.inventory,
                                                 &plan, &one))
                     return false;
-                if (rule->consume) {
-                    /* Consumed input is destroyed once, here. */
+                if (rule->consume &&
+                    rule->output == (uint16_t)DESK_ITEM_NONE) {
+                    /* A consumed input with no product is destroyed once,
+                     * here, and the receiver is immediately reusable. */
                     desk_item_clear(&receiver->item);
                 } else {
+                    /* Timed transforms own their input until completion so
+                     * the unchanged state codec can save mid-process. */
                     receiver->item = one;
                 }
-                if (rule->processing_ticks > 0) {
+                if (rule->processing_ticks > 0 &&
+                    !(rule->consume &&
+                      rule->output == (uint16_t)DESK_ITEM_NONE)) {
                     receiver->phase = (uint8_t)DESK_RECEIVER_PROCESSING;
                     receiver->remaining_ticks = rule->processing_ticks;
                 } else {
-                    receiver->phase = rule->consume ?
-                        (uint8_t)DESK_RECEIVER_EMPTY :
-                        (uint8_t)DESK_RECEIVER_READY;
-                    receiver->remaining_ticks = 0;
-                    if (rule->result ==
-                        DESK_RECEIVER_RESULT_ACTIVATE_FIXTURE) {
-                        state->pending_launch = object->target;
-                        (void)snprintf(state->pending_launch_object,
-                                       sizeof state->pending_launch_object,
-                                       "%s", object->id);
-                    }
+                    receiver_complete(state, object, rule, receiver);
                 }
                 state->world_dirty = true;
                 set_toast(state, "In it goes.");
@@ -1826,6 +1894,9 @@ static bool interact_room(desk_state *state, const desk_world *world,
         return true;
     case DESK_TARGET_GATE_LOCKED:
         set_toast(state, "The street is quiet today.");
+        return true;
+    case DESK_TARGET_KETTLE:
+        set_toast(state, "The kettle hums patiently.");
         return true;
     case DESK_TARGET_NONE:
         return false;

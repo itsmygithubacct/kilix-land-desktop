@@ -1227,6 +1227,219 @@ static int selftest_body(void)
         (void)desk_take_audio_events(&state, events);
     }
 
+    /* Kitchen receiver machines: trash destroys one discardable unit with
+     * no launch, while the kettle transforms two authored tea-leaf inputs
+     * across a full run and a save/resume run. */
+    {
+        const desk_room *kitchen_room;
+        const desk_receiver_state *receiver;
+        int kitchen = desk_world_room_index(&world, "kitchen");
+        int plant = desk_items_find(&catalog, "core:decor/houseplant");
+        int leaves = desk_items_find(&catalog,
+                                     "core:drink/tea-leaves");
+        int tea = desk_items_find(&catalog, "core:drink/fresh-tea");
+        int trash_index = -1;
+        int kettle_index = -1;
+        int use_slot = -1;
+        int before_total;
+        int saved_remaining;
+        int slot_index;
+        int tick;
+
+        if (kitchen < 0 || plant <= 0 || leaves <= 0 || tea <= 0) {
+            (void)fprintf(stderr, "FAIL selftest kitchen catalog\n");
+            return EXIT_FAILURE;
+        }
+        kitchen_room = &world.rooms[kitchen];
+        for (slot_index = 0; slot_index < kitchen_room->object_count;
+             ++slot_index) {
+            if (strcmp(kitchen_room->objects[slot_index].id,
+                       "trash-can") == 0)
+                trash_index = slot_index;
+            if (strcmp(kitchen_room->objects[slot_index].id,
+                       "kettle") == 0)
+                kettle_index = slot_index;
+        }
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)plant &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        state.room = kitchen;
+        state.player_x = 71.0f;
+        state.player_y = 215.0f;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        desk_select_slot(&state, use_slot);
+        before_total = desk_inventory_total(&state.items.inventory,
+                                            (uint16_t)plant);
+        if (trash_index < 0 || use_slot < 0 || before_total < 1 ||
+            state.nearest_object != trash_index ||
+            !desk_use_item(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)plant) != before_total - 1 ||
+            state.pending_launch != DESK_TARGET_NONE) {
+            (void)fprintf(stderr, "FAIL selftest trash consume\n");
+            return EXIT_FAILURE;
+        }
+        receiver = desk_receiver_lookup(
+            &state, kitchen_room, &kitchen_room->objects[trash_index]);
+        if (!receiver ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_EMPTY ||
+            !desk_item_is_empty(&receiver->item) ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest trash receiver: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+
+        /* An empty kettle is an internal fixture, not a launch request. */
+        state.player_x = 407.0f;
+        state.player_y = 220.0f;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (kettle_index < 0 || state.nearest_object != kettle_index ||
+            !desk_interact(&state, &world) ||
+            strcmp(state.toast, "The kettle hums patiently.") != 0 ||
+            state.pending_launch != DESK_TARGET_NONE) {
+            (void)fprintf(stderr, "FAIL selftest empty kettle\n");
+            return EXIT_FAILURE;
+        }
+
+        /* Pick up the authored two-unit leaf stack. */
+        state.player_x = 330.0f;
+        state.player_y = 234.0f;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (state.nearest_world_item < 0 ||
+            !desk_interact(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)leaves) != 2) {
+            (void)fprintf(stderr, "FAIL selftest tea leaves pickup\n");
+            return EXIT_FAILURE;
+        }
+
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)leaves &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        state.player_x = 407.0f;
+        state.player_y = 220.0f;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        desk_select_slot(&state, use_slot);
+        if (use_slot < 0 || state.nearest_object != kettle_index ||
+            !desk_use_item(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)leaves) != 1 ||
+            state.pending_launch != DESK_TARGET_NONE) {
+            (void)fprintf(stderr, "FAIL selftest kettle insert\n");
+            return EXIT_FAILURE;
+        }
+        receiver = desk_receiver_lookup(
+            &state, kitchen_room, &kitchen_room->objects[kettle_index]);
+        if (!receiver ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_PROCESSING ||
+            receiver->remaining_ticks != 1800 ||
+            receiver->item.definition != (uint16_t)leaves ||
+            receiver->item.quantity != 1u) {
+            (void)fprintf(stderr, "FAIL selftest kettle processing\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 1800; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (receiver->phase != (uint8_t)DESK_RECEIVER_READY ||
+            receiver->remaining_ticks != 0 ||
+            receiver->item.definition != (uint16_t)tea ||
+            receiver->item.quantity != 1u || receiver->item.serial != 0u ||
+            state.pending_launch != DESK_TARGET_NONE) {
+            (void)fprintf(stderr, "FAIL selftest kettle output\n");
+            return EXIT_FAILURE;
+        }
+        before_total = desk_inventory_total(&state.items.inventory,
+                                            (uint16_t)tea);
+        if (!desk_interact(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)tea) != before_total + 1 ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_EMPTY) {
+            (void)fprintf(stderr, "FAIL selftest kettle first collect\n");
+            return EXIT_FAILURE;
+        }
+
+        /* The second input checkpoints in PROCESSING, then a fresh desk
+         * state resumes the exact saved countdown and brews the same output. */
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)leaves &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        desk_select_slot(&state, use_slot);
+        if (use_slot < 0 || !desk_use_item(&state, &world)) {
+            (void)fprintf(stderr, "FAIL selftest kettle second insert\n");
+            return EXIT_FAILURE;
+        }
+        receiver = desk_receiver_lookup(
+            &state, kitchen_room, &kitchen_room->objects[kettle_index]);
+        if (!receiver ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_PROCESSING ||
+            receiver->remaining_ticks != 1800) {
+            (void)fprintf(stderr,
+                          "FAIL selftest kettle second processing\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 600; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        saved_remaining = receiver->remaining_ticks;
+        if (saved_remaining != 1200 ||
+            !desk_world_state_save(&state.items, &catalog)) {
+            (void)fprintf(stderr, "FAIL selftest kettle mid-save\n");
+            return EXIT_FAILURE;
+        }
+        state.world_dirty = false;
+        desk_init(&state, &world, &catalog);
+        receiver = desk_receiver_lookup(
+            &state, kitchen_room, &kitchen_room->objects[kettle_index]);
+        if (!receiver ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_PROCESSING ||
+            receiver->remaining_ticks != saved_remaining ||
+            receiver->item.definition != (uint16_t)leaves ||
+            receiver->item.quantity != 1u) {
+            (void)fprintf(stderr, "FAIL selftest kettle resume\n");
+            return EXIT_FAILURE;
+        }
+        state.room = kitchen;
+        state.player_x = 407.0f;
+        state.player_y = 220.0f;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        for (tick = 0; tick < saved_remaining; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (receiver->phase != (uint8_t)DESK_RECEIVER_READY ||
+            receiver->item.definition != (uint16_t)tea ||
+            receiver->item.quantity != 1u || receiver->item.serial != 0u ||
+            state.nearest_object != kettle_index ||
+            state.pending_launch != DESK_TARGET_NONE) {
+            (void)fprintf(stderr, "FAIL selftest kettle resumed output\n");
+            return EXIT_FAILURE;
+        }
+        before_total = desk_inventory_total(&state.items.inventory,
+                                            (uint16_t)tea);
+        if (!desk_interact(&state, &world) ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)tea) != before_total + 1 ||
+            receiver->phase != (uint8_t)DESK_RECEIVER_EMPTY ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest kettle collect: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        state.room = living;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        (void)desk_take_audio_events(&state, events);
+    }
+
     /* Gifts and the accessory slot. */
     {
         static desk_state fresh3;
@@ -1472,6 +1685,7 @@ static int selftest_body(void)
         !desk_target_is_external(DESK_TARGET_TERMINAL) ||
         !desk_target_is_external(DESK_TARGET_MAINTENANCE) ||
         desk_target_is_external(DESK_TARGET_WARDROBE) ||
+        desk_target_is_external(DESK_TARGET_KETTLE) ||
         desk_target_is_external(DESK_TARGET_NONE)) {
         (void)fprintf(stderr, "FAIL selftest target classes\n");
         return EXIT_FAILURE;
@@ -1482,6 +1696,7 @@ static int selftest_body(void)
         "pause=quit-confirm walkbehinds=bad-rejected "
         "items=materialize-pickup-drop-persist tool=impact-timed "
         "receiver=insert-eject-persist drink=swallow-frame "
+        "receivers=trash-consume+kettle-brew "
         "place=ghost-committed gift=handoff-frame equip=swap-persist "
         "targets=%d\n",
         world.room_count, DESK_TARGET_COUNT - 1);
@@ -1961,6 +2176,24 @@ static const catalog_case CATALOG_CASES[] = {
      "\"accept_item\":\"core:test/ghost\",\"consume\":false,"
      "\"result\":\"activate-fixture\"}]}",
      "unknown item 'core:test/ghost' in receiver"},
+    {"receiver-output-needs-consume",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"Thing\",\"description\":\"A thing.\",\"family\":"
+     "\"portable\",\"behavior\":\"hold\",\"sprite\":1,"
+     "\"max_stack\":1}],\"receivers\":[{\"id\":\"r\","
+     "\"accept_any_tag\":[\"media\"],\"consume\":false,"
+     "\"result\":\"none\",\"output\":\"core:test/thing\"}]}",
+     "output requires 'consume': true"},
+    {"receiver-unknown-output",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
+     "\"accept_any_tag\":[\"media\"],\"consume\":true,"
+     "\"result\":\"none\",\"output\":\"core:test/ghost\"}]}",
+     "unknown output item 'core:test/ghost' in receiver"},
+    {"receiver-launch-shell-result",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
+     "\"accept_any_tag\":[\"media\"],\"consume\":false,"
+     "\"result\":\"launch-shell\"}]}",
+     "unknown result 'launch-shell'"},
     {"receiver-bad-result",
      "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
      "\"accept_any_tag\":[\"media\"],\"consume\":false,"
@@ -2372,7 +2605,7 @@ static int items_test(void)
         ok = false;
     }
     if (ok &&
-        (catalog.definition_count != 7 || catalog.receiver_count != 1 ||
+        (catalog.definition_count != 9 || catalog.receiver_count != 3 ||
          desk_items_find(&catalog, DESK_ITEM_MISSING_ID) !=
              (int)DESK_ITEM_DEF_MISSING ||
          desk_items_find(&catalog, "core:media/record") <= 0)) {

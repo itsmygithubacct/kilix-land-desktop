@@ -649,7 +649,20 @@
             "w": 30,
             "h": 36
           },
-          "target": "trash"
+          "target": "trash",
+          "receiver": "trash-chute"
+        },
+        {
+          "id": "kettle",
+          "prompt": "Put the kettle on",
+          "rect": {
+            "x": 390,
+            "y": 150,
+            "w": 34,
+            "h": 48
+          },
+          "target": "kettle",
+          "receiver": "kettle-brew"
         }
       ],
       "npcs": [],
@@ -665,6 +678,13 @@
           "item": "core:drink/coffee",
           "quantity": 2,
           "x": 150,
+          "y": 234
+        },
+        {
+          "id": "kitchen-tea-leaves",
+          "item": "core:drink/tea-leaves",
+          "quantity": 2,
+          "x": 330,
           "y": 234
         }
       ]

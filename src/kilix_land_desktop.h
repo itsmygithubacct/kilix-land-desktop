@@ -156,9 +156,11 @@ typedef enum desk_target {
     DESK_TARGET_STATUS_BOARD = 14,
     DESK_TARGET_GATE_LOCKED = 15,
     /* external, debug menu only (never placed in world.json) */
-    DESK_TARGET_WALK_EDITOR = 16
+    DESK_TARGET_WALK_EDITOR = 16,
+    /* internal (handled by desk.c) */
+    DESK_TARGET_KETTLE = 17
 } desk_target;
-#define DESK_TARGET_COUNT 17
+#define DESK_TARGET_COUNT 18
 
 typedef struct desk_rect {
     float x;

@@ -192,12 +192,15 @@ bool desk_receiver_accepts(const desk_item_catalog *catalog,
 
 /* ---- catalog parsing ---------------------------------------------------- */
 
-/* Receiver accept_item references may appear before their definition, so
- * the id is staged as a string and resolved after the whole document
- * parses. */
+/* Receiver accept_item/output references may appear before their
+ * definition, so the ids are staged as strings and resolved after the
+ * whole document parses. */
 typedef struct receiver_staging {
     char item_id[DESK_ITEM_ID_CAPACITY];
     size_t offset; /* of the accept_item value, for the error message */
+    char output_id[DESK_ITEM_ID_CAPACITY];
+    size_t output_offset;
+    bool output_seen;
 } receiver_staging;
 
 static void install_missing_definition(desk_item_catalog *catalog)
@@ -419,6 +422,7 @@ static bool parse_receiver(desk_json_reader *p, desk_receiver_rule *rule,
     memset(rule, 0, sizeof *rule);
     memset(staging, 0, sizeof *staging);
     rule->item = (uint16_t)DESK_ITEM_NONE;
+    rule->output = (uint16_t)DESK_ITEM_NONE;
     desk_json_skip_ws(p);
     start = p->offset;
     if (!desk_json_expect(p, '{'))
@@ -508,10 +512,23 @@ static bool parse_receiver(desk_json_reader *p, desk_receiver_rule *rule,
             value_offset = p->offset;
             if (!desk_json_parse_string(p, name, sizeof name))
                 return false;
-            if (strcmp(name, "activate-fixture") != 0)
+            if (strcmp(name, "activate-fixture") == 0) {
+                rule->result = DESK_RECEIVER_RESULT_ACTIVATE_FIXTURE;
+            } else if (strcmp(name, "none") == 0) {
+                rule->result = DESK_RECEIVER_RESULT_NONE;
+            } else {
                 return desk_json_fail_at(p, value_offset,
                                          "unknown result '%s'", name);
-            rule->result = DESK_RECEIVER_RESULT_ACTIVATE_FIXTURE;
+            }
+        } else if (strcmp(key, "output") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 7, key))
+                return false;
+            desk_json_skip_ws(p);
+            staging->output_offset = p->offset;
+            staging->output_seen = true;
+            if (!desk_json_parse_string(p, staging->output_id,
+                                        sizeof staging->output_id))
+                return false;
         } else {
             return desk_json_fail_at(p, p->key_offset,
                                      "unknown key '%s' in receiver", key);
@@ -528,6 +545,9 @@ static bool parse_receiver(desk_json_reader *p, desk_receiver_rule *rule,
     if (!receiver_id_valid(rule->id))
         return desk_json_fail_at(p, id_offset, "invalid receiver id '%s'",
                                  rule->id);
+    if (staging->output_seen && !rule->consume)
+        return desk_json_fail_at(p, staging->output_offset,
+                                 "output requires 'consume': true");
     return true;
 }
 
@@ -671,13 +691,11 @@ bool desk_items_load(desk_item_catalog *catalog, const char *path,
                                  "missing key 'definitions'");
 
     /* Cross-file references resolve only after the whole document parsed:
-     * accept_item may name a definition declared later. */
+     * accept_item and output may name a definition declared later. */
     for (index = 0; index < catalog->receiver_count; ++index) {
         desk_receiver_rule *rule = &catalog->receivers[index];
 
-        if (rule->match != DESK_RECEIVER_MATCH_ITEM)
-            continue;
-        {
+        if (rule->match == DESK_RECEIVER_MATCH_ITEM) {
             int found = desk_items_find(catalog, staging[index].item_id);
 
             if (found <= 0)
@@ -686,6 +704,16 @@ bool desk_items_load(desk_item_catalog *catalog, const char *path,
                                          "unknown item '%s' in receiver",
                                          staging[index].item_id);
             rule->item = (uint16_t)found;
+        }
+        if (staging[index].output_seen) {
+            int found = desk_items_find(catalog, staging[index].output_id);
+
+            if (found <= 0)
+                return desk_json_fail_at(
+                    &parser_state, staging[index].output_offset,
+                    "unknown output item '%s' in receiver",
+                    staging[index].output_id);
+            rule->output = (uint16_t)found;
         }
     }
     return true;

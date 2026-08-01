@@ -35,7 +35,8 @@ TAGS = ("drink", "food", "media", "tool", "wearable", "placeable", "decor",
 ITEM_KEYS = {"id", "name", "description", "family", "behavior", "sprite",
              "max_stack", "tags", "effect_ticks"}
 RECEIVER_KEYS = {"id", "accept_any_tag", "accept_all_tags", "accept_item",
-                 "accept_family", "consume", "processing_ticks", "result"}
+                 "accept_family", "consume", "processing_ticks", "result",
+                 "output"}
 ACCEPT_KEYS = ("accept_any_tag", "accept_all_tags", "accept_item",
                "accept_family")
 
@@ -182,8 +183,15 @@ def check_receiver(index, receiver, ids, item_ids):
     if "processing_ticks" in receiver:
         check_int(receiver["processing_ticks"],
                   f"{label}.processing_ticks", 0, MAX_TICKS)
-    if receiver.get("result") != "activate-fixture":
+    if receiver.get("result") not in ("activate-fixture", "none"):
         fail(f"{label}: unknown result '{receiver.get('result')}'")
+    if "output" in receiver:
+        check_string(receiver["output"], f"{label}.output", ID_CAPACITY)
+        if not receiver["consume"]:
+            fail(f"{label}: output requires 'consume': true")
+        if receiver["output"] not in item_ids:
+            fail(f"{label}: unknown output item '{receiver['output']}' "
+                 "in receiver")
 
 
 def check_art(items_path, definitions):
