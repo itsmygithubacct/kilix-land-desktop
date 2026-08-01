@@ -278,6 +278,12 @@ def main():
             if not point_in_rect(sx, sy, dest["walk"]):
                 fail(f"{rid}.doors[{i}]: spawn ({sx},{sy}) outside "
                      f"'{to}' walk rect")
+            # Movement only ever accepts pre-validated feet boxes, so a
+            # teleport target whose box overlaps solids strands the
+            # player.
+            if not feet_box_clear(dest, sx, sy):
+                fail(f"{rid}.doors[{i}]: spawn ({sx},{sy}) feet box "
+                     f"blocked in '{to}'")
             for j, rect in enumerate(dest.get("obstacles", [])):
                 if point_in_rect(sx, sy, rect):
                     fail(f"{rid}.doors[{i}]: spawn inside "
@@ -377,21 +383,45 @@ CELL = 6
 GRID_COLS = LOGICAL_WIDTH // CELL
 GRID_ROWS = LOGICAL_HEIGHT // CELL
 
+# The runtime collision volume (src/kilix_land_desktop.h): a 16x8 feet
+# box anchored at the position, symmetric on the spine. Connectivity must
+# be proven for the box, not the point — a lane the point threads but the
+# box cannot is a sealed door in play.
+FEET_HALF_WIDTH = 8.0
+FEET_HEIGHT = 8.0
+
+
+def feet_box_clear(room, x, y):
+    walk = room["walk"]
+    if (x - FEET_HALF_WIDTH < walk["x"]
+            or x + FEET_HALF_WIDTH > walk["x"] + walk["w"]
+            or y - FEET_HEIGHT < walk["y"]
+            or y > walk["y"] + walk["h"]):
+        return False
+    for rect in room.get("obstacles", []):
+        if (x - FEET_HALF_WIDTH < rect["x"] + rect["w"]
+                and x + FEET_HALF_WIDTH > rect["x"]
+                and y - FEET_HEIGHT < rect["y"] + rect["h"]
+                and y > rect["y"]):
+            return False
+    for npc in room.get("npcs", []):
+        if (x - FEET_HALF_WIDTH < npc["x"] + FEET_HALF_WIDTH
+                and x + FEET_HALF_WIDTH > npc["x"] - FEET_HALF_WIDTH
+                and y - FEET_HEIGHT < npc["y"]
+                and y > npc["y"] - FEET_HEIGHT):
+            return False
+    return True
+
 
 def walkable_cells(room):
-    """Cell centers inside walk and outside every obstacle — the same
-    rasterization the walk editor paints and desk.c effectively enforces."""
+    """Cell centers where the runtime feet box fits — the same solidity
+    desk.c enforces, including solid housemates."""
     cells = set()
-    walk = room["walk"]
-    obstacles = room.get("obstacles", [])
     for cy in range(GRID_ROWS):
         for cx in range(GRID_COLS):
             x, y = cx * CELL + CELL / 2, cy * CELL + CELL / 2
-            if not point_in_rect(x, y, walk):
-                continue
-            if any(point_in_rect(x, y, o) for o in obstacles):
-                continue
-            cells.add((cx, cy))
+            if feet_box_clear(room, x, y):
+                cells.add((cx, cy))
     return cells
 
 
@@ -429,10 +459,25 @@ def check_connectivity(room, rooms, ids, start):
             if (nx, ny) in cells and (nx, ny) not in reached:
                 reached.add((nx, ny))
                 frontier.append((nx, ny))
+    walk = room["walk"]
+    legal_x0 = walk["x"] + FEET_HALF_WIDTH
+    legal_x1 = walk["x"] + walk["w"] - FEET_HALF_WIDTH
+    legal_y0 = walk["y"] + FEET_HEIGHT
+    legal_y1 = walk["y"] + walk["h"]
     for i, door in enumerate(room.get("doors", [])):
         rect = door["rect"]
-        if not any(point_in_rect(cx * CELL + 3, cy * CELL + 3, rect)
-                   for cx, cy in reached):
+        # Door triggers fire on the position point, whose legal band is
+        # the walk rect inset by the feet box; a top-edge door is reached
+        # exactly at that band's boundary row, which cell centers miss.
+        dx0 = max(rect["x"], legal_x0)
+        dx1 = min(rect["x"] + rect["w"], legal_x1)
+        dy0 = max(rect["y"], legal_y0)
+        dy1 = min(rect["y"] + rect["h"], legal_y1)
+        reachable = dx0 <= dx1 and dy0 <= dy1 and any(
+            dx0 <= (cx + 1) * CELL and dx1 >= cx * CELL
+            and dy0 <= (cy + 1) * CELL and dy1 >= cy * CELL
+            for cx, cy in reached)
+        if not reachable:
             fail(f"{rid}.doors[{i}] (to '{door['to']}'): unreachable — "
                  "walkable space does not connect the spawns to this door")
 

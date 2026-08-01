@@ -48,6 +48,14 @@
 #define DESK_MAX_ITEM_SPAWNS_PER_ROOM 8
 #define DESK_NPC_SPAWN_EXCLUSION 24.0f
 
+/* Stardew-model boundaries: solidity tests a small FEET BOX, never the
+ * sprite — a 16x8 logical box hugging the ground contact, symmetric on
+ * the spine. Bodies may overlap scenery and each other freely above the
+ * feet; depth sorting and walk-behind masks own that. NPCs are solid
+ * through the same box. */
+#define DESK_FEET_BOX_HALF_WIDTH 8.0f
+#define DESK_FEET_BOX_HEIGHT 8.0f
+
 #define DESK_INTERACT_RADIUS 72.0f
 /* A gift needs an arm's-length handoff, not the full interact radius,
  * so placing or drinking near a housemate never turns into a present. */
@@ -480,6 +488,10 @@ int desk_dialogue_count(const desk_state *state);
 size_t desk_dialogue_visible_chars(const desk_state *state);
 const char *desk_interact_prompt(const desk_state *state,
                                  const desk_world *world);
+/* Anchor point of the entity behind the current prompt, so the render
+ * can tag the target instead of covering the screen. False = no target. */
+bool desk_interact_anchor(const desk_state *state, const desk_world *world,
+                          float *x, float *y);
 int desk_interact_npc(const desk_state *state, const desk_world *world);
 int desk_pause_item_count(const desk_state *state);
 const char *desk_pause_item(const desk_state *state, int index);

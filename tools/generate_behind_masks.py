@@ -268,6 +268,58 @@ REGIONS = {
 }
 
 
+def rect_region(rid, bbox, base_y, tolerance=44, step=20, inset=8,
+                avoid_tolerance=16):
+    """A fixture-rect-guided region: grid seeds across the inset bbox
+    (the fixture hotspot rects are authored to match the plate art) and
+    floor swatches sampled just below the fixture's base as avoids. Used
+    for the boundary-model coverage pass, where the exposed fixtures are
+    known from world.json rather than hand-traced."""
+    x0, y0, x1, y1 = bbox
+    seeds = [(x, y) for x in range(x0 + inset, x1 - inset + 1, step)
+             for y in range(y0 + inset, y1 - inset + 1, step)]
+    center_x = (x0 + x1) // 2
+    avoid = [(center_x - 44, base_y + 14), (center_x, base_y + 16),
+             (center_x + 44, base_y + 14)]
+    return region(rid, bbox, tolerance, seeds, avoid=avoid,
+                  avoid_tolerance=avoid_tolerance)
+
+
+# Fixtures whose wrong-overlap band is reachable by the runtime feet box
+# (see BOUNDARIES-CLIPPING-RESEARCH): per (room, style) because each
+# plate paints the furniture in its own spot — plate-space bbox measured
+# by ruler, plate base row, region id. world.json declares the matching
+# walkbehind baselines (study 1@198, living 2/3@192, yard 3@204).
+_EXPOSED_FIXTURES = {
+    ("living", "legend"): [((388, 380, 570, 520), 512, 2),
+                           ((1046, 408, 1134, 520), 512, 3)],
+    ("living", "chumrunner"): [((388, 380, 570, 520), 512, 2),
+                               ((1046, 408, 1134, 520), 512, 3)],
+    ("living", "fantasy"): [((388, 380, 570, 520), 512, 2),
+                            ((1046, 408, 1134, 520), 512, 3)],
+    ("living", "pleb-bound"): [((388, 380, 570, 520), 512, 2),
+                               ((1046, 408, 1134, 520), 512, 3)],
+    ("study", "legend"): [((352, 296, 452, 516), 512, 1, 48, 16)],
+    ("study", "chumrunner"): [((232, 322, 306, 522), 518, 1)],
+    ("study", "fantasy"): [((250, 316, 334, 512), 505, 1, 48, 8),
+                           ((172, 335, 250, 505), 500, 1, 48, 8)],
+    ("study", "pleb-bound"): [((198, 276, 336, 528), 520, 1)],
+    ("yard", "legend"): [((54, 298, 190, 556), 544, 3)],
+    ("yard", "chumrunner"): [((52, 292, 142, 415), 544, 3)],
+    ("yard", "fantasy"): [((48, 294, 210, 556), 544, 3)],
+    ("yard", "pleb-bound"): [((36, 298, 116, 396), 544, 3)],
+}
+for (_room, _style), _entries in _EXPOSED_FIXTURES.items():
+    REGIONS.setdefault((_room, _style), [])
+    for _entry in _entries:
+        _bbox, _base, _rid = _entry[0], _entry[1], _entry[2]
+        _tol = _entry[3] if len(_entry) > 3 else 44
+        _avoid_tol = _entry[4] if len(_entry) > 4 else 16
+        REGIONS[(_room, _style)].append(
+            rect_region(_rid, _bbox, _base, tolerance=_tol,
+                        avoid_tolerance=_avoid_tol))
+
+
 def fill_region(pixels, spec):
     """-> set of (x, y) plate pixels belonging to the region."""
     x0, y0, x1, y1 = spec["bbox"]

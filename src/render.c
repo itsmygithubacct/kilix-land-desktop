@@ -852,41 +852,45 @@ static void base_style(kilix_ui_style *style, uint32_t accent)
     style->panel_alpha = 0.97f;
 }
 
+/* The prompt is a hover-style tag pinned to the TARGET entity (the
+ * Stardew presentation), never a panel over the playfield: a compact
+ * chip above the item, housemate, or fixture, clamped to the canvas
+ * and kept clear of the toast and hotbar bands. */
 static void draw_interact_prompt(ki_td_soft_renderer *renderer,
                                  const ki_td_view *view, sr_canvas *canvas,
                                  const desk_state *state,
                                  const desk_world *world)
 {
     const char *prompt;
-    char message[64];
-    kilix_ui_style style;
     uint32_t accent = COLOR_GOLD;
+    float anchor_x;
+    float anchor_y;
     float width;
-    float bob;
     float left;
+    float top;
+    float bob;
     int talk_actor;
     if (state->mode != DESK_MODE_ROOM) return;
     prompt = desk_interact_prompt(state, world);
     if (!prompt || prompt[0] == '\0') return;
+    if (!desk_interact_anchor(state, world, &anchor_x, &anchor_y)) return;
     talk_actor = desk_interact_npc(state, world);
     if (talk_actor >= 0)
         accent = desk_actor_color(visible_cast(state), talk_actor);
-    (void)snprintf(message, sizeof message, "ENTER  %s", prompt);
-    width = 26.0f + (float)strlen(message) * 8.0f;
-    if (width < 170.0f) width = 170.0f;
-    if (width > 440.0f) width = 440.0f;
-    bob = (state->simulation_tick / 12u) % 2u == 0u ? 0.0f : -2.0f;
-    left = 240.0f - width * 0.5f;
-    base_style(&style, accent);
-    style.panel_alpha = 0.93f;
-    /* The winning-action prompt sits directly above the hotbar strip. */
-    kilix_ui_draw_panel(renderer, view,
-                        (ki_td_rect){(int)left, 212 + (int)bob,
-                                     (int)width, 24},
-                        &style, NULL);
-    ki_td_soft_fill_rect(renderer, view, left + 2.0f, 214.0f + bob,
-                         4.0f, 20.0f, accent, 1.0f);
-    text_at(canvas, view, left + 13.0f, 217.0f + bob, message, COLOR_INK);
+    bob = (state->simulation_tick / 16u) % 2u == 0u ? 0.0f : -1.0f;
+    width = 12.0f + (float)strlen(prompt) * 6.0f;
+    left = anchor_x - width * 0.5f;
+    if (left < 2.0f) left = 2.0f;
+    if (left + width > (float)DESK_LOGICAL_WIDTH - 2.0f)
+        left = (float)DESK_LOGICAL_WIDTH - 2.0f - width;
+    top = anchor_y - 15.0f + bob;
+    if (top < 36.0f) top = 36.0f; /* below the toast band */
+    if (top > 224.0f) top = 224.0f; /* above the hotbar strip */
+    ki_td_soft_fill_rect(renderer, view, left, top, width, 13.0f,
+                         UINT32_C(0x070b13), 0.84f);
+    ki_td_soft_fill_rect(renderer, view, left, top, 2.0f, 13.0f, accent,
+                         1.0f);
+    small_text(canvas, view, left + 5.0f, top + 3.0f, prompt, COLOR_INK);
 }
 
 #define HOTBAR_SLOT_SIZE 24

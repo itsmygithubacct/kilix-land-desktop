@@ -456,40 +456,129 @@ static const dialogue_beat *current_beat(const desk_state *state)
     return &script->beats[state->dialogue_beat];
 }
 
+/* Keeps a feet box inside the walk rect (used when restoring saved or
+ * teleported positions; live movement never needs correction because it
+ * only ever accepts pre-validated boxes). */
 static void clamp_to_walk(desk_state *state, const desk_room *room)
 {
-    if (state->player_x < room->walk.x)
-        state->player_x = room->walk.x;
-    if (state->player_x > room->walk.x + room->walk.w)
-        state->player_x = room->walk.x + room->walk.w;
-    if (state->player_y < room->walk.y)
-        state->player_y = room->walk.y;
-    if (state->player_y > room->walk.y + room->walk.h)
-        state->player_y = room->walk.y + room->walk.h;
+    float min_x = room->walk.x + DESK_FEET_BOX_HALF_WIDTH;
+    float max_x = room->walk.x + room->walk.w - DESK_FEET_BOX_HALF_WIDTH;
+    float min_y = room->walk.y + DESK_FEET_BOX_HEIGHT;
+    float max_y = room->walk.y + room->walk.h;
+
+    if (min_x > max_x) min_x = max_x = room->walk.x + room->walk.w * 0.5f;
+    if (state->player_x < min_x) state->player_x = min_x;
+    if (state->player_x > max_x) state->player_x = max_x;
+    if (state->player_y < min_y) state->player_y = min_y;
+    if (state->player_y > max_y) state->player_y = max_y;
 }
 
-/* Movement is axis-exclusive, so pushing back out along the moved axis is a
- * full resolution and leaves the free axis untouched (edge sliding). */
-static void resolve_obstacles(desk_state *state, const desk_room *room,
-                              int move_x, int move_y)
+/* The Stardew boundary currency: does the feet box anchored at (x, y)
+ * overlap this rect? Strict inequalities so edge contact is legal. */
+static bool feet_box_hits_rect(float x, float y, const desk_rect *rect)
+{
+    return x - DESK_FEET_BOX_HALF_WIDTH < rect->x + rect->w &&
+           x + DESK_FEET_BOX_HALF_WIDTH > rect->x &&
+           y - DESK_FEET_BOX_HEIGHT < rect->y + rect->h &&
+           y > rect->y;
+}
+
+static bool feet_boxes_collide(float ax, float ay, float bx, float by)
+{
+    return ax - DESK_FEET_BOX_HALF_WIDTH <
+               bx + DESK_FEET_BOX_HALF_WIDTH &&
+           ax + DESK_FEET_BOX_HALF_WIDTH >
+               bx - DESK_FEET_BOX_HALF_WIDTH &&
+           ay - DESK_FEET_BOX_HEIGHT < by && ay > by - DESK_FEET_BOX_HEIGHT;
+}
+
+/* True when the player's feet box may stand at (x, y): inside the walk
+ * rect, off every obstacle, and off every solid housemate. This tests
+ * the PROPOSED position — nothing is ever corrected after penetrating. */
+static bool feet_box_clear(const desk_room *room, float x, float y)
 {
     int index;
+
+    if (x - DESK_FEET_BOX_HALF_WIDTH < room->walk.x ||
+        x + DESK_FEET_BOX_HALF_WIDTH > room->walk.x + room->walk.w ||
+        y - DESK_FEET_BOX_HEIGHT < room->walk.y ||
+        y > room->walk.y + room->walk.h)
+        return false;
     for (index = 0; index < room->obstacle_count &&
-                    index < DESK_MAX_OBSTACLES_PER_ROOM; ++index) {
-        const desk_rect *rect = &room->obstacles[index];
-        if (state->player_x <= rect->x ||
-            state->player_x >= rect->x + rect->w ||
-            state->player_y <= rect->y ||
-            state->player_y >= rect->y + rect->h)
-            continue;
-        if (move_x < 0)
-            state->player_x = rect->x + rect->w;
-        else if (move_x > 0)
-            state->player_x = rect->x;
-        else if (move_y < 0)
-            state->player_y = rect->y + rect->h;
-        else if (move_y > 0)
-            state->player_y = rect->y;
+                    index < DESK_MAX_OBSTACLES_PER_ROOM; ++index)
+        if (feet_box_hits_rect(x, y, &room->obstacles[index]))
+            return false;
+    for (index = 0; index < room->npc_count &&
+                    index < DESK_MAX_NPCS_PER_ROOM; ++index)
+        if (feet_boxes_collide(x, y, room->npcs[index].x,
+                               room->npcs[index].y))
+            return false;
+    return true;
+}
+
+/* One direction's movement with Stardew's three fallbacks: the full
+ * step, the half step, and — because a blocked corner should steer, not
+ * stick — a perpendicular nudge when only one end of the leading edge is
+ * blocked and the escape lane is open. */
+static void move_player(desk_state *state, const desk_room *room,
+                        float dx, float dy, float step)
+{
+    float next_x = state->player_x + dx * step;
+    float next_y = state->player_y + dy * step;
+
+    if (feet_box_clear(room, next_x, next_y)) {
+        state->player_x = next_x;
+        state->player_y = next_y;
+        return;
+    }
+    next_x = state->player_x + dx * step * 0.5f;
+    next_y = state->player_y + dy * step * 0.5f;
+    if (feet_box_clear(room, next_x, next_y)) {
+        state->player_x = next_x;
+        state->player_y = next_y;
+        return;
+    }
+    if (dx != 0.0f) {
+        /* Probe the leading edge's top and bottom quarters by testing
+         * the full step at a quarter-height offset each way. */
+        float lead_x = state->player_x + dx * step;
+        bool top_blocked =
+            !feet_box_clear(room, lead_x,
+                            state->player_y - DESK_FEET_BOX_HEIGHT * 0.75f +
+                                DESK_FEET_BOX_HEIGHT);
+        bool bottom_blocked =
+            !feet_box_clear(room, lead_x,
+                            state->player_y + DESK_FEET_BOX_HEIGHT * 0.75f);
+
+        if (top_blocked && !bottom_blocked &&
+            feet_box_clear(room, state->player_x,
+                           state->player_y + step))
+            state->player_y += step;
+        else if (bottom_blocked && !top_blocked &&
+                 feet_box_clear(room, state->player_x,
+                                state->player_y - step))
+            state->player_y -= step;
+    } else if (dy != 0.0f) {
+        float lead_y = state->player_y + dy * step;
+        bool left_blocked =
+            !feet_box_clear(room,
+                            state->player_x -
+                                DESK_FEET_BOX_HALF_WIDTH * 0.75f,
+                            lead_y);
+        bool right_blocked =
+            !feet_box_clear(room,
+                            state->player_x +
+                                DESK_FEET_BOX_HALF_WIDTH * 0.75f,
+                            lead_y);
+
+        if (left_blocked && !right_blocked &&
+            feet_box_clear(room, state->player_x + step,
+                           state->player_y))
+            state->player_x += step;
+        else if (right_blocked && !left_blocked &&
+                 feet_box_clear(room, state->player_x - step,
+                                state->player_y))
+            state->player_x -= step;
     }
 }
 
@@ -616,7 +705,7 @@ static void room_safe_spawn(const desk_room *room, float *x, float *y)
     float best_y = center_y;
     float best_distance = -1.0f;
     float grid_y;
-    if (position_clear(room, center_x, center_y)) {
+    if (feet_box_clear(room, center_x, center_y)) {
         *x = center_x;
         *y = center_y;
         return;
@@ -631,7 +720,7 @@ static void room_safe_spawn(const desk_room *room, float *x, float *y)
             float distance;
             int door;
             bool in_door = false;
-            if (!position_clear(room, grid_x, grid_y)) continue;
+            if (!feet_box_clear(room, grid_x, grid_y)) continue;
             for (door = 0; door < room->door_count; ++door) {
                 const desk_rect *rect = &room->doors[door].rect;
                 if (grid_x >= rect->x && grid_x <= rect->x + rect->w &&
@@ -795,7 +884,7 @@ void desk_init(desk_state *state, const desk_world *world,
             clamp_to_walk(state, room);
             /* The map may have been repainted since this position was
              * saved; never resume inside freshly blocked space. */
-            if (!position_clear(room, state->player_x, state->player_y))
+            if (!feet_box_clear(room, state->player_x, state->player_y))
                 room_safe_spawn(room, &state->player_x, &state->player_y);
         }
         state->mode = DESK_MODE_ROOM;
@@ -1419,26 +1508,25 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
         state->player_animator.movement_locked) {
         /* An action clip owns the body until COMPLETE. */
     } else if (state->mode == DESK_MODE_ROOM && room) {
+        float step = DESK_PARITY_LEGEND_PLAYER_SPEED * seconds;
+
         if (move_x < 0) {
             state->facing = DESK_FACING_LEFT;
-            state->player_x -= DESK_PARITY_LEGEND_PLAYER_SPEED * seconds;
+            move_player(state, room, -1.0f, 0.0f, step);
             state->player_moving = true;
         } else if (move_x > 0) {
             state->facing = DESK_FACING_RIGHT;
-            state->player_x += DESK_PARITY_LEGEND_PLAYER_SPEED * seconds;
+            move_player(state, room, 1.0f, 0.0f, step);
             state->player_moving = true;
         } else if (move_y < 0) {
             state->facing = DESK_FACING_UP;
-            state->player_y -= DESK_PARITY_LEGEND_PLAYER_SPEED * seconds;
+            move_player(state, room, 0.0f, -1.0f, step);
             state->player_moving = true;
         } else if (move_y > 0) {
             state->facing = DESK_FACING_DOWN;
-            state->player_y += DESK_PARITY_LEGEND_PLAYER_SPEED * seconds;
+            move_player(state, room, 0.0f, 1.0f, step);
             state->player_moving = true;
         }
-        clamp_to_walk(state, room);
-        resolve_obstacles(state, room, move_x, move_y);
-        clamp_to_walk(state, room);
         if (state->door_cooldown_ticks == 0)
             check_doors(state, world, room);
     } else if (state->mode == DESK_MODE_WIZARD) {
@@ -2643,6 +2731,45 @@ size_t desk_dialogue_visible_chars(const desk_state *state)
               (size_t)state->dialogue_age /
                   (size_t)DESK_DIALOGUE_REVEAL_TICKS_PER_CHAR : 0u;
     return visible < length ? visible : length;
+}
+
+bool desk_interact_anchor(const desk_state *state, const desk_world *world,
+                          float *x, float *y)
+{
+    const desk_room *room;
+
+    if (!state || !world || !x || !y || state->mode != DESK_MODE_ROOM)
+        return false;
+    room = current_room(state, world);
+    if (!room) return false;
+    switch (room_pick(state, room)) {
+    case DESK_PICK_ITEM: {
+        const desk_world_item *entry =
+            &state->items.items[state->nearest_world_item];
+
+        *x = entry->x;
+        *y = entry->y - 14.0f;
+        return true;
+    }
+    case DESK_PICK_NPC: {
+        const desk_npc *npc = &room->npcs[state->nearest_npc];
+
+        *x = npc->x;
+        *y = npc->y - 66.0f;
+        return true;
+    }
+    case DESK_PICK_OBJECT: {
+        const desk_object *object =
+            &room->objects[state->nearest_object];
+
+        *x = object->rect.x + object->rect.w * 0.5f;
+        *y = object->rect.y - 4.0f;
+        return true;
+    }
+    case DESK_PICK_NONE:
+    default:
+        return false;
+    }
 }
 
 /* Actor id behind the current talk prompt, or -1 when the prompt (if any)

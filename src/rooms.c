@@ -739,6 +739,42 @@ static bool point_in_rect(float x, float y, const desk_rect *rect)
            y <= rect->y + rect->h;
 }
 
+/* Mirror of desk.c's runtime solidity: door spawns teleport, and the
+ * movement model never corrects a penetrating box, so every spawn's
+ * feet box must already be clear of walls, obstacles, and housemates. */
+static bool spawn_feet_box_clear(const desk_room *room, float x, float y)
+{
+    int index;
+
+    if (x - DESK_FEET_BOX_HALF_WIDTH < room->walk.x ||
+        x + DESK_FEET_BOX_HALF_WIDTH > room->walk.x + room->walk.w ||
+        y - DESK_FEET_BOX_HEIGHT < room->walk.y ||
+        y > room->walk.y + room->walk.h)
+        return false;
+    for (index = 0; index < room->obstacle_count &&
+                    index < DESK_MAX_OBSTACLES_PER_ROOM; ++index) {
+        const desk_rect *rect = &room->obstacles[index];
+
+        if (x - DESK_FEET_BOX_HALF_WIDTH < rect->x + rect->w &&
+            x + DESK_FEET_BOX_HALF_WIDTH > rect->x &&
+            y - DESK_FEET_BOX_HEIGHT < rect->y + rect->h && y > rect->y)
+            return false;
+    }
+    for (index = 0; index < room->npc_count &&
+                    index < DESK_MAX_NPCS_PER_ROOM; ++index) {
+        const desk_npc *npc = &room->npcs[index];
+
+        if (x - DESK_FEET_BOX_HALF_WIDTH <
+                npc->x + DESK_FEET_BOX_HALF_WIDTH &&
+            x + DESK_FEET_BOX_HALF_WIDTH >
+                npc->x - DESK_FEET_BOX_HALF_WIDTH &&
+            y - DESK_FEET_BOX_HEIGHT < npc->y &&
+            y > npc->y - DESK_FEET_BOX_HEIGHT)
+            return false;
+    }
+    return true;
+}
+
 bool desk_world_validate(const desk_world *world, char *error,
                          size_t error_size)
 {
@@ -826,6 +862,13 @@ bool desk_world_validate(const desk_world *world, char *error,
                              "%s.doors[%d]: spawn (%g,%g) outside '%s' walk rect",
                              room->id, i, (double)door->spawn_x,
                              (double)door->spawn_y, door->to_id);
+            if (!spawn_feet_box_clear(destination, door->spawn_x,
+                                      door->spawn_y))
+                return vfail(error, error_size,
+                             "%s.doors[%d]: spawn (%g,%g) feet box "
+                             "blocked in '%s'", room->id, i,
+                             (double)door->spawn_x, (double)door->spawn_y,
+                             door->to_id);
             for (j = 0; j < destination->obstacle_count; ++j)
                 if (point_in_rect(door->spawn_x, door->spawn_y,
                                   &destination->obstacles[j]))
