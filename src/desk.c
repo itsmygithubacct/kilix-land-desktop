@@ -921,6 +921,32 @@ static desk_receiver_state *receiver_state_for(desk_state *state,
     return entry;
 }
 
+static desk_social_record *social_record_for(desk_state *state,
+                                             desk_cast cast, int actor,
+                                             bool create)
+{
+    desk_social_record *record;
+    int index;
+
+    if (actor < (int)DESK_ACTOR_ALLY_1 || actor > (int)DESK_ACTOR_ALLY_3)
+        return NULL;
+    for (index = 0; index < state->items.social_count; ++index) {
+        record = &state->items.social[index];
+        if (record->cast == (uint8_t)cast &&
+            record->actor == (uint8_t)actor)
+            return record;
+    }
+    if (!create ||
+        state->items.social_count >= DESK_MAX_SOCIAL_RECORDS)
+        return NULL;
+    record = &state->items.social[state->items.social_count];
+    memset(record, 0, sizeof *record);
+    record->cast = (uint8_t)cast;
+    record->actor = (uint8_t)actor;
+    state->items.social_count++;
+    return record;
+}
+
 const desk_receiver_state *desk_receiver_lookup(const desk_state *state,
                                                 const desk_room *room,
                                                 const desk_object *object)
@@ -1149,7 +1175,47 @@ static void action_apply(desk_state *state, const desk_world *world)
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return;
     }
-    case DESK_ACTION_GIVE:
+    case DESK_ACTION_GIVE: {
+        const desk_npc *npc;
+        desk_social_record *social;
+        desk_item_plan split_plan;
+        desk_item one;
+        char message[64];
+        int giftable = desk_item_tag_index("giftable");
+
+        if (plan->npc_index >= (uint16_t)room->npc_count) return;
+        npc = &room->npcs[plan->npc_index];
+        if (npc->actor < (int)DESK_ACTOR_ALLY_1 ||
+            npc->actor > (int)DESK_ACTOR_ALLY_3)
+            return;
+        if (point_distance_sq(state->player_x, state->player_y, npc->x,
+                              npc->y) > DESK_GIFT_REACH * DESK_GIFT_REACH)
+            return;
+        if (giftable < 0 ||
+            (def->tags &
+             ((desk_item_tags)1u << (unsigned int)giftable)) == 0u)
+            return;
+        /* The transfer and the friendship change land together at the
+         * handoff frame; the reaction toast reads the same result. */
+        if (!desk_item_plan_split_one(&state->items.inventory,
+                                      plan->inventory_slot, &split_plan) ||
+            !desk_item_commit_split_one(&state->items.inventory,
+                                        &split_plan, &one))
+            return;
+        social = social_record_for(state, state->profile.cast, npc->actor,
+                                   true);
+        if (social) {
+            if (social->points <= 1000000 - 25) social->points += 25;
+            if (social->gifts < UINT16_MAX) social->gifts++;
+        }
+        state->world_dirty = true;
+        action->committed = true;
+        (void)snprintf(message, sizeof message, "%.20s is delighted.",
+                       desk_actor_name(state->profile.cast, npc->actor));
+        set_toast(state, message);
+        queue_audio(state, DESK_AUDIO_DIALOGUE);
+        return;
+    }
     case DESK_ACTION_NONE:
     default:
         return;
@@ -1325,6 +1391,43 @@ bool desk_use_item(desk_state *state, const desk_world *world)
         set_toast(state, "Whatever this was, it stays a mystery.");
         return true;
     }
+    /* A housemate in front takes priority — but only at handoff reach:
+     * giftable items start the give clip, anything else is politely
+     * declined without moving. */
+    if (npc_selected(state, room) &&
+        point_distance_sq(state->player_x, state->player_y,
+                          room->npcs[state->nearest_npc].x,
+                          room->npcs[state->nearest_npc].y) <=
+            DESK_GIFT_REACH * DESK_GIFT_REACH) {
+        int giftable = desk_item_tag_index("giftable");
+
+        if (giftable < 0 ||
+            (def->tags &
+             ((desk_item_tags)1u << (unsigned int)giftable)) == 0u) {
+            set_toast(state, "They'd rather not.");
+            return true;
+        }
+        state->action_nonce++;
+        memset(&state->action, 0, sizeof state->action);
+        state->action.active = true;
+        state->action.plan.nonce = state->action_nonce;
+        state->action.plan.kind = (uint16_t)DESK_ACTION_GIVE;
+        state->action.plan.room = (uint16_t)state->room;
+        state->action.plan.inventory_slot =
+            (uint16_t)state->items.inventory.selected;
+        state->action.plan.inventory_generation =
+            state->items.inventory
+                .generation[state->items.inventory.selected];
+        state->action.plan.object_index = (uint16_t)UINT16_MAX;
+        state->action.plan.npc_index = (uint16_t)state->nearest_npc;
+        state->player_animator.clip = DESK_CLIP_GIVE;
+        state->player_animator.frame = 0;
+        state->player_animator.frame_ticks = 0;
+        state->player_animator.movement_locked = true;
+        state->player_moving = false;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
     /* Offer to a fixture receiver before any behavior: the fixture's
      * data-defined rule decides, and an instant accept both moves the
      * item and queues the fixture's own compiled target once. */
@@ -1475,8 +1578,41 @@ bool desk_use_item(desk_state *state, const desk_world *world)
         update_nearest(state, world);
         return true;
     }
+    case DESK_BEHAVIOR_EQUIP: {
+        desk_item_plan take_plan;
+        desk_item taken;
+        desk_item previous;
+        char message[64];
+
+        /* Exclusive ownership swap: the accessory slot takes the item
+         * and any previous accessory drops into the freed slot, so both
+         * transitions happen exactly once. */
+        previous = state->items.equipment[DESK_EQUIP_ACCESSORY];
+        if (!desk_inventory_plan_remove(&state->items.inventory,
+                                        state->items.inventory.selected,
+                                        held->quantity, &take_plan) ||
+            !desk_inventory_commit_remove(&state->items.inventory,
+                                          &take_plan, &taken))
+            return false;
+        state->items.equipment[DESK_EQUIP_ACCESSORY] = taken;
+        if (!desk_item_is_empty(&previous)) {
+            desk_item_plan back_plan;
+
+            if (desk_inventory_plan_add(&state->items.inventory,
+                                        state->catalog, &previous,
+                                        &back_plan))
+                (void)desk_inventory_commit_add(&state->items.inventory,
+                                                state->catalog, &previous,
+                                                &back_plan);
+        }
+        state->world_dirty = true;
+        (void)snprintf(message, sizeof message, "Wearing the %.24s.",
+                       def->name);
+        set_toast(state, message);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    }
     case DESK_BEHAVIOR_HOLD:
-    case DESK_BEHAVIOR_EQUIP:
     case DESK_BEHAVIOR_UNLOCK:
     default:
         set_toast(state, "Not the moment for that.");
@@ -1728,6 +1864,14 @@ static bool interact_dialogue(desk_state *state)
     if (state->dialogue_beat >= script->count) {
         uint32_t bit = UINT32_C(1) <<
                        (unsigned int)state->conversation_npc;
+        desk_social_record *social =
+            social_record_for(state, state->profile.cast,
+                              state->conversation_npc, true);
+
+        if (social && social->points <= 1000000 - 2) {
+            social->points += 2;
+            state->world_dirty = true;
+        }
         state->talked_mask |= bit;
         state->profile.talked_mask = state->talked_mask;
         state->profile_dirty = true;

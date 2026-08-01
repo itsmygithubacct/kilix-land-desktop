@@ -49,6 +49,9 @@
 #define DESK_NPC_SPAWN_EXCLUSION 24.0f
 
 #define DESK_INTERACT_RADIUS 72.0f
+/* A gift needs an arm's-length handoff, not the full interact radius,
+ * so placing or drinking near a housemate never turns into a present. */
+#define DESK_GIFT_REACH 40.0f
 #define DESK_DOOR_COOLDOWN_TICKS 30
 #define DESK_TOAST_TICKS 180
 #define DESK_DIALOGUE_REVEAL_TICKS_PER_CHAR 2

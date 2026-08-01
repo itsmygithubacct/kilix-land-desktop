@@ -935,6 +935,29 @@ static void draw_hotbar(ki_td_soft_renderer *renderer,
                                  2.0f, accent, 1.0f);
         }
     }
+    if (!desk_item_is_empty(
+            &state->items.equipment[DESK_EQUIP_ACCESSORY])) {
+        /* Worn-accessory chip on the strip's left shoulder. */
+        const desk_item *worn =
+            &state->items.equipment[DESK_EQUIP_ACCESSORY];
+        const desk_item_def *def =
+            desk_items_def(state->catalog, worn->definition);
+        float chip_x = left - 24.0f;
+        ki_td_rgba8 cell;
+
+        ki_td_soft_fill_rect(renderer, view, chip_x - 2.0f,
+                             HOTBAR_TOP - 2.0f, 20.0f,
+                             (float)HOTBAR_SLOT_SIZE + 4.0f,
+                             UINT32_C(0x070b13), 0.78f);
+        if (def &&
+            desk_graphics_item_cell(graphics, visible_cast(state),
+                                    (int)def->sprite, &cell))
+            ki_td_soft_rgba_resized(renderer, view, chip_x,
+                                    HOTBAR_TOP + 2.0f, &cell, 14, 14,
+                                    1.0f);
+        ki_td_soft_fill_rect(renderer, view, chip_x, HOTBAR_TOP + 19.0f,
+                             14.0f, 2.0f, accent, 0.8f);
+    }
 }
 
 static void draw_toast(ki_td_soft_renderer *renderer, const ki_td_view *view,

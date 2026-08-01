@@ -1173,9 +1173,10 @@ static int selftest_body(void)
             (void)fprintf(stderr, "FAIL selftest placement commit\n");
             return EXIT_FAILURE;
         }
-        /* A blocked spot never decrements the stack. */
+        /* A blocked spot never decrements the stack (the stereo is the
+         * pick here, so no gift preempts the placement path). */
         state.player_x = 322.0f;
-        state.player_y = 205.0f;
+        state.player_y = 199.0f;
         state.facing = DESK_FACING_UP;
         desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
         if (!desk_placement_preview(&state, &world, &ghost_x, &ghost_y,
@@ -1221,6 +1222,152 @@ static int selftest_body(void)
                                  (uint16_t)record) != 0 ||
             fresh2.items.effect_count != 1) {
             (void)fprintf(stderr, "FAIL selftest receiver persistence\n");
+            return EXIT_FAILURE;
+        }
+        (void)desk_take_audio_events(&state, events);
+    }
+
+    /* Gifts and the accessory slot. */
+    {
+        static desk_state fresh3;
+        desk_item_plan seed_plan;
+        desk_item seed;
+        int postcard = desk_items_find(&catalog, "core:gift/postcard");
+        int toolbox = desk_items_find(&catalog, "core:tool/toolbox");
+        int pin = desk_items_find(&catalog, "core:gear/lantern-pin");
+        int use_slot;
+        int slot_index;
+        int tick;
+
+        seed = desk_item_make((uint16_t)postcard, 1u);
+        if (postcard <= 0 || pin <= 0 ||
+            !desk_inventory_plan_add(&state.items.inventory, &catalog,
+                                     &seed, &seed_plan) ||
+            !desk_inventory_commit_add(&state.items.inventory, &catalog,
+                                       &seed, &seed_plan)) {
+            (void)fprintf(stderr, "FAIL selftest postcard inject\n");
+            return EXIT_FAILURE;
+        }
+        state.player_x = 120.0f;
+        state.player_y = 210.0f;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        /* A non-giftable item is declined without moving. */
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)toolbox &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        desk_select_slot(&state, use_slot);
+        if (use_slot < 0 || state.nearest_npc != 0 ||
+            !desk_use_item(&state, &world) || state.action.active ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)toolbox) != 1) {
+            (void)fprintf(stderr, "FAIL selftest gift refusal\n");
+            return EXIT_FAILURE;
+        }
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)postcard &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        desk_select_slot(&state, use_slot);
+        if (!desk_use_item(&state, &world) || !state.action.active ||
+            state.player_animator.clip != DESK_CLIP_GIVE) {
+            (void)fprintf(stderr, "FAIL selftest gift start\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 80 && !state.action.committed; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (!state.action.committed ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)postcard) != 0 ||
+            state.items.social_count != 1 ||
+            state.items.social[0].actor != 1u ||
+            state.items.social[0].points != 25 ||
+            state.items.social[0].gifts != 1u ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest gift handoff: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < 80 && state.action.active; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+
+        /* Equip, then swap: exclusive ownership both ways. Step out of
+         * gift reach first — the pin is giftable too. */
+        state.player_x = 240.0f;
+        state.player_y = 212.0f;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        seed = desk_item_make((uint16_t)pin, 1u);
+        seed.serial = desk_world_state_take_serial(&state.items);
+        if (!desk_inventory_plan_add(&state.items.inventory, &catalog,
+                                     &seed, &seed_plan) ||
+            !desk_inventory_commit_add(&state.items.inventory, &catalog,
+                                       &seed, &seed_plan)) {
+            (void)fprintf(stderr, "FAIL selftest pin inject\n");
+            return EXIT_FAILURE;
+        }
+        use_slot = -1;
+        for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+             ++slot_index)
+            if (state.items.inventory.slots[slot_index].definition ==
+                    (uint16_t)pin &&
+                state.items.inventory.slots[slot_index].quantity > 0u)
+                use_slot = slot_index;
+        desk_select_slot(&state, use_slot);
+        if (!desk_use_item(&state, &world) ||
+            state.items.equipment[DESK_EQUIP_ACCESSORY].definition !=
+                (uint16_t)pin ||
+            desk_inventory_total(&state.items.inventory,
+                                 (uint16_t)pin) != 0) {
+            (void)fprintf(stderr, "FAIL selftest equip\n");
+            return EXIT_FAILURE;
+        }
+        {
+            uint32_t worn_serial =
+                state.items.equipment[DESK_EQUIP_ACCESSORY].serial;
+
+            seed = desk_item_make((uint16_t)pin, 1u);
+            seed.serial = desk_world_state_take_serial(&state.items);
+            if (!desk_inventory_plan_add(&state.items.inventory, &catalog,
+                                         &seed, &seed_plan) ||
+                !desk_inventory_commit_add(&state.items.inventory,
+                                           &catalog, &seed, &seed_plan)) {
+                (void)fprintf(stderr, "FAIL selftest second pin\n");
+                return EXIT_FAILURE;
+            }
+            use_slot = -1;
+            for (slot_index = 0; slot_index < DESK_INVENTORY_SLOTS;
+                 ++slot_index)
+                if (state.items.inventory.slots[slot_index].definition ==
+                        (uint16_t)pin &&
+                    state.items.inventory.slots[slot_index].quantity > 0u)
+                    use_slot = slot_index;
+            desk_select_slot(&state, use_slot);
+            if (!desk_use_item(&state, &world) ||
+                state.items.equipment[DESK_EQUIP_ACCESSORY].serial ==
+                    worn_serial ||
+                desk_inventory_total(&state.items.inventory,
+                                     (uint16_t)pin) != 1) {
+                (void)fprintf(stderr, "FAIL selftest equip swap\n");
+                return EXIT_FAILURE;
+            }
+        }
+        if (!desk_world_state_save(&state.items, &catalog)) {
+            (void)fprintf(stderr, "FAIL selftest social save\n");
+            return EXIT_FAILURE;
+        }
+        state.world_dirty = false;
+        desk_init(&fresh3, &world, &catalog);
+        if (fresh3.items.social_count != 1 ||
+            fresh3.items.social[0].points != 25 ||
+            fresh3.items.equipment[DESK_EQUIP_ACCESSORY].definition !=
+                (uint16_t)pin) {
+            (void)fprintf(stderr, "FAIL selftest social persistence\n");
             return EXIT_FAILURE;
         }
         (void)desk_take_audio_events(&state, events);
@@ -1335,7 +1482,8 @@ static int selftest_body(void)
         "pause=quit-confirm walkbehinds=bad-rejected "
         "items=materialize-pickup-drop-persist tool=impact-timed "
         "receiver=insert-eject-persist drink=swallow-frame "
-        "place=ghost-committed targets=%d\n",
+        "place=ghost-committed gift=handoff-frame equip=swap-persist "
+        "targets=%d\n",
         world.room_count, DESK_TARGET_COUNT - 1);
     return EXIT_SUCCESS;
 }
@@ -2224,7 +2372,7 @@ static int items_test(void)
         ok = false;
     }
     if (ok &&
-        (catalog.definition_count != 6 || catalog.receiver_count != 1 ||
+        (catalog.definition_count != 7 || catalog.receiver_count != 1 ||
          desk_items_find(&catalog, DESK_ITEM_MISSING_ID) !=
              (int)DESK_ITEM_DEF_MISSING ||
          desk_items_find(&catalog, "core:media/record") <= 0)) {

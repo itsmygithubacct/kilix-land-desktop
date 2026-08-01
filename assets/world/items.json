@@ -9,7 +9,10 @@
       "behavior": "hold",
       "sprite": 1,
       "max_stack": 1,
-      "tags": ["media", "giftable"]
+      "tags": [
+        "media",
+        "giftable"
+      ]
     },
     {
       "id": "core:drink/coffee",
@@ -19,7 +22,11 @@
       "behavior": "drink",
       "sprite": 2,
       "max_stack": 8,
-      "tags": ["drink", "giftable", "discardable"],
+      "tags": [
+        "drink",
+        "giftable",
+        "discardable"
+      ],
       "effect_ticks": 3600
     },
     {
@@ -30,7 +37,9 @@
       "behavior": "use-tool",
       "sprite": 3,
       "max_stack": 1,
-      "tags": ["tool"]
+      "tags": [
+        "tool"
+      ]
     },
     {
       "id": "core:decor/houseplant",
@@ -40,7 +49,12 @@
       "behavior": "place",
       "sprite": 4,
       "max_stack": 4,
-      "tags": ["decor", "placeable", "giftable", "discardable"]
+      "tags": [
+        "decor",
+        "placeable",
+        "giftable",
+        "discardable"
+      ]
     },
     {
       "id": "core:gift/postcard",
@@ -50,13 +64,32 @@
       "behavior": "hold",
       "sprite": 5,
       "max_stack": 4,
-      "tags": ["giftable", "discardable"]
+      "tags": [
+        "giftable",
+        "discardable"
+      ]
+    },
+    {
+      "id": "core:gear/lantern-pin",
+      "name": "Lantern Pin",
+      "description": "A little glow to keep on your collar.",
+      "family": "wearable",
+      "behavior": "equip",
+      "sprite": 6,
+      "max_stack": 1,
+      "tags": [
+        "wearable",
+        "light",
+        "giftable"
+      ]
     }
   ],
   "receivers": [
     {
       "id": "stereo-record",
-      "accept_any_tag": ["media"],
+      "accept_any_tag": [
+        "media"
+      ],
       "consume": false,
       "processing_ticks": 0,
       "result": "activate-fixture"

@@ -139,6 +139,13 @@
           "quantity": 1,
           "x": 240,
           "y": 235
+        },
+        {
+          "id": "bedroom-pin",
+          "item": "core:gear/lantern-pin",
+          "quantity": 1,
+          "x": 350,
+          "y": 232
         }
       ]
     },
