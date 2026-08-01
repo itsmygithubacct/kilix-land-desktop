@@ -91,6 +91,11 @@ typedef struct desk_world_state {
     int social_count;
 } desk_world_state;
 
+/* Spawn/content ids: lowercase [a-z0-9-], bounded by
+ * DESK_SPAWN_ID_CAPACITY. Shared by rooms.c (authored spawn ids) and the
+ * claimed-spawn table. */
+bool desk_spawn_id_valid(const char *id);
+
 void desk_world_state_init(desk_world_state *state);
 /* Loads world.state. A missing record initializes an empty state and
  * succeeds; a corrupt or invalid record initializes an empty state,

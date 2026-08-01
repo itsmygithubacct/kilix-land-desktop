@@ -1,5 +1,5 @@
 {
-  "world": 1,
+  "world": 2,
   "start": "bedroom",
   "rooms": [
     {
@@ -130,6 +130,15 @@
         {
           "id": 1,
           "baseline": 228
+        }
+      ],
+      "item_spawns": [
+        {
+          "id": "bedroom-postcard",
+          "item": "core:gift/postcard",
+          "quantity": 1,
+          "x": 240,
+          "y": 235
         }
       ]
     },
@@ -310,7 +319,8 @@
             "w": 44,
             "h": 38
           },
-          "target": "music"
+          "target": "music",
+          "receiver": "stereo-record"
         },
         {
           "id": "phone",
@@ -345,6 +355,15 @@
         {
           "id": 1,
           "baseline": 216
+        }
+      ],
+      "item_spawns": [
+        {
+          "id": "starter-record",
+          "item": "core:media/record",
+          "quantity": 1,
+          "x": 272,
+          "y": 224
         }
       ]
     },
@@ -486,7 +505,16 @@
           "target": "models"
         }
       ],
-      "npcs": []
+      "npcs": [],
+      "item_spawns": [
+        {
+          "id": "study-houseplant",
+          "item": "core:decor/houseplant",
+          "quantity": 1,
+          "x": 150,
+          "y": 230
+        }
+      ]
     },
     {
       "id": "kitchen",
@@ -622,6 +650,15 @@
         {
           "id": 1,
           "baseline": 177
+        }
+      ],
+      "item_spawns": [
+        {
+          "id": "kitchen-coffee",
+          "item": "core:drink/coffee",
+          "quantity": 2,
+          "x": 150,
+          "y": 234
         }
       ]
     },
@@ -763,6 +800,15 @@
         {
           "id": 2,
           "baseline": 192
+        }
+      ],
+      "item_spawns": [
+        {
+          "id": "shed-toolbox",
+          "item": "core:tool/toolbox",
+          "quantity": 1,
+          "x": 386,
+          "y": 214
         }
       ]
     }

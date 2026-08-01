@@ -201,16 +201,33 @@ static bool world_path(char *path, size_t size)
     return written >= 0 && (size_t)written < size;
 }
 
-static bool load_world(desk_world *world, char *error, size_t error_size)
+static bool items_path(char *path, size_t size)
+{
+    int written = snprintf(path, size, "%s/assets/world/items.json",
+                           asset_root());
+    return written >= 0 && (size_t)written < size;
+}
+
+/* Startup order per the module contract: validate the item catalog,
+ * parse the world manifest, then resolve the world's item and receiver
+ * references against the catalog before anything is published. */
+static bool load_world(desk_world *world, desk_item_catalog *catalog,
+                       char *error, size_t error_size)
 {
     char path[1024];
-    if (!world_path(path, sizeof path)) {
+    if (!items_path(path, sizeof path) || !world_path(path, sizeof path)) {
         if (error && error_size > 0u)
-            (void)snprintf(error, error_size, "world path too long");
+            (void)snprintf(error, error_size, "asset path too long");
         return false;
     }
+    if (!items_path(path, sizeof path) ||
+        !desk_items_load(catalog, path, error, error_size))
+        return false;
+    if (!world_path(path, sizeof path))
+        return false;
     return desk_world_load(world, path, error, error_size) &&
-           desk_world_validate(world, error, error_size);
+           desk_world_validate(world, error, error_size) &&
+           desk_world_validate_items(world, catalog, error, error_size);
 }
 
 /* Land creates its preview directories with `mkdir -p` in the Makefile; the
@@ -308,13 +325,14 @@ static int audio_test(void)
 static int graphics_test(void)
 {
     desk_world world;
+    desk_item_catalog catalog;
     desk_graphics graphics;
     ki_td_rgba8 image;
     char error[DESK_ERROR_CAPACITY];
     size_t loaded;
     int plates = 0;
     int room;
-    if (!load_world(&world, error, sizeof error)) {
+    if (!load_world(&world, &catalog, error, sizeof error)) {
         (void)fprintf(stderr, "FAIL graphics world: %s\n", error);
         return EXIT_FAILURE;
     }
@@ -348,12 +366,14 @@ static int graphics_test(void)
 static int world_test(void)
 {
     desk_world world;
+    desk_item_catalog catalog;
     char path[1024];
     char error[DESK_ERROR_CAPACITY];
     int objects = 0;
     int doors = 0;
     int npcs = 0;
     int walkbehinds = 0;
+    int spawns = 0;
     int room;
     if (!world_path(path, sizeof path)) {
         (void)fprintf(stderr, "FAIL world path too long\n");
@@ -364,16 +384,23 @@ static int world_test(void)
         (void)fprintf(stderr, "FAIL world %s: %s\n", path, error);
         return EXIT_FAILURE;
     }
+    if (!items_path(path, sizeof path) ||
+        !desk_items_load(&catalog, path, error, sizeof error) ||
+        !desk_world_validate_items(&world, &catalog, error, sizeof error)) {
+        (void)fprintf(stderr, "FAIL world items %s: %s\n", path, error);
+        return EXIT_FAILURE;
+    }
     for (room = 0; room < world.room_count; ++room) {
         objects += world.rooms[room].object_count;
         doors += world.rooms[room].door_count;
         npcs += world.rooms[room].npc_count;
         walkbehinds += world.rooms[room].walkbehind_count;
+        spawns += world.rooms[room].spawn_count;
     }
     (void)printf(
         "PASS world rooms=%d objects=%d doors=%d npcs=%d walkbehinds=%d "
-        "start=%s\n",
-        world.room_count, objects, doors, npcs, walkbehinds,
+        "spawns=%d start=%s\n",
+        world.room_count, objects, doors, npcs, walkbehinds, spawns,
         world.rooms[world.start_room].id);
     return EXIT_SUCCESS;
 }
@@ -467,6 +494,7 @@ static int profile_test(void)
 static int selftest_body(void)
 {
     desk_world world;
+    desk_item_catalog catalog;
     desk_state state;
     desk_profile reloaded;
     desk_audio_event events[4];
@@ -476,7 +504,7 @@ static int selftest_body(void)
     int target;
     int event_count;
 
-    if (!load_world(&world, error, sizeof error)) {
+    if (!load_world(&world, &catalog, error, sizeof error)) {
         (void)fprintf(stderr, "FAIL selftest world: %s\n", error);
         return EXIT_FAILURE;
     }
@@ -525,6 +553,110 @@ static int selftest_body(void)
         scene->walkbehind_count = saved_count;
         if (!desk_world_validate(&world, error, sizeof error)) {
             (void)fprintf(stderr, "FAIL selftest walkbehind restore: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* Item-spawn validation round: bad quantity, a point off the walk
+     * rect, a duplicate spawn id, and an unresolvable item id must each
+     * be rejected, and the restored world must validate clean again. */
+    {
+        desk_room *scene = &world.rooms[0];
+        int saved_count = scene->spawn_count;
+        desk_item_spawn *probe;
+
+        if (saved_count < 1 ||
+            saved_count >= DESK_MAX_ITEM_SPAWNS_PER_ROOM) {
+            (void)fprintf(stderr, "FAIL selftest spawn probe slot\n");
+            return EXIT_FAILURE;
+        }
+        probe = &scene->spawns[saved_count];
+        *probe = scene->spawns[0];
+        (void)snprintf(probe->id, sizeof probe->id, "%s", "probe-spawn");
+        probe->quantity = 0;
+        scene->spawn_count = saved_count + 1;
+        if (desk_world_validate(&world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest spawn quantity accepted\n");
+            return EXIT_FAILURE;
+        }
+        probe->quantity = 1;
+        probe->x = scene->walk.x - 10.0f;
+        if (desk_world_validate(&world, error, sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest off-walk spawn accepted\n");
+            return EXIT_FAILURE;
+        }
+        probe->x = scene->spawns[0].x;
+        (void)snprintf(probe->id, sizeof probe->id, "%s",
+                       scene->spawns[0].id);
+        if (desk_world_validate(&world, error, sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest duplicate spawn id accepted\n");
+            return EXIT_FAILURE;
+        }
+        (void)snprintf(probe->id, sizeof probe->id, "%s", "probe-spawn");
+        (void)snprintf(probe->item, sizeof probe->item, "%s",
+                       "core:test/ghost");
+        if (!desk_world_validate(&world, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest probe spawn shape: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+        if (desk_world_validate_items(&world, &catalog, error,
+                                      sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest unknown spawn item accepted\n");
+            return EXIT_FAILURE;
+        }
+        scene->spawn_count = saved_count;
+        if (!desk_world_validate(&world, error, sizeof error) ||
+            !desk_world_validate_items(&world, &catalog, error,
+                                       sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest spawn restore: %s\n",
+                          error);
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* Receiver-binding round: an object naming an unknown receiver rule
+     * must fail cross-validation. */
+    {
+        int living_index = desk_world_room_index(&world, "living");
+        desk_object *stereo = NULL;
+        char saved_receiver[DESK_ID_CAPACITY];
+        int object_index;
+
+        if (living_index < 0) {
+            (void)fprintf(stderr, "FAIL selftest no living room\n");
+            return EXIT_FAILURE;
+        }
+        for (object_index = 0;
+             object_index < world.rooms[living_index].object_count;
+             ++object_index)
+            if (strcmp(world.rooms[living_index].objects[object_index].id,
+                       "stereo") == 0)
+                stereo = &world.rooms[living_index].objects[object_index];
+        if (!stereo || stereo->receiver[0] == '\0') {
+            (void)fprintf(stderr,
+                          "FAIL selftest stereo receiver missing\n");
+            return EXIT_FAILURE;
+        }
+        (void)snprintf(saved_receiver, sizeof saved_receiver, "%s",
+                       stereo->receiver);
+        (void)snprintf(stereo->receiver, sizeof stereo->receiver, "%s",
+                       "no-such-rule");
+        if (desk_world_validate_items(&world, &catalog, error,
+                                      sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL selftest unknown receiver accepted\n");
+            return EXIT_FAILURE;
+        }
+        (void)snprintf(stereo->receiver, sizeof stereo->receiver, "%s",
+                       saved_receiver);
+        if (!desk_world_validate_items(&world, &catalog, error,
+                                       sizeof error)) {
+            (void)fprintf(stderr, "FAIL selftest receiver restore: %s\n",
                           error);
             return EXIT_FAILURE;
         }
@@ -1692,6 +1824,7 @@ static int items_test(void)
 
 typedef struct render_fixture {
     desk_world world;
+    desk_item_catalog catalog;
     desk_graphics graphics;
     ki_td_soft_renderer renderer;
     int loaded_style;
@@ -1712,7 +1845,8 @@ static bool fixture_open(render_fixture *fixture, const char *directory)
         setenv("KILIX_LAND_DESKTOP_CONFIG_HOME", resolved, 1) != 0)
         return false;
     if (!desk_profile_reset()) return false;
-    if (!load_world(&fixture->world, error, sizeof error)) {
+    if (!load_world(&fixture->world, &fixture->catalog, error,
+                    sizeof error)) {
         (void)fprintf(stderr, "FAIL render world: %s\n", error);
         return false;
     }
@@ -2020,6 +2154,7 @@ static int run_interactive(void)
     kilix_game_clock_options clock_options;
     ki_td_soft_renderer renderer = {0};
     desk_world world;
+    static desk_item_catalog catalog;
     desk_graphics graphics;
     desk_audio audio = {0};
     desk_launcher launcher;
@@ -2036,7 +2171,7 @@ static int run_interactive(void)
     int width;
     int height;
 
-    if (!load_world(&world, error, sizeof error)) {
+    if (!load_world(&world, &catalog, error, sizeof error)) {
         (void)fprintf(stderr,
             "kilix-land-desktop: %s (set KILIX_LAND_DESKTOP_ASSETS)\n",
             error);

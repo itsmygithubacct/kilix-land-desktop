@@ -20,12 +20,15 @@ MAX_DOORS = 4
 MAX_OBSTACLES = 64
 MAX_NPCS = 3
 MAX_WALKBEHINDS = 15
+MAX_ITEM_SPAWNS = 8
+MAX_ITEM_STACK = 99
+NPC_SPAWN_EXCLUSION = 24.0
 STYLES = ("legend", "chumrunner", "fantasy", "pleb-bound")
 # Keys parse_room() in src/rooms.c accepts; anything else is rejected there,
 # so reject it here too (e.g. a stale pre-walk-behind "occluders" array).
 ROOM_KEYS = {
     "id", "name", "plate", "outdoor", "walk", "obstacles", "doors",
-    "objects", "npcs", "walkbehinds",
+    "objects", "npcs", "walkbehinds", "item_spawns",
 }
 ID_CAPACITY = 24
 LABEL_CAPACITY = 40
@@ -78,6 +81,75 @@ def point_in_rect(x, y, rect):
 
 # Set by main() from the world.json location: <root>/assets/graphics/rooms.
 ROOMS_DIR = None
+
+SPAWN_ID_RE = None  # initialized lazily to keep the import list short
+ITEM_ID_RE = None
+
+
+def load_item_catalog(world_path):
+    """Sibling items.json as {ids: {id: max_stack}, receivers: set}, or
+    None when the catalog does not exist yet (a schema-1 world)."""
+    import re
+    global SPAWN_ID_RE, ITEM_ID_RE
+    SPAWN_ID_RE = re.compile(r"^[a-z0-9-]+$")
+    ITEM_ID_RE = re.compile(
+        r"^[a-z0-9_-]+:[a-z0-9_-]+(?:[/.][a-z0-9_-]+)*$")
+    path = os.path.join(os.path.dirname(os.path.abspath(world_path)),
+                        "items.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        catalog = json.load(handle)
+    ids = {item["id"]: item["max_stack"]
+           for item in catalog.get("definitions", [])}
+    receivers = {receiver["id"]
+                 for receiver in catalog.get("receivers", [])}
+    return {"ids": ids, "receivers": receivers}
+
+
+def check_item_spawn(room, index, spawn, seen_spawn_ids, item_catalog):
+    rid = room["id"]
+    label = f"{rid}.item_spawns[{index}]"
+    unknown = set(spawn) - {"id", "item", "quantity", "x", "y"}
+    if unknown:
+        fail(f"{label}: unknown keys {', '.join(sorted(unknown))}")
+    check_string(spawn.get("id"), f"{label}.id", ID_CAPACITY)
+    if not SPAWN_ID_RE.match(spawn["id"]):
+        fail(f"{label}: invalid spawn id '{spawn['id']}'")
+    if spawn["id"] in seen_spawn_ids:
+        fail(f"duplicate spawn id '{spawn['id']}'")
+    seen_spawn_ids.add(spawn["id"])
+    check_string(spawn.get("item"), f"{label}.item", 48)
+    if not ITEM_ID_RE.match(spawn["item"]) or ".." in spawn["item"]:
+        fail(f"{label}: invalid item id '{spawn['item']}'")
+    quantity = spawn.get("quantity")
+    if not isinstance(quantity, int) or isinstance(quantity, bool) \
+            or not 1 <= quantity <= MAX_ITEM_STACK:
+        fail(f"{label}: quantity out of range")
+    x, y = spawn.get("x"), spawn.get("y")
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        fail(f"{label}: missing position")
+    if not point_in_rect(x, y, room["walk"]):
+        fail(f"{label}: point outside walk rect")
+    for j, rect in enumerate(room.get("obstacles", [])):
+        if point_in_rect(x, y, rect):
+            fail(f"{label}: point inside obstacle [{j}]")
+    for j, door in enumerate(room.get("doors", [])):
+        if point_in_rect(x, y, door.get("rect", {})):
+            fail(f"{label}: point inside door [{j}]")
+    for obj in room.get("objects", []):
+        if point_in_rect(x, y, obj.get("rect", {})):
+            fail(f"{label}: point inside object '{obj.get('id')}'")
+    for npc in room.get("npcs", []):
+        if ((x - npc["x"]) ** 2 + (y - npc["y"]) ** 2
+                < NPC_SPAWN_EXCLUSION ** 2):
+            fail(f"{label}: too close to npc actor {npc['actor']}")
+    if item_catalog is not None:
+        if spawn["item"] not in item_catalog["ids"]:
+            fail(f"{label}: unknown item '{spawn['item']}'")
+        if quantity > item_catalog["ids"][spawn["item"]]:
+            fail(f"{label}: quantity {quantity} exceeds "
+                 f"'{spawn['item']}' max stack")
 
 
 def check_behind_masks(room, declared_ids):
@@ -146,8 +218,10 @@ def main():
     check_c_parser_subset(text)
     world = json.loads(text)
 
-    if world.get("world") != 1:
-        fail("unsupported schema version (want world: 1)")
+    # Schema 1 = no item spawns or receivers; schema 2 adds them.
+    if world.get("world") not in (1, 2):
+        fail("unsupported schema version (want world: 1 or 2)")
+    item_catalog = load_item_catalog(path)
     rooms = world.get("rooms")
     if not isinstance(rooms, list) or not rooms:
         fail("no rooms")
@@ -166,6 +240,7 @@ def main():
         fail(f"start room '{start}' does not exist")
 
     reachable = set()
+    seen_spawn_ids = set()
     for room in rooms:
         rid = room["id"]
         unknown = set(room) - ROOM_KEYS
@@ -229,6 +304,13 @@ def main():
             target = obj.get("target")
             if target not in TARGETS:
                 fail(f"{rid}.objects[{i}]: unknown target '{target}'")
+            if "receiver" in obj:
+                check_string(obj["receiver"], f"{rid}.objects[{i}].receiver",
+                             ID_CAPACITY)
+                if item_catalog is not None \
+                        and obj["receiver"] not in item_catalog["receivers"]:
+                    fail(f"{rid}.{obj['id']}: unknown receiver rule "
+                         f"'{obj['receiver']}'")
 
         npcs = room.get("npcs", [])
         if len(npcs) > MAX_NPCS:
@@ -272,6 +354,12 @@ def main():
                 fail(f"{rid}.walkbehinds[{i}]: baseline {baseline} off "
                      "the logical canvas")
         check_behind_masks(room, seen_walkbehind_ids)
+
+        spawns = room.get("item_spawns", [])
+        if len(spawns) > MAX_ITEM_SPAWNS:
+            fail(f"{rid}: more than {MAX_ITEM_SPAWNS} item spawns")
+        for i, spawn in enumerate(spawns):
+            check_item_spawn(room, i, spawn, seen_spawn_ids, item_catalog)
 
     unreachable = [room["id"] for room in rooms
                    if room["id"] != start and room["id"] not in reachable]

@@ -211,6 +211,19 @@ static bool parse_object_entry(desk_json_reader *p, desk_object *object)
                 return desk_json_fail_at(p, value_offset,
                                          "unknown target '%s'", target_name);
             object->target = target;
+        } else if (strcmp(key, "receiver") == 0) {
+            size_t value_offset;
+
+            if (!desk_json_claim_key(p, &seen, 1u << 4, key))
+                return false;
+            desk_json_skip_ws(p);
+            value_offset = p->offset;
+            if (!desk_json_parse_string(p, object->receiver,
+                                        sizeof object->receiver))
+                return false;
+            if (object->receiver[0] == '\0')
+                return desk_json_fail_at(p, value_offset,
+                                         "empty receiver id");
         } else {
             return desk_json_fail_at(p, p->key_offset,
                                      "unknown key '%s' in object", key);
@@ -339,6 +352,94 @@ static bool parse_walkbehind(desk_json_reader *p, desk_walkbehind *walkbehind)
     return true;
 }
 
+static bool parse_item_spawn(desk_json_reader *p, desk_item_spawn *spawn)
+{
+    bool first = true;
+    unsigned seen = 0u;
+    size_t start;
+    size_t id_offset = 0u;
+    size_t item_offset = 0u;
+    char key[32];
+
+    memset(spawn, 0, sizeof *spawn);
+    desk_json_skip_ws(p);
+    start = p->offset;
+    if (!desk_json_expect(p, '{'))
+        return false;
+    for (;;) {
+        int step = desk_json_next_key(p, &first, key, sizeof key);
+
+        if (step < 0)
+            return false;
+        if (step == 0)
+            break;
+        if (strcmp(key, "id") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 0, key))
+                return false;
+            desk_json_skip_ws(p);
+            id_offset = p->offset;
+            if (!desk_json_parse_string(p, spawn->id, sizeof spawn->id))
+                return false;
+        } else if (strcmp(key, "item") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 1, key))
+                return false;
+            desk_json_skip_ws(p);
+            item_offset = p->offset;
+            if (!desk_json_parse_string(p, spawn->item,
+                                        sizeof spawn->item))
+                return false;
+        } else if (strcmp(key, "quantity") == 0) {
+            float value = 0.0f;
+            size_t value_offset;
+            int quantity;
+
+            if (!desk_json_claim_key(p, &seen, 1u << 2, key))
+                return false;
+            desk_json_skip_ws(p);
+            value_offset = p->offset;
+            if (!desk_json_parse_number(p, &value))
+                return false;
+            if (value < 1.0f || value > (float)DESK_ITEM_MAX_STACK_LIMIT)
+                return desk_json_fail_at(p, value_offset,
+                                         "quantity out of range");
+            quantity = (int)value;
+            if ((float)quantity != value)
+                return desk_json_fail_at(p, value_offset,
+                                         "quantity must be an integer");
+            spawn->quantity = quantity;
+        } else if (strcmp(key, "x") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 3, key) ||
+                !desk_json_parse_number(p, &spawn->x))
+                return false;
+        } else if (strcmp(key, "y") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 4, key) ||
+                !desk_json_parse_number(p, &spawn->y))
+                return false;
+        } else {
+            return desk_json_fail_at(p, p->key_offset,
+                                     "unknown key '%s' in item spawn", key);
+        }
+    }
+    if ((seen & (1u << 0)) == 0u)
+        return desk_json_fail_at(p, start, "item spawn missing 'id'");
+    if ((seen & (1u << 1)) == 0u)
+        return desk_json_fail_at(p, start, "item spawn missing 'item'");
+    if ((seen & (1u << 2)) == 0u)
+        return desk_json_fail_at(p, start, "item spawn missing 'quantity'");
+    if ((seen & (1u << 3)) == 0u)
+        return desk_json_fail_at(p, start, "item spawn missing 'x'");
+    if ((seen & (1u << 4)) == 0u)
+        return desk_json_fail_at(p, start, "item spawn missing 'y'");
+    if (!desk_spawn_id_valid(spawn->id))
+        return desk_json_fail_at(p, id_offset, "invalid spawn id '%s'",
+                                 spawn->id);
+    if (!desk_item_id_valid(spawn->item))
+        return desk_json_fail_at(p, item_offset,
+                                 "invalid item id '%s' in spawn",
+                                 spawn->item);
+    return true;
+}
+
 static bool parse_obstacle_element(desk_json_reader *p, desk_room *room,
                                    int index)
 {
@@ -366,6 +467,12 @@ static bool parse_walkbehind_element(desk_json_reader *p, desk_room *room,
                                      int index)
 {
     return parse_walkbehind(p, &room->walkbehinds[index]);
+}
+
+static bool parse_item_spawn_element(desk_json_reader *p, desk_room *room,
+                                     int index)
+{
+    return parse_item_spawn(p, &room->spawns[index]);
 }
 
 static bool parse_array(desk_json_reader *p, desk_room *room, int *count,
@@ -471,6 +578,12 @@ static bool parse_room(desk_json_reader *p, desk_room *room)
                              DESK_MAX_WALKBEHINDS_PER_ROOM, "walkbehinds",
                              parse_walkbehind_element))
                 return false;
+        } else if (strcmp(key, "item_spawns") == 0) {
+            if (!desk_json_claim_key(p, &seen, 1u << 10, key) ||
+                !parse_array(p, room, &room->spawn_count,
+                             DESK_MAX_ITEM_SPAWNS_PER_ROOM, "item spawns",
+                             parse_item_spawn_element))
+                return false;
         } else {
             return desk_json_fail_at(p, p->key_offset,
                                      "unknown key '%s' in room", key);
@@ -550,10 +663,13 @@ bool desk_world_load(desk_world *world, const char *path, char *error,
             value_offset = parser_state.offset;
             if (!desk_json_parse_number(&parser_state, &schema))
                 return false;
-            if (schema != 1.0f)
+            /* Schema 1 = no item spawns or receivers; schema 2 adds the
+             * optional item fields. Both parse identically because the
+             * new keys are optional. */
+            if (schema != 1.0f && schema != 2.0f)
                 return desk_json_fail_at(
                     &parser_state, value_offset,
-                    "unsupported schema version (want world: 1)");
+                    "unsupported schema version (want world: 1 or 2)");
         } else if (strcmp(key, "start") == 0) {
             if (!desk_json_claim_key(&parser_state, &seen, 1u << 1, key))
                 return false;
@@ -813,6 +929,75 @@ bool desk_world_validate(const desk_world *world, char *error,
                              "logical canvas", room->id, i,
                              (double)walkbehind->baseline);
         }
+
+        if (room->spawn_count < 0 ||
+            room->spawn_count > DESK_MAX_ITEM_SPAWNS_PER_ROOM)
+            return vfail(error, error_size, "%s: more than %d item spawns",
+                         room->id, DESK_MAX_ITEM_SPAWNS_PER_ROOM);
+        for (i = 0; i < room->spawn_count; ++i) {
+            const desk_item_spawn *spawn = &room->spawns[i];
+            int j;
+            int other;
+
+            if (!desk_spawn_id_valid(spawn->id))
+                return vfail(error, error_size,
+                             "%s.item_spawns[%d]: invalid spawn id",
+                             room->id, i);
+            if (!desk_item_id_valid(spawn->item))
+                return vfail(error, error_size,
+                             "%s.item_spawns[%d]: invalid item id",
+                             room->id, i);
+            if (spawn->quantity < 1 ||
+                spawn->quantity > DESK_ITEM_MAX_STACK_LIMIT)
+                return vfail(error, error_size,
+                             "%s.item_spawns[%d]: quantity out of range",
+                             room->id, i);
+            if (!point_in_rect(spawn->x, spawn->y, &room->walk))
+                return vfail(error, error_size,
+                             "%s.item_spawns[%d]: point outside walk rect",
+                             room->id, i);
+            for (j = 0; j < room->obstacle_count; ++j)
+                if (point_in_rect(spawn->x, spawn->y,
+                                  &room->obstacles[j]))
+                    return vfail(error, error_size,
+                                 "%s.item_spawns[%d]: point inside "
+                                 "obstacle [%d]", room->id, i, j);
+            for (j = 0; j < room->door_count; ++j)
+                if (point_in_rect(spawn->x, spawn->y,
+                                  &room->doors[j].rect))
+                    return vfail(error, error_size,
+                                 "%s.item_spawns[%d]: point inside door "
+                                 "[%d]", room->id, i, j);
+            for (j = 0; j < room->object_count; ++j)
+                if (point_in_rect(spawn->x, spawn->y,
+                                  &room->objects[j].rect))
+                    return vfail(error, error_size,
+                                 "%s.item_spawns[%d]: point inside object "
+                                 "'%s'", room->id, i, room->objects[j].id);
+            for (j = 0; j < room->npc_count; ++j) {
+                float dx = spawn->x - room->npcs[j].x;
+                float dy = spawn->y - room->npcs[j].y;
+
+                if (dx * dx + dy * dy < DESK_NPC_SPAWN_EXCLUSION *
+                                        DESK_NPC_SPAWN_EXCLUSION)
+                    return vfail(error, error_size,
+                                 "%s.item_spawns[%d]: too close to npc "
+                                 "actor %d", room->id, i,
+                                 room->npcs[j].actor);
+            }
+            /* Spawn ids are stable content identity for the claimed
+             * table, so they must be unique across the whole world. */
+            for (other = 0; other <= r; ++other) {
+                const desk_room *scan = &world->rooms[other];
+                int limit = other == r ? i : scan->spawn_count;
+
+                for (j = 0; j < limit; ++j)
+                    if (strcmp(scan->spawns[j].id, spawn->id) == 0)
+                        return vfail(error, error_size,
+                                     "world: duplicate spawn id '%s'",
+                                     spawn->id);
+            }
+        }
     }
 
     {
@@ -853,4 +1038,45 @@ int desk_world_room_index(const desk_world *world, const char *id)
         if (strcmp(world->rooms[index].id, id) == 0)
             return index;
     return -1;
+}
+
+bool desk_world_validate_items(const desk_world *world,
+                               const desk_item_catalog *catalog,
+                               char *error, size_t error_size)
+{
+    int r;
+
+    if (!world || !catalog)
+        return vfail(error, error_size, "world-items: null input");
+    for (r = 0; r < world->room_count; ++r) {
+        const desk_room *room = &world->rooms[r];
+        int i;
+
+        for (i = 0; i < room->object_count; ++i) {
+            const desk_object *object = &room->objects[i];
+
+            if (object->receiver[0] != '\0' &&
+                desk_items_find_receiver(catalog, object->receiver) < 0)
+                return vfail(error, error_size,
+                             "%s.%s: unknown receiver rule '%s'",
+                             room->id, object->id, object->receiver);
+        }
+        for (i = 0; i < room->spawn_count; ++i) {
+            const desk_item_spawn *spawn = &room->spawns[i];
+            int definition = desk_items_find(catalog, spawn->item);
+            const desk_item_def *def;
+
+            if (definition <= 0)
+                return vfail(error, error_size,
+                             "%s.item_spawns[%d]: unknown item '%s'",
+                             room->id, i, spawn->item);
+            def = desk_items_def(catalog, (uint16_t)definition);
+            if (!def || spawn->quantity > (int)def->max_stack)
+                return vfail(error, error_size,
+                             "%s.item_spawns[%d]: quantity %d exceeds "
+                             "'%s' max stack", room->id, i,
+                             spawn->quantity, spawn->item);
+        }
+    }
+    return true;
 }

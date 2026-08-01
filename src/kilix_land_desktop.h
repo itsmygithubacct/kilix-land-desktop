@@ -10,6 +10,8 @@
 #include <stdint.h>
 
 #include "source_parity.h"
+#include "items.h"
+#include "world_state.h"
 
 #define DESK_LOGICAL_WIDTH 480
 #define DESK_LOGICAL_HEIGHT 270
@@ -43,6 +45,8 @@
 #define DESK_MAX_OBSTACLES_PER_ROOM 64
 #define DESK_MAX_NPCS_PER_ROOM 3
 #define DESK_MAX_WALKBEHINDS_PER_ROOM 15
+#define DESK_MAX_ITEM_SPAWNS_PER_ROOM 8
+#define DESK_NPC_SPAWN_EXCLUSION 24.0f
 
 #define DESK_INTERACT_RADIUS 72.0f
 #define DESK_DOOR_COOLDOWN_TICKS 30
@@ -161,7 +165,22 @@ typedef struct desk_object {
     char prompt[DESK_PROMPT_CAPACITY];
     desk_rect rect;
     desk_target target;
+    /* Optional item-receiver rule id from items.json; "" = plain fixture.
+     * Resolved against the catalog by desk_world_validate_items. */
+    char receiver[DESK_ID_CAPACITY];
 } desk_object;
+
+/* An authored world item spawn: stable content identity separate from the
+ * item id. Each spawn materializes into a world item exactly once (its id
+ * is then recorded in world.state's claimed table), so later releases can
+ * add spawns without resurrecting old pickups. */
+typedef struct desk_item_spawn {
+    char id[DESK_ID_CAPACITY];
+    char item[DESK_ITEM_ID_CAPACITY];
+    int quantity;
+    float x;
+    float y;
+} desk_item_spawn;
 
 typedef struct desk_door {
     desk_rect rect;
@@ -206,6 +225,8 @@ typedef struct desk_room {
     int npc_count;
     desk_walkbehind walkbehinds[DESK_MAX_WALKBEHINDS_PER_ROOM];
     int walkbehind_count;
+    desk_item_spawn spawns[DESK_MAX_ITEM_SPAWNS_PER_ROOM];
+    int spawn_count;
 } desk_room;
 
 typedef struct desk_world {
@@ -330,6 +351,13 @@ bool desk_world_load(desk_world *world, const char *path, char *error,
                      size_t error_size);
 bool desk_world_validate(const desk_world *world, char *error,
                          size_t error_size);
+/* Cross-file resolution: every spawn's item id and every object's
+ * receiver rule id must exist in the loaded catalog, and spawn
+ * quantities must fit the definition's stack. Run after both files
+ * validated on their own. */
+bool desk_world_validate_items(const desk_world *world,
+                               const desk_item_catalog *catalog,
+                               char *error, size_t error_size);
 int desk_world_room_index(const desk_world *world, const char *id);
 
 /* desk.c — simulation, wizard, profile */

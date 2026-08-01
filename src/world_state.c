@@ -57,7 +57,7 @@ int desk_world_state_orphan_add(desk_world_state *state, const char *id)
     return state->orphan_count++;
 }
 
-static bool spawn_id_valid(const char *id)
+bool desk_spawn_id_valid(const char *id)
 {
     const char *cursor;
 
@@ -83,7 +83,7 @@ bool desk_world_state_is_claimed(const desk_world_state *state,
 
 bool desk_world_state_claim(desk_world_state *state, const char *spawn_id)
 {
-    if (!state || !spawn_id_valid(spawn_id)) return false;
+    if (!state || !desk_spawn_id_valid(spawn_id)) return false;
     if (desk_world_state_is_claimed(state, spawn_id)) return false;
     if (state->claimed_count >= DESK_MAX_CLAIMED_SPAWNS) return false;
     (void)snprintf(state->claimed[state->claimed_count],
@@ -180,7 +180,7 @@ static bool desk_world_state_check(const desk_world_state *state,
     for (index = 0; index < state->claimed_count; ++index) {
         int duplicate;
 
-        if (!spawn_id_valid(state->claimed[index])) return false;
+        if (!desk_spawn_id_valid(state->claimed[index])) return false;
         for (duplicate = 0; duplicate < index; ++duplicate)
             if (strcmp(state->claimed[duplicate],
                        state->claimed[index]) == 0)
