@@ -1,5 +1,7 @@
 #include "kilix_land_desktop.h"
 #include "json_reader.h"
+#include "items.h"
+#include "world_state.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -1124,6 +1126,570 @@ static int json_test(void)
     return EXIT_SUCCESS;
 }
 
+typedef struct catalog_case {
+    const char *label;
+    const char *text;
+    const char *expect_error; /* substring; NULL = must load */
+} catalog_case;
+
+/* Every rejection tools/validate_items.py must also produce; --json-test
+ * already locks the token-level messages, so these assert the schema
+ * reason rather than exact offsets. */
+static const catalog_case CATALOG_CASES[] = {
+    {"minimal",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"Thing\",\"description\":\"A thing.\",\"family\":"
+     "\"portable\",\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":4}]}",
+     NULL},
+    {"schema-2",
+     "{\"items\":2,\"definitions\":[]}",
+     "unsupported schema version"},
+    {"missing-definitions",
+     "{\"items\":1}",
+     "missing key 'definitions'"},
+    {"unknown-top-key",
+     "{\"items\":1,\"definitions\":[],\"bogus\":1}",
+     "unknown key 'bogus'"},
+    {"duplicate-id",
+     "{\"items\":1,\"definitions\":["
+     "{\"id\":\"core:test/thing\",\"name\":\"A\",\"description\":\"a.\","
+     "\"family\":\"portable\",\"behavior\":\"hold\",\"sprite\":1,"
+     "\"max_stack\":1},"
+     "{\"id\":\"core:test/thing\",\"name\":\"B\",\"description\":\"b.\","
+     "\"family\":\"portable\",\"behavior\":\"hold\",\"sprite\":2,"
+     "\"max_stack\":1}]}",
+     "duplicate item id"},
+    {"uppercase-id",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:Test\",\"name\":\"T\","
+     "\"description\":\"t.\",\"family\":\"portable\",\"behavior\":\"hold\","
+     "\"sprite\":1,\"max_stack\":1}]}",
+     "invalid item id"},
+    {"unqualified-id",
+     "{\"items\":1,\"definitions\":[{\"id\":\"record\",\"name\":\"T\","
+     "\"description\":\"t.\",\"family\":\"portable\",\"behavior\":\"hold\","
+     "\"sprite\":1,\"max_stack\":1}]}",
+     "invalid item id"},
+    {"dotdot-id",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:a/../b\",\"name\":\"T\","
+     "\"description\":\"t.\",\"family\":\"portable\",\"behavior\":\"hold\","
+     "\"sprite\":1,\"max_stack\":1}]}",
+     "invalid item id"},
+    {"reserved-id",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:missing-item\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":1}]}",
+     "reserved item id"},
+    {"unknown-family",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"weapon\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":1}]}",
+     "unknown family 'weapon'"},
+    {"unknown-behavior",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"explode\",\"sprite\":1,\"max_stack\":1}]}",
+     "unknown behavior 'explode'"},
+    {"unknown-tag",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":1,"
+     "\"tags\":[\"shiny\"]}]}",
+     "unknown tag 'shiny'"},
+    {"duplicate-tag",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":1,"
+     "\"tags\":[\"decor\",\"decor\"]}]}",
+     "duplicate tag 'decor'"},
+    {"sprite-zero",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":0,\"max_stack\":1}]}",
+     "sprite out of range"},
+    {"sprite-over",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":8,\"max_stack\":1}]}",
+     "sprite out of range"},
+    {"stack-zero",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":0}]}",
+     "max_stack out of range"},
+    {"stack-over",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":100}]}",
+     "max_stack out of range"},
+    {"effect-on-hold",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":1,"
+     "\"effect_ticks\":60}]}",
+     "effect_ticks requires behavior 'drink'"},
+    {"unknown-item-key",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"name\":\"T\",\"description\":\"t.\",\"family\":\"portable\","
+     "\"behavior\":\"hold\",\"sprite\":1,\"max_stack\":1,\"argv\":\"x\"}]}",
+     "unknown key 'argv' in item"},
+    {"missing-name",
+     "{\"items\":1,\"definitions\":[{\"id\":\"core:test/thing\","
+     "\"description\":\"t.\",\"family\":\"portable\",\"behavior\":\"hold\","
+     "\"sprite\":1,\"max_stack\":1}]}",
+     "item missing 'name'"},
+    {"receiver-two-accepts",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
+     "\"accept_any_tag\":[\"media\"],\"accept_family\":\"portable\","
+     "\"consume\":false,\"result\":\"activate-fixture\"}]}",
+     "more than one accept rule"},
+    {"receiver-no-accept",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
+     "\"consume\":false,\"result\":\"activate-fixture\"}]}",
+     "receiver missing accept rule"},
+    {"receiver-empty-tags",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
+     "\"accept_any_tag\":[],\"consume\":false,"
+     "\"result\":\"activate-fixture\"}]}",
+     "empty accept tag list"},
+    {"receiver-unknown-item",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
+     "\"accept_item\":\"core:test/ghost\",\"consume\":false,"
+     "\"result\":\"activate-fixture\"}]}",
+     "unknown item 'core:test/ghost' in receiver"},
+    {"receiver-bad-result",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"r\","
+     "\"accept_any_tag\":[\"media\"],\"consume\":false,"
+     "\"result\":\"spawn-process\"}]}",
+     "unknown result 'spawn-process'"},
+    {"receiver-bad-id",
+     "{\"items\":1,\"definitions\":[],\"receivers\":[{\"id\":\"R!\","
+     "\"accept_any_tag\":[\"media\"],\"consume\":false,"
+     "\"result\":\"activate-fixture\"}]}",
+     "invalid receiver id"},
+    {"receiver-duplicate",
+     "{\"items\":1,\"definitions\":[],\"receivers\":["
+     "{\"id\":\"r\",\"accept_any_tag\":[\"media\"],\"consume\":false,"
+     "\"result\":\"activate-fixture\"},"
+     "{\"id\":\"r\",\"accept_any_tag\":[\"tool\"],\"consume\":true,"
+     "\"result\":\"activate-fixture\"}]}",
+     "duplicate receiver id"},
+};
+
+static bool items_catalog_cases(const char *directory)
+{
+    size_t index;
+    size_t count = sizeof CATALOG_CASES / sizeof CATALOG_CASES[0];
+    bool ok = true;
+
+    for (index = 0u; index < count; ++index) {
+        const catalog_case *test = &CATALOG_CASES[index];
+        desk_item_catalog catalog;
+        char path[1024];
+        char error[DESK_ERROR_CAPACITY];
+        bool loaded;
+
+        if (!json_write_fixture(directory, "case.json", test->text,
+                                strlen(test->text), path, sizeof path))
+            return false;
+        loaded = desk_items_load(&catalog, path, error, sizeof error);
+        if (test->expect_error == NULL) {
+            if (!loaded) {
+                (void)fprintf(stderr, "FAIL items %s: %s\n", test->label,
+                              error);
+                ok = false;
+            }
+        } else if (loaded || !strstr(error, test->expect_error)) {
+            (void)fprintf(stderr, "FAIL items %s: got '%s' want '%s'\n",
+                          test->label, loaded ? "(loaded)" : error,
+                          test->expect_error);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+static bool items_stack_cases(const desk_item_catalog *catalog)
+{
+    desk_inventory inventory;
+    desk_inventory before;
+    desk_item_plan plan;
+    desk_item item;
+    desk_item taken;
+    int coffee = desk_items_find(catalog, "core:drink/coffee");
+    int record = desk_items_find(catalog, "core:media/record");
+
+    if (coffee <= 0 || record <= 0) {
+        (void)fprintf(stderr, "FAIL items lookup\n");
+        return false;
+    }
+    desk_inventory_init(&inventory);
+
+    /* Merge fills partial stacks before opening empty slots. */
+    item = desk_item_make((uint16_t)coffee, 5u);
+    if (!desk_inventory_plan_add(&inventory, catalog, &item, &plan) ||
+        !desk_inventory_commit_add(&inventory, catalog, &item, &plan) ||
+        inventory.slots[0].quantity != 5u) {
+        (void)fprintf(stderr, "FAIL items first add\n");
+        return false;
+    }
+    item = desk_item_make((uint16_t)coffee, 6u);
+    if (!desk_inventory_plan_add(&inventory, catalog, &item, &plan) ||
+        plan.entry_count != 2u || plan.entries[0].slot != 0u ||
+        plan.entries[0].count != 3u || !plan.entries[1].creates ||
+        !desk_inventory_commit_add(&inventory, catalog, &item, &plan) ||
+        inventory.slots[0].quantity != 8u ||
+        inventory.slots[1].quantity != 3u) {
+        (void)fprintf(stderr, "FAIL items merge-then-open\n");
+        return false;
+    }
+
+    /* A plan that cannot fully fit fails and mutates nothing. */
+    {
+        int slot;
+
+        for (slot = 2; slot < DESK_INVENTORY_SLOTS; ++slot) {
+            desk_item unique = desk_item_make((uint16_t)record, 1u);
+
+            unique.serial = (uint32_t)slot;
+            if (!desk_inventory_plan_add(&inventory, catalog, &unique,
+                                         &plan) ||
+                !desk_inventory_commit_add(&inventory, catalog, &unique,
+                                           &plan)) {
+                (void)fprintf(stderr, "FAIL items fill slot %d\n", slot);
+                return false;
+            }
+        }
+    }
+    before = inventory;
+    item = desk_item_make((uint16_t)coffee, 14u); /* 5 free, 14 asked */
+    if (desk_inventory_plan_add(&inventory, catalog, &item, &plan) ||
+        memcmp(&before, &inventory, sizeof before) != 0) {
+        (void)fprintf(stderr, "FAIL items overfull add mutated state\n");
+        return false;
+    }
+
+    /* Serialized instances never stack. */
+    if (desk_item_can_stack(catalog, &inventory.slots[2],
+                            &inventory.slots[3])) {
+        (void)fprintf(stderr, "FAIL items serial stacking\n");
+        return false;
+    }
+
+    /* Stale generation: plan, mutate the slot, commit must refuse. */
+    before = inventory;
+    if (!desk_inventory_plan_remove(&inventory, 0, 2u, &plan)) {
+        (void)fprintf(stderr, "FAIL items plan remove\n");
+        return false;
+    }
+    inventory.generation[0] =
+        (uint16_t)(inventory.generation[0] + 1u); /* someone else wrote */
+    if (desk_inventory_commit_remove(&inventory, &plan, &taken)) {
+        (void)fprintf(stderr, "FAIL items stale commit accepted\n");
+        return false;
+    }
+    inventory.generation[0] = before.generation[0];
+    if (memcmp(&before.slots, &inventory.slots,
+               sizeof before.slots) != 0) {
+        (void)fprintf(stderr, "FAIL items stale commit mutated slots\n");
+        return false;
+    }
+
+    /* Partial then full removal. */
+    if (!desk_inventory_plan_remove(&inventory, 0, 2u, &plan) ||
+        !desk_inventory_commit_remove(&inventory, &plan, &taken) ||
+        taken.quantity != 2u || inventory.slots[0].quantity != 6u ||
+        !desk_inventory_plan_remove(&inventory, 0, 6u, &plan) ||
+        !desk_inventory_commit_remove(&inventory, &plan, &taken) ||
+        taken.quantity != 6u ||
+        !desk_item_is_empty(&inventory.slots[0])) {
+        (void)fprintf(stderr, "FAIL items remove\n");
+        return false;
+    }
+
+    /* Split one from a stack of many and from a stack of one. */
+    if (!desk_item_plan_split_one(&inventory, 1, &plan) ||
+        !desk_item_commit_split_one(&inventory, &plan, &taken) ||
+        taken.quantity != 1u || inventory.slots[1].quantity != 2u) {
+        (void)fprintf(stderr, "FAIL items split many\n");
+        return false;
+    }
+    if (!desk_item_plan_split_one(&inventory, 2, &plan) ||
+        !desk_item_commit_split_one(&inventory, &plan, &taken) ||
+        taken.quantity != 1u || taken.serial != 2u ||
+        !desk_item_is_empty(&inventory.slots[2])) {
+        (void)fprintf(stderr, "FAIL items split last\n");
+        return false;
+    }
+
+    /* Receiver rule matrix on the shipped catalog. */
+    {
+        int rule_index = desk_items_find_receiver(catalog, "stereo-record");
+        desk_item media = desk_item_make((uint16_t)record, 1u);
+        desk_item drink = desk_item_make((uint16_t)coffee, 1u);
+        desk_item missing = desk_item_make((uint16_t)DESK_ITEM_DEF_MISSING,
+                                           1u);
+
+        if (rule_index < 0 ||
+            !desk_receiver_accepts(catalog,
+                                   &catalog->receivers[rule_index],
+                                   &media) ||
+            desk_receiver_accepts(catalog,
+                                  &catalog->receivers[rule_index],
+                                  &drink) ||
+            desk_receiver_accepts(catalog,
+                                  &catalog->receivers[rule_index],
+                                  &missing)) {
+            (void)fprintf(stderr, "FAIL items receiver matrix\n");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool world_states_equal(const desk_world_state *a,
+                               const desk_world_state *b)
+{
+    /* Slot generations are session-local, so compare content only. */
+    return memcmp(a->inventory.slots, b->inventory.slots,
+                  sizeof a->inventory.slots) == 0 &&
+           a->inventory.selected == b->inventory.selected &&
+           memcmp(a->equipment, b->equipment, sizeof a->equipment) == 0 &&
+           a->next_serial == b->next_serial &&
+           a->orphan_count == b->orphan_count &&
+           memcmp(a->orphans, b->orphans, sizeof a->orphans) == 0 &&
+           a->claimed_count == b->claimed_count &&
+           memcmp(a->claimed, b->claimed, sizeof a->claimed) == 0 &&
+           a->item_count == b->item_count &&
+           memcmp(a->items, b->items, sizeof a->items) == 0 &&
+           a->receiver_count == b->receiver_count &&
+           memcmp(a->receivers, b->receivers, sizeof a->receivers) == 0 &&
+           a->effect_count == b->effect_count &&
+           memcmp(a->effects, b->effects, sizeof a->effects) == 0 &&
+           a->social_count == b->social_count &&
+           memcmp(a->social, b->social, sizeof a->social) == 0;
+}
+
+static bool items_state_cases(const char *directory,
+                              const desk_item_catalog *catalog)
+{
+    desk_world_state saved;
+    desk_world_state loaded;
+    desk_item_plan plan;
+    desk_item item;
+    bool corrupt = false;
+    int coffee = desk_items_find(catalog, "core:drink/coffee");
+    int record = desk_items_find(catalog, "core:media/record");
+    int plant = desk_items_find(catalog, "core:decor/houseplant");
+
+    /* Absent record: empty state, not corrupt. */
+    if (!desk_world_state_load(&loaded, catalog, &corrupt) || corrupt ||
+        loaded.item_count != 0 || loaded.claimed_count != 0) {
+        (void)fprintf(stderr, "FAIL world-state absent load\n");
+        return false;
+    }
+
+    desk_world_state_init(&saved);
+    item = desk_item_make((uint16_t)coffee, 7u);
+    if (!desk_inventory_plan_add(&saved.inventory, catalog, &item, &plan) ||
+        !desk_inventory_commit_add(&saved.inventory, catalog, &item,
+                                   &plan)) {
+        (void)fprintf(stderr, "FAIL world-state seed inventory\n");
+        return false;
+    }
+    saved.inventory.selected = 3;
+    saved.equipment[DESK_EQUIP_HANDS] =
+        desk_item_make((uint16_t)record, 1u);
+    saved.equipment[DESK_EQUIP_HANDS].serial =
+        desk_world_state_take_serial(&saved);
+    if (!desk_world_state_claim(&saved, "starter-record") ||
+        !desk_world_state_claim(&saved, "kitchen-coffee") ||
+        desk_world_state_claim(&saved, "starter-record")) {
+        (void)fprintf(stderr, "FAIL world-state claims\n");
+        return false;
+    }
+    saved.items[0].item = desk_item_make((uint16_t)plant, 2u);
+    saved.items[0].x = 240.0f;
+    saved.items[0].y = 200.5f;
+    saved.items[0].placed = true;
+    saved.items[0].room = -1;
+    (void)snprintf(saved.items[0].room_id, sizeof saved.items[0].room_id,
+                   "%s", "living");
+    saved.item_count = 1;
+    (void)snprintf(saved.receivers[0].room_id,
+                   sizeof saved.receivers[0].room_id, "%s", "living");
+    (void)snprintf(saved.receivers[0].object_id,
+                   sizeof saved.receivers[0].object_id, "%s", "stereo");
+    saved.receivers[0].phase = (uint8_t)DESK_RECEIVER_PROCESSING;
+    saved.receivers[0].remaining_ticks = 120;
+    saved.receivers[0].item = desk_item_make((uint16_t)record, 1u);
+    saved.receivers[0].item.serial = desk_world_state_take_serial(&saved);
+    saved.receiver_count = 1;
+    saved.effects[0].definition = (uint16_t)coffee;
+    saved.effects[0].remaining_ticks = 600;
+    saved.effect_count = 1;
+    saved.social[0].cast = 1u;
+    saved.social[0].actor = 2u;
+    saved.social[0].points = 250;
+    saved.social[0].gifts = 3u;
+    saved.social[0].flags = 1u;
+    saved.social_count = 1;
+
+    if (!desk_world_state_save(&saved, catalog) ||
+        !desk_world_state_load(&loaded, catalog, &corrupt) || corrupt ||
+        !world_states_equal(&saved, &loaded)) {
+        (void)fprintf(stderr, "FAIL world-state round-trip\n");
+        return false;
+    }
+
+    /* Duplicate serials must never encode. */
+    {
+        desk_world_state bad = saved;
+
+        bad.receivers[0].item.serial =
+            bad.equipment[DESK_EQUIP_HANDS].serial;
+        if (desk_world_state_save(&bad, catalog)) {
+            (void)fprintf(stderr, "FAIL world-state duplicate serial\n");
+            return false;
+        }
+    }
+
+    /* Corrupt record: flagged, empty state, profile stays valid. */
+    {
+        char record_path[1024];
+        FILE *handle;
+        long size;
+        int byte;
+        int written = snprintf(record_path, sizeof record_path,
+                               "%s/world.state", directory);
+        desk_profile profile;
+
+        (void)memset(&profile, 0, sizeof profile);
+        profile.schema = DESK_PROFILE_SCHEMA;
+        profile.cast = DESK_CAST_LEGEND;
+        profile.actor = DESK_ACTOR_HERO;
+        (void)snprintf(profile.name, sizeof profile.name, "%s", "ROOK");
+        (void)snprintf(profile.last_room, sizeof profile.last_room, "%s",
+                       "bedroom");
+        profile.first_run_done = true;
+        if (written < 0 || (size_t)written >= sizeof record_path ||
+            !desk_profile_save(&profile) ||
+            (handle = fopen(record_path, "r+b")) == NULL) {
+            (void)fprintf(stderr, "FAIL world-state corrupt setup\n");
+            return false;
+        }
+        if (fseek(handle, 0L, SEEK_END) != 0 ||
+            (size = ftell(handle)) <= 0L ||
+            fseek(handle, size / 2L, SEEK_SET) != 0 ||
+            (byte = fgetc(handle)) == EOF ||
+            fseek(handle, size / 2L, SEEK_SET) != 0 ||
+            fputc(byte ^ 0xff, handle) == EOF || fclose(handle) != 0) {
+            (void)fprintf(stderr, "FAIL world-state corrupt write\n");
+            return false;
+        }
+        if (!desk_world_state_load(&loaded, catalog, &corrupt) ||
+            !corrupt || loaded.item_count != 0 ||
+            !desk_profile_load(&profile) ||
+            strcmp(profile.name, "ROOK") != 0) {
+            (void)fprintf(stderr, "FAIL world-state corruption isolation\n");
+            return false;
+        }
+    }
+
+    /* Missing definition: recover as orphan, then restore. */
+    {
+        static const char *const REDUCED =
+            "{\"items\":1,\"definitions\":[{\"id\":\"core:media/record\","
+            "\"name\":\"House Record\",\"description\":\"r.\","
+            "\"family\":\"portable\",\"behavior\":\"hold\",\"sprite\":1,"
+            "\"max_stack\":1}]}";
+        desk_item_catalog reduced;
+        desk_world_state recovered;
+        char path[1024];
+        char error[DESK_ERROR_CAPACITY];
+
+        if (!json_write_fixture(directory, "reduced.json", REDUCED,
+                                strlen(REDUCED), path, sizeof path) ||
+            !desk_items_load(&reduced, path, error, sizeof error)) {
+            (void)fprintf(stderr, "FAIL world-state reduced catalog\n");
+            return false;
+        }
+        if (!desk_world_state_save(&saved, catalog) ||
+            !desk_world_state_load(&loaded, &reduced, &corrupt) ||
+            corrupt) {
+            (void)fprintf(stderr, "FAIL world-state reduced load\n");
+            return false;
+        }
+        if (loaded.inventory.slots[0].definition !=
+                (uint16_t)DESK_ITEM_DEF_MISSING ||
+            loaded.orphan_count < 1 ||
+            strcmp(loaded.orphans[loaded.inventory.slots[0].variant],
+                   "core:drink/coffee") != 0 ||
+            loaded.inventory.slots[0].quantity != 7u) {
+            (void)fprintf(stderr, "FAIL world-state orphan\n");
+            return false;
+        }
+        /* Save under the reduced catalog, reload under the full one: the
+         * original id must resolve again with nothing lost. */
+        if (!desk_world_state_save(&loaded, &reduced) ||
+            !desk_world_state_load(&recovered, catalog, &corrupt) ||
+            corrupt ||
+            recovered.inventory.slots[0].definition != (uint16_t)coffee ||
+            recovered.inventory.slots[0].variant != 0u ||
+            recovered.inventory.slots[0].quantity != 7u ||
+            /* The effect referenced a definition that was absent when the
+             * reduced catalog saved, so it was dropped for good. */
+            recovered.effect_count != 0) {
+            (void)fprintf(stderr, "FAIL world-state recovery\n");
+            return false;
+        }
+    }
+    return true;
+}
+
+static int items_test(void)
+{
+    char directory[1024];
+    desk_item_catalog catalog;
+    char path[1024];
+    char error[DESK_ERROR_CAPACITY];
+    bool ok = true;
+    int written;
+
+    if (!make_temp_config(directory, sizeof directory)) {
+        (void)fprintf(stderr, "FAIL items temp config\n");
+        return EXIT_FAILURE;
+    }
+    written = snprintf(path, sizeof path, "%s/assets/world/items.json",
+                       asset_root());
+    if (written < 0 || (size_t)written >= sizeof path ||
+        !desk_items_load(&catalog, path, error, sizeof error)) {
+        (void)fprintf(stderr, "FAIL items catalog %s: %s\n", path, error);
+        ok = false;
+    }
+    if (ok &&
+        (catalog.definition_count != 6 || catalog.receiver_count != 1 ||
+         desk_items_find(&catalog, DESK_ITEM_MISSING_ID) !=
+             (int)DESK_ITEM_DEF_MISSING ||
+         desk_items_find(&catalog, "core:media/record") <= 0)) {
+        (void)fprintf(stderr, "FAIL items shipped catalog shape\n");
+        ok = false;
+    }
+    if (ok && !items_catalog_cases(directory)) ok = false;
+    if (ok && !items_stack_cases(&catalog)) ok = false;
+    if (ok && !items_state_cases(directory, &catalog)) ok = false;
+    if (!remove_tree(directory)) {
+        (void)fprintf(stderr, "FAIL items temp cleanup\n");
+        ok = false;
+    }
+    if (!ok) return EXIT_FAILURE;
+    (void)printf(
+        "PASS items definitions=%d receivers=%d negative-cases=%zu "
+        "state=round-trip+orphan+corruption\n",
+        catalog.definition_count, catalog.receiver_count,
+        sizeof CATALOG_CASES / sizeof CATALOG_CASES[0] - 1u);
+    return EXIT_SUCCESS;
+}
+
 typedef struct render_fixture {
     desk_world world;
     desk_graphics graphics;
@@ -1739,7 +2305,7 @@ static void usage(const char *program)
 {
     (void)fprintf(stderr,
         "usage: %s [--selftest | --audio-test | --graphics-test | "
-        "--json-test | "
+        "--json-test | --items-test | "
         "--world-test | --profile-test | --wizard-render-test DIR | "
         "--room-render-test DIR | --outfit-render-test DIR | "
         "--walk-render-test DIR | "
@@ -1757,6 +2323,8 @@ int main(int argc, char **argv)
         return graphics_test();
     if (argc == 2 && strcmp(argv[1], "--json-test") == 0)
         return json_test();
+    if (argc == 2 && strcmp(argv[1], "--items-test") == 0)
+        return items_test();
     if (argc == 2 && strcmp(argv[1], "--world-test") == 0)
         return world_test();
     if (argc == 2 && strcmp(argv[1], "--profile-test") == 0)

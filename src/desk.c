@@ -1,4 +1,5 @@
 #include "kilix_land_desktop.h"
+#include "state_store.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -8,7 +9,6 @@
 /* Not in the module header; matches kilix-land's dialogue text budget. */
 #define DESK_DIALOGUE_TEXT_CAPACITY 192
 
-#define DESK_PROFILE_APP_ID "kilix-land-desktop"
 #define DESK_PROFILE_FILENAME "profile.state"
 #define DESK_PROFILE_PAYLOAD_SIZE 96u
 #define DESK_PROFILE_MAX_PAYLOAD 256u
@@ -1469,43 +1469,8 @@ _Static_assert(DESK_PROFILE_PAYLOAD_SIZE >=
 
 static bool profile_store_open(kilixstate_store *store)
 {
-    kilixstate_options options;
-    char base[KILIXSTATE_PATH_CAPACITY];
-    char absolute[KILIXSTATE_PATH_CAPACITY];
-    const char *override_dir;
-    const char *home;
-    int written;
-    if (!store) return false;
-    kilixstate_options_init(&options);
-    options.app_id = DESK_PROFILE_APP_ID;
-    options.filename = DESK_PROFILE_FILENAME;
-    options.max_payload = DESK_PROFILE_MAX_PAYLOAD;
-    override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
-    if (override_dir && override_dir[0] != '\0') {
-        /* kilixstate rejects relative absolute_paths anyway; surface the
-         * misconfiguration once instead of silently losing persistence. */
-        if (override_dir[0] != '/') {
-            static bool warned = false;
-            if (!warned) {
-                (void)fprintf(stderr, "kilix-land-desktop: "
-                              "KILIX_LAND_DESKTOP_CONFIG_HOME must be an "
-                              "absolute path; profile persistence is off\n");
-                warned = true;
-            }
-            return false;
-        }
-        written = snprintf(absolute, sizeof absolute, "%s/%s", override_dir,
-                           DESK_PROFILE_FILENAME);
-        if (written < 0 || (size_t)written >= sizeof absolute) return false;
-        options.absolute_path = absolute;
-    } else {
-        home = getenv("HOME");
-        if (!home || home[0] != '/') return false;
-        written = snprintf(base, sizeof base, "%s/.local/gpu_terminal", home);
-        if (written < 0 || (size_t)written >= sizeof base) return false;
-        options.base_directory = base;
-    }
-    return kilixstate_store_init(store, &options) == KILIXSTATE_OK;
+    return desk_state_store_open(store, DESK_PROFILE_FILENAME,
+                                 DESK_PROFILE_MAX_PAYLOAD);
 }
 
 static bool profile_decode_v1(kilixstate_reader *reader, void *context)

@@ -27,7 +27,8 @@ override CFLAGS += -std=c11 -pthread $(WARNINGS) -MMD -MP
 LDLIBS := $(KILIX_ASSETS_LDLIBS) $(KILIX_GAME_KIT_LDLIBS)
 
 BIN := kilix-land-desktop
-SRC := src/main.c src/desk.c src/rooms.c src/json_reader.c src/launcher.c \
+SRC := src/main.c src/desk.c src/rooms.c src/json_reader.c src/items.c \
+	src/world_state.c src/state_store.c src/launcher.c \
 	src/graphics.c src/render.c src/audio.c
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 DEPENDENCIES := $(OBJ:.o=.d)
@@ -44,7 +45,7 @@ $(BIN): $(OBJ) $(GRAPHICS_MANIFEST) $(KILIX_UI_LIB) $(KILIX_TD_LIBS) \
 		$(KILIX_ASSETS_LIB) $(KILIX_GAME_KIT_LIB) $(LDLIBS)
 
 build/%.o: src/%.c src/kilix_land_desktop.h src/source_parity.h \
-	src/json_reader.h \
+	src/json_reader.h src/items.h src/world_state.h src/state_store.h \
 	$(KILIX_ASSETS_ROOT)/include/kilix_assets.h \
 	$(KILIX_UI_ROOT)/include/kilix_ui.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
@@ -73,6 +74,7 @@ audio:
 
 test: parity-check $(BIN)
 	$(PYTHON) tools/validate_world.py assets/world/world.json
+	$(PYTHON) tools/validate_items.py assets/world/items.json
 	$(PYTHON) tools/validate_visual.py
 	$(PYTHON) tools/validate_audio.py --plan
 	$(PYTHON) tools/land_config.py --check
@@ -83,6 +85,7 @@ test: parity-check $(BIN)
 	./$(BIN) --audio-test
 	./$(BIN) --graphics-test
 	./$(BIN) --json-test
+	./$(BIN) --items-test
 	./$(BIN) --world-test
 	./$(BIN) --profile-test
 	./$(BIN) --wizard-render-test build/wizard-preview
