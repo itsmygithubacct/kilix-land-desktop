@@ -641,10 +641,23 @@ static void draw_placement_ghost(ki_td_soft_renderer *renderer,
     if (desk_graphics_item_cell(graphics, visible_cast(state),
                                 (int)def->sprite, &cell) &&
         desk_graphics_item_cell_metrics(graphics, visible_cast(state),
-                                        (int)def->sprite, &metrics))
-        draw_foot_anchored(renderer, view, &cell, &metrics, ghost_x,
-                           ghost_y, ITEM_WORLD_RENDER_SIZE,
-                           ITEM_WORLD_RENDER_SIZE, 0.55f, NULL);
+                                        (int)def->sprite, &metrics) &&
+        metrics.valid) {
+        /* The ghost is the item art itself, tinted toward the verdict
+         * color like a proper placement preview. */
+        float scale_x =
+            (float)ITEM_WORLD_RENDER_SIZE / (float)cell.width;
+        float scale_y =
+            (float)ITEM_WORLD_RENDER_SIZE / (float)cell.height;
+
+        ki_td_soft_rgba_tinted(renderer, view,
+                               ghost_x - (float)metrics.spine_x * scale_x,
+                               ghost_y - (float)metrics.bottom * scale_y,
+                               &cell, ITEM_WORLD_RENDER_SIZE,
+                               ITEM_WORLD_RENDER_SIZE,
+                               valid ? UINT32_C(0xb6ffc9) :
+                                       UINT32_C(0xff958b), 0.62f);
+    }
 }
 
 /* A small bubble over any fixture whose receiver holds an item: the
