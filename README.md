@@ -9,6 +9,22 @@ yard; interacting with objects (desk computer, filing cabinet, TV, stereo,
 mailbox, bed…) engages OS and desktop functions the way kilix-cap's rooms do,
 but through a walkable avatar.
 
+## Items
+
+The house also holds portable items with per-style art drawn from the four
+source games: pick them up off the floor (Enter), carry them in a
+twelve-slot hotbar (`1`–`9` `0` `-` `=` select, `[` `]` cycle), and set
+them down again (`Q`). Space uses the selected item: drink the coffee (the
+effect lands on the swallow frame of a real animation), place the
+houseplant on any clear floor a green ghost approves, put the record on
+the stereo (which plays through the same launcher path as pressing it),
+swing the toolbox at the shed to open maintenance on the impact frame,
+hand a housemate a postcard at arm's reach, or pin on the lantern
+accessory. Item state — inventory, placed decor, what the stereo is
+holding, friendships — persists in a `world.state` record beside the
+character profile; corrupting one never touches the other, and items whose
+definitions disappear come back when the definition does.
+
 ## Build
 
 ```
@@ -23,17 +39,24 @@ kilix-ui at their established `third_party/` paths.
 ## Layout
 
 - `src/` — C11 sources: terminal host (`main.c`), world sim (`desk.c`), world
-  manifest (`rooms.c`), launch registry (`launcher.c`), atlas load + outfit
-  recolor (`graphics.c`), drawing (`render.c`), cues (`audio.c`).
+  manifest (`rooms.c`), shared strict JSON reader (`json_reader.c`), item
+  catalog + inventory semantics (`items.c`), durable world record
+  (`world_state.c`), config-home store (`state_store.c`), launch registry
+  (`launcher.c`), atlas load + outfit recolor (`graphics.c`), drawing
+  (`render.c`), cues (`audio.c`).
 - `assets/world/world.json` — the room graph: walk rects, obstacles, doors,
-  objects. Objects reference launch *target ids*; argv lives only in
-  `src/launcher.c`.
+  objects, authored item spawns. Objects reference launch *target ids*; argv
+  lives only in `src/launcher.c`, and item data can never name a command,
+  path, or callback.
+- `assets/world/items.json` — the item catalog: qualified ids, families,
+  compiled behavior names, tags, receiver rules.
 - `assets/graphics/`, `assets/audio/` — parity-managed copies from the four
   source games (byte-identical to their committed history), maintained by
   `tools/sync_source_parity.py` (`make parity-sync` / `make parity-check`).
-  Room plates land in `assets/graphics/rooms/<style>/` after art review; until
-  then every room renders a procedural placeholder plate.
-- `tools/` — parity sync, world validator, helpers launched in tabs.
+  Room plates land in `assets/graphics/rooms/<style>/` after art review;
+  `assets/graphics/items/` is the desktop-items atlas composed from each
+  style's own game by `tools/sync_item_art.py` (`make items-art`).
+- `tools/` — parity sync, world/items validators, helpers launched in tabs.
 
 ## Provider
 
