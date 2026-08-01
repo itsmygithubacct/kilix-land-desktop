@@ -186,6 +186,56 @@ def check_receiver(index, receiver, ids, item_ids):
         fail(f"{label}: unknown result '{receiver.get('result')}'")
 
 
+def check_art(items_path, definitions):
+    """The committed desktop-items artifacts: atlas geometry, manifest
+    hash, provenance record, and a sprite column for every definition."""
+    import hashlib
+    import os
+    root = os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(items_path))))
+    atlas_path = os.path.join(root, "assets", "graphics", "items",
+                              "desktop-items.png")
+    provenance_path = os.path.join(root, "assets", "graphics", "items",
+                                   "PROVENANCE.json")
+    manifest_path = os.path.join(root, "assets", "graphics",
+                                 "manifest.json")
+    for required in (atlas_path, provenance_path):
+        if not os.path.exists(required):
+            fail(f"missing {os.path.relpath(required, root)} "
+                 "(run `make items-art`)")
+    from PIL import Image
+    with Image.open(atlas_path) as image:
+        if image.size != (32 * SPRITE_COLUMNS, 32 * 4):
+            fail(f"desktop-items.png is {image.size[0]}x{image.size[1]}, "
+                 f"want {32 * SPRITE_COLUMNS}x{32 * 4}")
+        if image.mode != "RGBA":
+            fail(f"desktop-items.png mode '{image.mode}' is not RGBA")
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    entry = next((atlas for atlas in manifest.get("atlases", [])
+                  if atlas.get("id") == "desktop-items"), None)
+    if entry is None:
+        fail("manifest.json has no desktop-items atlas entry")
+    with open(atlas_path, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+    if entry.get("sha256") != digest:
+        fail("manifest hash is stale for desktop-items "
+             "(run `make items-art`)")
+    grid = entry.get("grid", {})
+    if (grid.get("columns"), grid.get("rows")) != (SPRITE_COLUMNS, 4) \
+            or (grid.get("cell_width"), grid.get("cell_height")) != (32, 32):
+        fail("manifest grid is wrong for desktop-items")
+    with open(provenance_path, encoding="utf-8") as handle:
+        provenance = json.load(handle)
+    covered = {(cell.get("row"), cell.get("column"))
+               for cell in provenance.get("cells", [])}
+    for item in definitions:
+        for row in range(4):
+            if (row, item["sprite"]) not in covered:
+                fail(f"provenance covers no cell for sprite column "
+                     f"{item['sprite']} row {row} ('{item['id']}')")
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "assets/world/items.json"
     with open(path, encoding="utf-8") as handle:
@@ -217,8 +267,10 @@ def main():
     for index, receiver in enumerate(receivers):
         check_receiver(index, receiver, receiver_ids, item_ids)
 
+    check_art(path, definitions)
+
     print(f"items: OK ({len(definitions)} definitions, "
-          f"{len(receivers)} receivers)")
+          f"{len(receivers)} receivers, art verified)")
 
 
 if __name__ == "__main__":

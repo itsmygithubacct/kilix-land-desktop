@@ -2244,6 +2244,85 @@ static int walk_render_test(const char *directory)
     return EXIT_SUCCESS;
 }
 
+static int items_render_test(const char *directory)
+{
+    render_fixture fixture;
+    desk_state state;
+    bool success;
+    int living;
+    int record_index = -1;
+    int index;
+
+    if (!fixture_open(&fixture, directory)) return EXIT_FAILURE;
+    desk_init(&state, &fixture.world, &fixture.catalog);
+    living = desk_world_room_index(&fixture.world, "living");
+    success = state.mode == DESK_MODE_WIZARD &&
+              complete_wizard(&state, &fixture.world) && living >= 0;
+    if (success) {
+        state.room = living;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        for (index = 0; index < state.items.item_count; ++index)
+            if (state.items.items[index].room == living)
+                record_index = index;
+        success = record_index >= 0;
+    }
+    if (success) {
+        /* Feet above the item's baseline: the item must draw in front. */
+        const desk_world_item *entry = &state.items.items[record_index];
+
+        state.player_x = entry->x;
+        state.player_y = entry->y - 6.0f;
+        state.facing = DESK_FACING_DOWN;
+        desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
+        state.toast_ticks = 0;
+        success = fixture_snapshot(&fixture, &state, directory,
+                                   "item-in-front");
+    }
+    if (success) {
+        /* Feet below the baseline: the item must draw behind. */
+        const desk_world_item *entry = &state.items.items[record_index];
+
+        state.player_y = entry->y + 8.0f;
+        desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
+        state.toast_ticks = 0;
+        success = fixture_snapshot(&fixture, &state, directory,
+                                   "item-behind");
+    }
+    if (success) {
+        /* Hotbar states: stack with quantity, single item, recovery icon,
+         * and a non-zero selected slot. */
+        int coffee = desk_items_find(&fixture.catalog,
+                                     "core:drink/coffee");
+        int record = desk_items_find(&fixture.catalog,
+                                     "core:media/record");
+        int orphan = desk_world_state_orphan_add(&state.items,
+                                                 "core:test/lost-thing");
+
+        success = coffee > 0 && record > 0 && orphan >= 0;
+        if (success) {
+            state.items.inventory.slots[0] =
+                desk_item_make((uint16_t)coffee, 8u);
+            state.items.inventory.slots[1] =
+                desk_item_make((uint16_t)record, 1u);
+            state.items.inventory.slots[2] =
+                desk_item_make((uint16_t)DESK_ITEM_DEF_MISSING, 1u);
+            state.items.inventory.slots[2].variant = (uint16_t)orphan;
+            state.items.inventory.selected = 1;
+            desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
+            state.toast_ticks = 0;
+            success = fixture_snapshot(&fixture, &state, directory,
+                                       "hotbar");
+        }
+    }
+    fixture_close(&fixture);
+    if (!success) return EXIT_FAILURE;
+    (void)printf(
+        "PASS render scene=items files=3 depth=front+behind "
+        "hotbar=stack+missing size=%dx%d directory=%s\n",
+        DESK_LOGICAL_WIDTH, DESK_LOGICAL_HEIGHT, directory);
+    return EXIT_SUCCESS;
+}
+
 static desk_cast audio_cast(const desk_state *state)
 {
     return state->mode == DESK_MODE_WIZARD ?
@@ -2566,7 +2645,7 @@ static void usage(const char *program)
         "--json-test | --items-test | "
         "--world-test | --profile-test | --wizard-render-test DIR | "
         "--room-render-test DIR | --outfit-render-test DIR | "
-        "--walk-render-test DIR | "
+        "--walk-render-test DIR | --items-render-test DIR | "
         "--screenshot PATH [--room ID] [--style STYLE] | --version]\n",
         program);
 }
@@ -2595,6 +2674,8 @@ int main(int argc, char **argv)
         return outfit_render_test(argv[2]);
     if (argc == 3 && strcmp(argv[1], "--walk-render-test") == 0)
         return walk_render_test(argv[2]);
+    if (argc == 3 && strcmp(argv[1], "--items-render-test") == 0)
+        return items_render_test(argv[2]);
     if (argc >= 3 && strcmp(argv[1], "--screenshot") == 0) {
         const char *room = NULL;
         const char *style = NULL;

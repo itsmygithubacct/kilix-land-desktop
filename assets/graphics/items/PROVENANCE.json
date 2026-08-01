@@ -1,0 +1,276 @@
+{
+  "tool": "tools/sync_item_art.py",
+  "atlas": "desktop-items",
+  "grid": {
+    "columns": 8,
+    "rows": 4,
+    "cell_width": 32,
+    "cell_height": 32
+  },
+  "cells": [
+    {
+      "row": 0,
+      "column": 0,
+      "style": "legend",
+      "source": "drawn missing-item icon"
+    },
+    {
+      "row": 0,
+      "column": 1,
+      "style": "legend",
+      "game": "legend-of-kilix",
+      "path": "assets/graphics/atlases/items.png",
+      "cell": [
+        3,
+        5
+      ],
+      "commit": "42237c2863e1"
+    },
+    {
+      "row": 0,
+      "column": 2,
+      "style": "legend",
+      "game": "legend-of-kilix",
+      "path": "assets/graphics/atlases/items.png",
+      "cell": [
+        1,
+        2
+      ],
+      "commit": "42237c2863e1"
+    },
+    {
+      "row": 0,
+      "column": 3,
+      "style": "legend",
+      "game": "legend-of-kilix",
+      "path": "assets/graphics/atlases/items.png",
+      "cell": [
+        2,
+        7
+      ],
+      "commit": "42237c2863e1"
+    },
+    {
+      "row": 0,
+      "column": 4,
+      "style": "legend",
+      "game": "legend-of-kilix",
+      "path": "assets/graphics/atlases/items.png",
+      "cell": [
+        3,
+        4
+      ],
+      "commit": "42237c2863e1"
+    },
+    {
+      "row": 0,
+      "column": 5,
+      "style": "legend",
+      "game": "legend-of-kilix",
+      "path": "assets/graphics/atlases/items.png",
+      "cell": [
+        3,
+        2
+      ],
+      "commit": "42237c2863e1"
+    },
+    {
+      "row": 1,
+      "column": 0,
+      "style": "chumrunner",
+      "source": "drawn missing-item icon"
+    },
+    {
+      "row": 1,
+      "column": 1,
+      "style": "chumrunner",
+      "game": "chumrunner",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        5
+      ],
+      "commit": "6c11213dc968"
+    },
+    {
+      "row": 1,
+      "column": 2,
+      "style": "chumrunner",
+      "game": "chumrunner",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        2
+      ],
+      "commit": "6c11213dc968"
+    },
+    {
+      "row": 1,
+      "column": 3,
+      "style": "chumrunner",
+      "game": "chumrunner",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        7
+      ],
+      "commit": "6c11213dc968"
+    },
+    {
+      "row": 1,
+      "column": 4,
+      "style": "chumrunner",
+      "game": "chumrunner",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        6
+      ],
+      "commit": "6c11213dc968"
+    },
+    {
+      "row": 1,
+      "column": 5,
+      "style": "chumrunner",
+      "game": "chumrunner",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        4
+      ],
+      "commit": "6c11213dc968"
+    },
+    {
+      "row": 2,
+      "column": 0,
+      "style": "fantasy",
+      "source": "drawn missing-item icon"
+    },
+    {
+      "row": 2,
+      "column": 1,
+      "style": "fantasy",
+      "game": "kilix-fantasy",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        1,
+        7
+      ],
+      "commit": "824f1267f22b"
+    },
+    {
+      "row": 2,
+      "column": 2,
+      "style": "fantasy",
+      "game": "kilix-fantasy",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        0
+      ],
+      "commit": "824f1267f22b"
+    },
+    {
+      "row": 2,
+      "column": 3,
+      "style": "fantasy",
+      "game": "kilix-fantasy",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        3,
+        6
+      ],
+      "commit": "824f1267f22b"
+    },
+    {
+      "row": 2,
+      "column": 4,
+      "style": "fantasy",
+      "game": "kilix-fantasy",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        2
+      ],
+      "commit": "824f1267f22b"
+    },
+    {
+      "row": 2,
+      "column": 5,
+      "style": "fantasy",
+      "game": "kilix-fantasy",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        3
+      ],
+      "commit": "824f1267f22b"
+    },
+    {
+      "row": 3,
+      "column": 0,
+      "style": "pleb-bound",
+      "source": "drawn missing-item icon"
+    },
+    {
+      "row": 3,
+      "column": 1,
+      "style": "pleb-bound",
+      "game": "pleb-bound",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        1,
+        0
+      ],
+      "commit": "25d070210619"
+    },
+    {
+      "row": 3,
+      "column": 2,
+      "style": "pleb-bound",
+      "game": "pleb-bound",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        1
+      ],
+      "commit": "25d070210619"
+    },
+    {
+      "row": 3,
+      "column": 3,
+      "style": "pleb-bound",
+      "game": "pleb-bound",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        3,
+        4
+      ],
+      "commit": "25d070210619"
+    },
+    {
+      "row": 3,
+      "column": 4,
+      "style": "pleb-bound",
+      "game": "pleb-bound",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        1,
+        2
+      ],
+      "commit": "25d070210619"
+    },
+    {
+      "row": 3,
+      "column": 5,
+      "style": "pleb-bound",
+      "game": "pleb-bound",
+      "path": "assets/graphics/atlases/items-effects.png",
+      "cell": [
+        0,
+        6
+      ],
+      "commit": "25d070210619"
+    }
+  ]
+}

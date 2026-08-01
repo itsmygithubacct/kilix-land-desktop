@@ -445,60 +445,132 @@ static void apply_walkbehinds(ki_td_soft_renderer *renderer,
     }
 }
 
-static void draw_actors(ki_td_soft_renderer *renderer, const ki_td_view *view,
-                        const desk_state *state,
-                        const desk_graphics *graphics, const desk_room *room,
-                        int room_index)
+#define ITEM_WORLD_RENDER_SIZE 22
+
+static void draw_world_item(ki_td_soft_renderer *renderer,
+                            const ki_td_view *view, const desk_state *state,
+                            const desk_graphics *graphics, int index,
+                            desk_bounds *bounds)
 {
-    enum { ACTOR_DRAW_CAPACITY = DESK_MAX_NPCS_PER_ROOM + 1 };
-    int order[ACTOR_DRAW_CAPACITY];
-    float depth[ACTOR_DRAW_CAPACITY];
+    const desk_world_item *entry = &state->items.items[index];
+    const desk_item_def *def =
+        desk_items_def(state->catalog, entry->item.definition);
+    int sprite = def ? (int)def->sprite : 0;
+    ki_td_rgba8 cell;
+    desk_sprite_metrics metrics;
+
+    draw_shadow(renderer, view, entry->x, entry->y, 8.0f, bounds);
+    if (index == state->nearest_world_item &&
+        state->mode == DESK_MODE_ROOM) {
+        ki_td_soft_fill_ellipse(renderer, view, entry->x, entry->y, 11.0f,
+                                11.0f * 0.29f, COLOR_GOLD, 0.22f);
+        bounds_add(bounds, entry->x - 11.0f, entry->y - 11.0f * 0.29f,
+                   22.0f, 11.0f * 0.58f);
+    }
+    if (desk_graphics_item_cell(graphics, visible_cast(state), sprite,
+                                &cell) &&
+        desk_graphics_item_cell_metrics(graphics, visible_cast(state),
+                                        sprite, &metrics))
+        draw_foot_anchored(renderer, view, &cell, &metrics, entry->x,
+                           entry->y, ITEM_WORLD_RENDER_SIZE,
+                           ITEM_WORLD_RENDER_SIZE, 1.0f, bounds);
+}
+
+/* One stable queue for everything that stands in the room. Ordering is
+ * (baseline, bias, kind, key): world items carry bias -1 so they draw
+ * behind an actor standing exactly on them, and the key is a stable
+ * per-entity identity so equal baselines never depend on scan order. */
+typedef struct world_draw_command {
+    float baseline;
+    int bias;
+    int kind; /* 0 = npc, 1 = player, 2 = world item */
+    int key;
+    int index;
+} world_draw_command;
+
+static bool draw_command_before(const world_draw_command *a,
+                                const world_draw_command *b)
+{
+    if (a->baseline != b->baseline) return a->baseline < b->baseline;
+    if (a->bias != b->bias) return a->bias < b->bias;
+    if (a->kind != b->kind) return a->kind < b->kind;
+    return a->key < b->key;
+}
+
+static void draw_world_entities(ki_td_soft_renderer *renderer,
+                                const ki_td_view *view,
+                                const desk_state *state,
+                                const desk_graphics *graphics,
+                                const desk_room *room, int room_index)
+{
+    enum {
+        WORLD_DRAW_CAPACITY =
+            DESK_MAX_NPCS_PER_ROOM + 1 + DESK_MAX_WORLD_ITEMS
+    };
+    world_draw_command queue[WORLD_DRAW_CAPACITY];
     ki_td_rgba8 plate;
     const uint8_t *mask = NULL;
     int npc_count = room_npc_count(room);
     int count = 0;
-    int left;
-    int npc;
+    int slot;
+    int index;
     /* Walk-behinds re-blit plate art; the procedural fallback has none. */
     if (desk_graphics_plate(graphics, room_index, &plate))
         mask = desk_graphics_behind_mask(graphics, room_index);
-    for (npc = 0; npc < npc_count; ++npc) {
-        order[count] = npc;
-        depth[count] = room->npcs[npc].y;
+    for (index = 0; index < npc_count; ++index) {
+        queue[count].baseline = room->npcs[index].y;
+        queue[count].bias = 0;
+        queue[count].kind = 0;
+        queue[count].key = room->npcs[index].actor;
+        queue[count].index = index;
         ++count;
     }
-    order[count] = -1;
-    depth[count] = state->player_y;
+    queue[count].baseline = state->player_y;
+    queue[count].bias = 0;
+    queue[count].kind = 1;
+    queue[count].key = 0;
+    queue[count].index = -1;
     ++count;
-    for (left = 0; left < count - 1; ++left) {
-        int right;
-        for (right = left + 1; right < count; ++right) {
-            if (depth[right] < depth[left]) {
-                int swap_order = order[left];
-                float swap_depth = depth[left];
-                order[left] = order[right];
-                depth[left] = depth[right];
-                order[right] = swap_order;
-                depth[right] = swap_depth;
-            }
-        }
+    for (index = 0; index < state->items.item_count &&
+                    index < DESK_MAX_WORLD_ITEMS; ++index) {
+        if (state->items.items[index].room != room_index) continue;
+        if (count >= WORLD_DRAW_CAPACITY) break;
+        queue[count].baseline = state->items.items[index].y;
+        queue[count].bias = -1;
+        queue[count].kind = 2;
+        queue[count].key = index;
+        queue[count].index = index;
+        ++count;
     }
-    for (left = 0; left < count; ++left) {
-        desk_bounds bounds = {0.0f, 0.0f, 0.0f, 0.0f, false};
-        float feet_y;
+    /* Stable insertion sort: the list is bounded and nearly sorted, and
+     * the render loop must not allocate. */
+    for (slot = 1; slot < count; ++slot) {
+        world_draw_command pending = queue[slot];
+        int scan = slot - 1;
 
-        if (order[left] < 0) {
+        while (scan >= 0 && draw_command_before(&pending, &queue[scan])) {
+            queue[scan + 1] = queue[scan];
+            --scan;
+        }
+        queue[scan + 1] = pending;
+    }
+    for (slot = 0; slot < count; ++slot) {
+        desk_bounds bounds = {0.0f, 0.0f, 0.0f, 0.0f, false};
+        const world_draw_command *command = &queue[slot];
+
+        if (command->kind == 1) {
             draw_player(renderer, view, state, graphics,
                         mask ? &bounds : NULL);
-            feet_y = state->player_y;
-        } else {
+        } else if (command->kind == 0) {
             draw_npc(renderer, view, state, graphics,
-                     &room->npcs[order[left]], mask ? &bounds : NULL);
-            feet_y = room->npcs[order[left]].y;
+                     &room->npcs[command->index], mask ? &bounds : NULL);
+        } else {
+            draw_world_item(renderer, view, state, graphics,
+                            command->index, mask ? &bounds : NULL);
         }
         if (mask)
-            apply_walkbehinds(renderer, view, &plate, mask, room, feet_y,
-                              &bounds);
+            apply_walkbehinds(renderer, view, &plate, mask, room,
+                              command->baseline, &bounds);
     }
 }
 
@@ -644,13 +716,79 @@ static void draw_interact_prompt(ki_td_soft_renderer *renderer,
     left = 240.0f - width * 0.5f;
     base_style(&style, accent);
     style.panel_alpha = 0.93f;
+    /* The winning-action prompt sits directly above the hotbar strip. */
     kilix_ui_draw_panel(renderer, view,
-                        (ki_td_rect){(int)left, 238 + (int)bob,
+                        (ki_td_rect){(int)left, 212 + (int)bob,
                                      (int)width, 24},
                         &style, NULL);
-    ki_td_soft_fill_rect(renderer, view, left + 2.0f, 240.0f + bob,
+    ki_td_soft_fill_rect(renderer, view, left + 2.0f, 214.0f + bob,
                          4.0f, 20.0f, accent, 1.0f);
-    text_at(canvas, view, left + 13.0f, 243.0f + bob, message, COLOR_INK);
+    text_at(canvas, view, left + 13.0f, 217.0f + bob, message, COLOR_INK);
+}
+
+#define HOTBAR_SLOT_SIZE 24
+#define HOTBAR_TOP 242.0f
+
+static void draw_hotbar(ki_td_soft_renderer *renderer,
+                        const ki_td_view *view, sr_canvas *canvas,
+                        const desk_state *state,
+                        const desk_graphics *graphics)
+{
+    const desk_inventory *inventory = &state->items.inventory;
+    uint32_t accent = desk_actor_color(visible_cast(state),
+                                       DESK_ACTOR_HERO);
+    float left =
+        ((float)DESK_LOGICAL_WIDTH -
+         (float)(DESK_INVENTORY_SLOTS * HOTBAR_SLOT_SIZE)) * 0.5f;
+    int slot;
+
+    ki_td_soft_fill_rect(renderer, view, left - 2.0f, HOTBAR_TOP - 2.0f,
+                         (float)(DESK_INVENTORY_SLOTS * HOTBAR_SLOT_SIZE) +
+                             4.0f,
+                         (float)HOTBAR_SLOT_SIZE + 4.0f,
+                         UINT32_C(0x070b13), 0.78f);
+    for (slot = 0; slot < DESK_INVENTORY_SLOTS; ++slot) {
+        const desk_item *item = &inventory->slots[slot];
+        float x = left + (float)(slot * HOTBAR_SLOT_SIZE);
+        bool selected = slot == inventory->selected;
+
+        ki_td_soft_fill_rect(renderer, view, x + 1.0f, HOTBAR_TOP + 1.0f,
+                             (float)HOTBAR_SLOT_SIZE - 2.0f,
+                             (float)HOTBAR_SLOT_SIZE - 2.0f,
+                             selected ? COLOR_PANEL_LIGHT :
+                                        UINT32_C(0x0e1524),
+                             selected ? 1.0f : 0.88f);
+        if (selected) {
+            ki_td_soft_fill_rect(renderer, view, x + 1.0f, HOTBAR_TOP,
+                                 (float)HOTBAR_SLOT_SIZE - 2.0f, 2.0f,
+                                 accent, 1.0f);
+            ki_td_soft_fill_rect(renderer, view, x + 1.0f,
+                                 HOTBAR_TOP + (float)HOTBAR_SLOT_SIZE -
+                                     2.0f,
+                                 (float)HOTBAR_SLOT_SIZE - 2.0f, 2.0f,
+                                 accent, 0.7f);
+        }
+        if (!desk_item_is_empty(item)) {
+            const desk_item_def *def =
+                desk_items_def(state->catalog, item->definition);
+            int sprite = def ? (int)def->sprite : 0;
+            ki_td_rgba8 cell;
+
+            if (desk_graphics_item_cell(graphics, visible_cast(state),
+                                        sprite, &cell))
+                ki_td_soft_rgba_resized(renderer, view, x + 2.0f,
+                                        HOTBAR_TOP + 2.0f, &cell, 20, 20,
+                                        1.0f);
+            if (item->quantity > 1u) {
+                char count[8];
+
+                (void)snprintf(count, sizeof count, "x%u",
+                               (unsigned)item->quantity);
+                small_text(canvas, view, x + 9.0f, HOTBAR_TOP + 14.0f,
+                           count, COLOR_INK);
+            }
+        }
+    }
 }
 
 static void draw_toast(ki_td_soft_renderer *renderer, const ki_td_view *view,
@@ -1302,11 +1440,12 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
         if (room) {
             draw_room_scene(renderer, &view, canvas, state, graphics,
                             room, state->room);
-            draw_actors(renderer, &view, state, graphics, room,
-                        state->room);
+            draw_world_entities(renderer, &view, state, graphics, room,
+                                state->room);
             draw_npc_tags(renderer, &view, canvas, state, room);
         }
     }
+    draw_hotbar(renderer, &view, canvas, state, graphics);
     draw_interact_prompt(renderer, &view, canvas, state, world);
     draw_toast(renderer, &view, canvas, state);
     if (state->mode == DESK_MODE_DIALOGUE)

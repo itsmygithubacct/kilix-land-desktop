@@ -26,7 +26,7 @@
 
 #define DESK_CAST_COUNT 4
 #define DESK_ACTOR_COUNT 4
-#define DESK_GRAPHICS_COUNT 9
+#define DESK_GRAPHICS_COUNT 10
 #define DESK_AUDIO_EVENT_COUNT 3
 #define DESK_AUDIO_SOURCE_CUE_COUNT 12
 #define DESK_HERO_MOTION_VARIANT_COUNT 5
@@ -109,7 +109,11 @@ typedef enum desk_graphic {
     DESK_GRAPHIC_FANTASY_CHARACTERS = 5,
     DESK_GRAPHIC_FANTASY_PORTRAITS = 6,
     DESK_GRAPHIC_PLEB_CHARACTERS = 7,
-    DESK_GRAPHIC_PLEB_PORTRAITS = 8
+    DESK_GRAPHIC_PLEB_PORTRAITS = 8,
+    /* Project-owned item art: one row per house style, one column per
+     * catalog sprite, column 0 = missing-item icon. Owned by
+     * tools/sync_item_art.py + validate_items.py, not cast parity. */
+    DESK_GRAPHIC_ITEMS = 9
 } desk_graphic;
 
 typedef enum desk_hero_motion_variant {
@@ -342,6 +346,8 @@ typedef struct desk_graphics {
                                  [DESK_HERO_MOTION_VARIANT_COUNT];
     desk_sprite_metrics hero_motion_metrics[DESK_CAST_COUNT - 1]
                                            [DESK_HERO_MOTION_VARIANT_COUNT];
+    desk_sprite_metrics item_metrics[DESK_CAST_COUNT]
+                                    [DESK_ITEM_SPRITE_COLUMNS];
     bool cache_ready;
 } desk_graphics;
 
@@ -454,6 +460,14 @@ bool desk_graphics_hero_motion_metrics(const desk_graphics *graphics,
 bool desk_graphics_legend_opposite_step_metrics(
     const desk_graphics *graphics, desk_facing facing,
     desk_sprite_metrics *metrics);
+/* One item-art path: the same style-row cell feeds hotbar icons, world
+ * draws, held art, ghosts, and receiver bubbles. */
+bool desk_graphics_item_cell(const desk_graphics *graphics,
+                             desk_cast style, int column,
+                             ki_td_rgba8 *image);
+bool desk_graphics_item_cell_metrics(const desk_graphics *graphics,
+                                     desk_cast style, int column,
+                                     desk_sprite_metrics *metrics);
 uint32_t desk_outfit_color(desk_cast cast, int outfit);
 const char *desk_outfit_name(desk_cast cast, int outfit);
 

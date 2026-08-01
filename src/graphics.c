@@ -52,7 +52,8 @@ static const graphic_spec GRAPHIC_SPECS[DESK_GRAPHICS_COUNT] = {
     {"fantasy-characters", 384u, 1632u, 24u, 68u},
     {"fantasy-portraits", 1080u, 160u, 27u, 4u},
     {"pleb-bound-characters", 1776u, 888u, 8u, 4u},
-    {"pleb-bound-portraits", 1776u, 888u, 4u, 2u}
+    {"pleb-bound-portraits", 1776u, 888u, 4u, 2u},
+    {"desktop-items", 256u, 128u, 8u, 4u}
 };
 
 static const char *const OUTFIT_NAMES[DESK_OUTFIT_COUNT] = {
@@ -803,6 +804,22 @@ bool desk_graphics_init(desk_graphics *graphics, const char *asset_root)
             return false;
         }
     }
+    /* Item cells are immutable after load; measure them once here so
+     * world and hotbar drawing reads cached anchors only. */
+    {
+        int style;
+        int column;
+
+        for (style = 0; style < DESK_CAST_COUNT; ++style)
+            for (column = 0; column < DESK_ITEM_SPRITE_COLUMNS; ++column) {
+                ki_td_rgba8 cell;
+
+                if (desk_graphics_cell(graphics, DESK_GRAPHIC_ITEMS,
+                                       column, style, &cell))
+                    (void)measure_sprite(
+                        &cell, &graphics->item_metrics[style][column]);
+            }
+    }
     graphics->legend_opposite_step_pixels =
         malloc((size_t)DESK_LEGEND_CELL * DESK_LEGEND_CELL * 4u * 4u);
     graphics->hero_motion_pixels =
@@ -1249,6 +1266,32 @@ bool desk_graphics_legend_opposite_step_metrics(
         (int)facing > (int)DESK_FACING_UP)
         return false;
     *metrics = graphics->legend_opposite_step_metrics[facing];
+    return metrics->valid;
+}
+
+bool desk_graphics_item_cell(const desk_graphics *graphics,
+                             desk_cast style, int column,
+                             ki_td_rgba8 *image)
+{
+    if (image) *image = (ki_td_rgba8){0};
+    if (!graphics || !image || (int)style < 0 ||
+        (int)style >= DESK_CAST_COUNT || column < 0 ||
+        column >= DESK_ITEM_SPRITE_COLUMNS)
+        return false;
+    return desk_graphics_cell(graphics, DESK_GRAPHIC_ITEMS, column,
+                              (int)style, image);
+}
+
+bool desk_graphics_item_cell_metrics(const desk_graphics *graphics,
+                                     desk_cast style, int column,
+                                     desk_sprite_metrics *metrics)
+{
+    if (metrics) (void)memset(metrics, 0, sizeof *metrics);
+    if (!graphics || !metrics || (int)style < 0 ||
+        (int)style >= DESK_CAST_COUNT || column < 0 ||
+        column >= DESK_ITEM_SPRITE_COLUMNS)
+        return false;
+    *metrics = graphics->item_metrics[style][column];
     return metrics->valid;
 }
 

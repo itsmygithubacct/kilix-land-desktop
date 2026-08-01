@@ -59,6 +59,9 @@ parity-sync:
 parity-check:
 	$(PYTHON) $(PARITY_TOOL) --games-root "$(abspath $(GAMES_ROOT))"
 
+items-art:
+	$(PYTHON) tools/sync_item_art.py
+
 audio-plan:
 	$(PYTHON) tools/validate_audio.py --plan
 
@@ -92,6 +95,7 @@ test: parity-check $(BIN)
 	./$(BIN) --room-render-test build/room-preview
 	./$(BIN) --outfit-render-test build/outfit-preview
 	./$(BIN) --walk-render-test build/walk-preview
+	./$(BIN) --items-render-test build/items-preview
 
 test-deps:
 	$(MAKE) -C $(KILIX_GAME_KIT_ROOT) test
@@ -107,7 +111,7 @@ sanitize:
 clean:
 	$(RM) -r build $(BIN)
 
-.PHONY: all audio audio-plan audio-record audio-requests clean parity-check \
-	parity-sync test test-deps sanitize
+.PHONY: all audio audio-plan audio-record audio-requests clean items-art \
+	parity-check parity-sync test test-deps sanitize
 
 -include $(DEPENDENCIES)
