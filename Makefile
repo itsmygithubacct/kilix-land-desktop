@@ -56,7 +56,16 @@ build:
 parity-sync:
 	$(PYTHON) $(PARITY_TOOL) --games-root "$(abspath $(GAMES_ROOT))" --write
 
+# Verifies every source game you actually have. The source games are separate
+# repositories, so a checkout without them beside it (any clone that is not a
+# maintainer's) skips the games it cannot see and checks the rest. Each game's
+# parity switches back on by itself once that game is checked out here.
 parity-check:
+	$(PYTHON) $(PARITY_TOOL) --games-root "$(abspath $(GAMES_ROOT))" \
+		--skip-absent
+
+# Fails if any source game is missing: use when parity must be fully proven.
+parity-check-strict:
 	$(PYTHON) $(PARITY_TOOL) --games-root "$(abspath $(GAMES_ROOT))"
 
 items-art:
@@ -115,6 +124,7 @@ clean:
 	$(RM) -r build $(BIN)
 
 .PHONY: all actions-art audio audio-plan audio-record audio-requests clean \
+	parity-check-strict \
 	items-art parity-check parity-sync test test-deps sanitize
 
 -include $(DEPENDENCIES)

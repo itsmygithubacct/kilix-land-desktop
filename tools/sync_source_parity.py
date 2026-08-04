@@ -260,23 +260,69 @@ def audio_mappings(games_root: Path) -> list[tuple[Path, Path]]:
     )
 
 
-def synchronize(games_root: Path, write: bool) -> list[str]:
+SOURCE_GAMES = (
+    "legend-of-kilix",
+    "chumrunner",
+    "kilix-fantasy",
+    "pleb-bound",
+)
+
+
+def absent_games(games_root: Path) -> list[str]:
+    """Source games that are not checked out beside this repository.
+
+    Parity reads each game's *committed* history, so a directory only counts as
+    present when it is a git repository.
+    """
+    return [
+        game for game in SOURCE_GAMES
+        if not (games_root / game / ".git").exists()
+    ]
+
+
+def under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def synchronize(
+    games_root: Path, write: bool, skip_absent: bool = False
+) -> tuple[list[str], list[str]]:
     errors: list[str] = []
+    absent = absent_games(games_root) if skip_absent else []
+    skipped = [f"{game}: not checked out at {games_root / game}"
+               for game in absent]
+
+    def present(source: Path) -> bool:
+        return not any(under(source, games_root / game) for game in absent)
+
     header_path = ROOT / "src/source_parity.h"
-    expected_header = generated_header(games_root)
-    if write:
-        header_path.parent.mkdir(parents=True, exist_ok=True)
-        header_path.write_text(expected_header, encoding="utf-8")
-    elif not header_path.exists() or header_path.read_text(
-        encoding="utf-8"
-    ) != expected_header:
-        errors.append("src/source_parity.h is stale")
+    if absent:
+        # The generated contract embeds a commit from every source game, so it
+        # cannot be recomputed while any of them is missing.
+        skipped.append(
+            "src/source_parity.h: needs all four source games to recompute"
+        )
+    else:
+        expected_header = generated_header(games_root)
+        if write:
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_text(expected_header, encoding="utf-8")
+        elif not header_path.exists() or header_path.read_text(
+            encoding="utf-8"
+        ) != expected_header:
+            errors.append("src/source_parity.h is stale")
 
     manifest_path = ROOT / "assets/graphics/manifest.json"
     manifest = load_json(manifest_path)
     entries = {item["id"]: item for item in manifest["atlases"]}
     manifest_changed = False
     for asset_id, source, destination in asset_mappings(games_root):
+        if not present(source):
+            continue
         try:
             source_data = committed_bytes(source)
         except ValueError as error:
@@ -308,6 +354,8 @@ def synchronize(games_root: Path, write: bool) -> list[str]:
             else:
                 errors.append(f"manifest grid is stale for {asset_id}")
     for source, destination in audio_mappings(games_root):
+        if not present(source):
+            continue
         try:
             source_data = committed_bytes(source)
         except ValueError as error:
@@ -323,7 +371,7 @@ def synchronize(games_root: Path, write: bool) -> list[str]:
         manifest_path.write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
         )
-    return errors
+    return errors, skipped
 
 
 def main() -> int:
@@ -339,13 +387,42 @@ def main() -> int:
         action="store_true",
         help="rewrite the generated contract and copied source assets",
     )
+    parser.add_argument(
+        "--skip-absent",
+        action="store_true",
+        help=(
+            "skip parity for source games that are not checked out instead of "
+            "failing; each game's checks switch back on by itself once that "
+            "game is available"
+        ),
+    )
     args = parser.parse_args()
     games_root = args.games_root.resolve()
+    if args.write and args.skip_absent:
+        print(
+            "source parity error: --write cannot be combined with "
+            "--skip-absent; syncing requires every source game",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.skip_absent:
+        absent = absent_games(games_root)
+        if absent:
+            print(
+                "source parity error: source games not checked out under "
+                f"{games_root}: {', '.join(absent)}\n"
+                "  pass --skip-absent (or use `make parity-check`) to verify "
+                "only the games you have",
+                file=sys.stderr,
+            )
+            return 1
     try:
-        errors = synchronize(games_root, args.write)
+        errors, skipped = synchronize(games_root, args.write, args.skip_absent)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"source parity error: {error}", file=sys.stderr)
         return 1
+    for note in skipped:
+        print(f"SKIP source parity {note}")
     if errors:
         for error in errors:
             print(f"source parity error: {error}", file=sys.stderr)
@@ -355,7 +432,16 @@ def main() -> int:
         )
         return 1
     mode = "synchronized" if args.write else "verified"
-    print(f"PASS source parity {mode}: games={games_root}")
+    if skipped:
+        checked = [g for g in SOURCE_GAMES if g not in absent_games(games_root)]
+        print(
+            f"PASS source parity {mode} for "
+            f"{len(checked)}/{len(SOURCE_GAMES)} source games "
+            f"({', '.join(checked) if checked else 'none'}): "
+            f"games={games_root}"
+        )
+    else:
+        print(f"PASS source parity {mode}: games={games_root}")
     return 0
 
 
