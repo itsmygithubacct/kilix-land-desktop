@@ -2,6 +2,13 @@ MIT License
 
 Copyright (c) 2026 itsmygithubacct
 
+Scope: this license covers the source code, build files, and documentation of
+Kilix Land Desktop. It does NOT cover the contents of the `assets/` directory
+(art, audio, and the world data describing them), which are licensed
+separately under Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+International. See `assets/LICENSE`. Where this file says "the Software",
+read it as excluding `assets/`.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

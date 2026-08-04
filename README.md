@@ -84,3 +84,24 @@ with `KILIX_LAND_DESKTOP_AUTO_INSTALL`, `KILIX_LAND_DESKTOP_DIR`,
 
 Review CLI: `./kilix-land-desktop --screenshot out.ppm --room study
 --style chumrunner` renders any room in any style headlessly.
+
+## Licensing
+
+Code and assets are licensed separately.
+
+- **Source code, build files, and documentation** — MIT. See `LICENSE`.
+- **Everything under `assets/`** — Creative Commons
+  Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0).
+  See `assets/LICENSE`. Share and adapt with attribution, non-commercially,
+  under the same license.
+
+The cast atlases and audio cues are copies of art committed by the four source
+games; the room plates are original art for this project, produced with an
+image-generation pipeline whose prompts are recorded verbatim in
+`assets/graphics/rooms/PROMPTS.md`. `assets/LICENSE` documents the provenance
+of each group.
+
+The source games are separate repositories. `make test` verifies asset parity
+against whichever of them are checked out beside this one and skips the rest,
+so a clone without them still builds and tests cleanly; `make
+parity-check-strict` fails unless all four are present.

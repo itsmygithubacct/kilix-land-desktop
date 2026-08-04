@@ -1,0 +1,48 @@
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+(CC BY-NC-SA 4.0)
+
+Copyright (c) 2026 itsmygithubacct
+
+Everything in this `assets/` directory — the cast atlases, room plates, item
+art, audio cues, and the world data that describes them — is licensed under
+CC BY-NC-SA 4.0. The source code of Kilix Land Desktop is licensed separately
+under the MIT License; see the `LICENSE` file at the repository root.
+
+The authoritative text of this license is published by Creative Commons at:
+
+  https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+  (summary: https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+That text governs. The summary below is for orientation only and is not a
+substitute for it.
+
+You are free to share and adapt this material, provided that:
+
+  Attribution   — you give appropriate credit, link to the license, and
+                  indicate if changes were made.
+  NonCommercial — you do not use the material for commercial purposes.
+  ShareAlike    — if you remix or build upon the material, you distribute your
+                  contributions under this same license.
+
+No warranties are given. The license may not give you all of the permissions
+necessary for your intended use.
+
+## Provenance
+
+Not all of these assets originate in this repository, and none of them are
+third-party works.
+
+- `graphics/casts/`, `audio/<cast>/` — byte-identical copies of art and audio
+  committed by the four source games (Legend of Kilix, Chumrunner, Kilix
+  Fantasy, Pleb Bound), maintained by `tools/sync_source_parity.py`. Those
+  games are separate projects by the same author; the copies here are covered
+  by this license, which does not enlarge any rights in the source games
+  themselves.
+- `graphics/items/` — composed per style from each source game's own art by
+  `tools/sync_item_art.py`.
+- `graphics/rooms/` — original room plates for this project, produced with an
+  image-generation pipeline (`gemini-3-pro-image`, cooked to 1280x720 by
+  `tools/prepare_plate.py`). The prompts that produced them are recorded
+  verbatim in `graphics/rooms/PROMPTS.md`, and their hashes in
+  `graphics/manifest.json`.
+- `world/` — hand-authored world, item, and occlusion data for this project.
