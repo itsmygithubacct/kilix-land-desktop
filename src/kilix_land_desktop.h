@@ -171,9 +171,13 @@ typedef enum desk_target {
     /* external, debug menu only (never placed in world.json) */
     DESK_TARGET_WALK_EDITOR = 16,
     /* internal (handled by desk.c) */
-    DESK_TARGET_KETTLE = 17
+    DESK_TARGET_KETTLE = 17,
+    /* external (serviced by launcher.c). Appended rather than filed with the
+     * other external targets because these values are compiled into saved
+     * state; renumbering them would repoint existing worlds. */
+    DESK_TARGET_BROWSER = 18
 } desk_target;
-#define DESK_TARGET_COUNT 18
+#define DESK_TARGET_COUNT 19
 
 typedef struct desk_rect {
     float x;

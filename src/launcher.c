@@ -43,7 +43,8 @@ static const target_entry target_table[DESK_TARGET_COUNT] = {
     [DESK_TARGET_STATUS_BOARD] = { "status-board", "Status board" },
     [DESK_TARGET_GATE_LOCKED] = { "gate-locked", "Locked gate" },
     [DESK_TARGET_WALK_EDITOR] = { "walk-editor", "Walk editor" },
-    [DESK_TARGET_KETTLE] = { "kettle", "Kettle" }
+    [DESK_TARGET_KETTLE] = { "kettle", "Kettle" },
+    [DESK_TARGET_BROWSER] = { "browser", "Text browser" }
 };
 
 desk_target desk_target_from_string(const char *name)
@@ -73,7 +74,8 @@ bool desk_target_is_external(desk_target target)
 {
     return (target >= DESK_TARGET_TERMINAL &&
             target <= DESK_TARGET_MAINTENANCE) ||
-           target == DESK_TARGET_WALK_EDITOR;
+           target == DESK_TARGET_WALK_EDITOR ||
+           target == DESK_TARGET_BROWSER;
 }
 
 void desk_launcher_init(desk_launcher *launcher)
@@ -557,6 +559,13 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
     case DESK_TARGET_MUSIC:
         command_count = tool_or_kilix("kilix-amp", "amp",
                                       resolved, sizeof resolved, command);
+        break;
+    case DESK_TARGET_BROWSER:
+        /* No tool_or_kilix pair here: the browser has no installed command to
+         * prefer. `kilix chawan` owns the pinned checkout and its first-run
+         * build, and its binary lives inside that private prefix. */
+        command_count = kilix_command(resolved, sizeof resolved, "chawan",
+                                      command);
         break;
     case DESK_TARGET_VOICE:
         command_count = tool_or_kilix("kilix-tts", "tts",
