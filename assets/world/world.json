@@ -465,6 +465,17 @@
       ],
       "objects": [
         {
+          "id": "monitor",
+          "prompt": "Read the screen",
+          "rect": {
+            "x": 326,
+            "y": 122,
+            "w": 34,
+            "h": 20
+          },
+          "target": "browser"
+        },
+        {
           "id": "computer",
           "prompt": "Use the computer",
           "rect": {
