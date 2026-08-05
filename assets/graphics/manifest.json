@@ -131,7 +131,7 @@
     {
       "id": "desktop-items",
       "path": "assets/graphics/items/desktop-items.png",
-      "sha256": "8b46f830a712a04d082c7f5145b32d0d0a1d6635033c4c05d3bcfabeb29ac209",
+      "sha256": "632dd58fd8215b061d0f70ce280a65752fda4f05364d772b6b20bbc024a75c94",
       "alpha_required": true,
       "grid": {
         "columns": 8,
