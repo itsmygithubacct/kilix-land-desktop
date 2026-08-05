@@ -1,0 +1,37 @@
+{
+  "sheet": "laptop-lid.png",
+  "sha256": "cec8ccea494d70483e1b0f9b88dc00eeabcc891eb53a1778de005cb0ba895022",
+  "cell": 32,
+  "rows": [
+    "legend",
+    "chumrunner",
+    "fantasy",
+    "pleb-bound"
+  ],
+  "cells": [
+    {
+      "row": 0,
+      "style": "legend",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style CLOSED laptop lid; chroma-keyed and fitted offline by tools/laptop_lid_art.py"
+    },
+    {
+      "row": 1,
+      "style": "chumrunner",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style CLOSED laptop lid; chroma-keyed and fitted offline by tools/laptop_lid_art.py"
+    },
+    {
+      "row": 2,
+      "style": "fantasy",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style CLOSED laptop lid; chroma-keyed and fitted offline by tools/laptop_lid_art.py"
+    },
+    {
+      "row": 3,
+      "style": "pleb-bound",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style CLOSED laptop lid; chroma-keyed and fitted offline by tools/laptop_lid_art.py"
+    }
+  ]
+}
