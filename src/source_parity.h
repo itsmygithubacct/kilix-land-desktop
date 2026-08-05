@@ -3,12 +3,12 @@
  * from their working trees, so an in-flight art or balance pass in another
  * repository cannot reach Kilix Land Desktop until that repository commits
  * it.
- * Source content digest: 1cde341d65df2c2d460201c75a37939e83aeb7c33e5889d8eae3a7e47fc24e0c
+ * Source content digest: fede41b971aab847df3d29f4177d5a1b5db596beb93f1f77f64d1ac89b2451b6
  */
 #ifndef KILIX_LAND_DESKTOP_SOURCE_PARITY_H
 #define KILIX_LAND_DESKTOP_SOURCE_PARITY_H
 
-#define DESK_PARITY_LEGEND_SOURCE_COMMIT "14d242a5d15f"
+#define DESK_PARITY_LEGEND_SOURCE_COMMIT "7e6c0643dc6a"
 #define DESK_PARITY_CHUM_SOURCE_COMMIT "192f4313b243"
 #define DESK_PARITY_FANTASY_SOURCE_COMMIT "824f1267f22b"
 #define DESK_PARITY_PLEB_SOURCE_COMMIT "25d070210619"
