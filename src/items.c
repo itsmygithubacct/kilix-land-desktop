@@ -36,6 +36,7 @@ static const char *const ITEM_TAG_NAMES[] = {
     "light",
     "discardable",
     "receiver-input",
+    "terminal",
 };
 #define ITEM_TAG_COUNT \
     ((int)(sizeof ITEM_TAG_NAMES / sizeof ITEM_TAG_NAMES[0]))

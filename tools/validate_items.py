@@ -32,7 +32,7 @@ FAMILIES = ("portable", "consumable", "tool", "wearable", "placeable",
 BEHAVIORS = ("hold", "drink", "use-tool", "equip", "place", "unlock")
 TAGS = ("drink", "food", "media", "tool", "wearable", "placeable", "decor",
         "key", "giftable", "quest", "light", "discardable",
-        "receiver-input")
+        "receiver-input", "terminal")
 TASTE_CASTS = ("legend", "chumrunner", "fantasy", "pleb-bound")
 
 ITEM_KEYS = {"id", "name", "description", "family", "behavior", "sprite",

@@ -87,6 +87,13 @@
       "commit": "42237c2863e1"
     },
     {
+      "row": 0,
+      "column": 7,
+      "style": "legend",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style laptop item; chroma-keyed and fitted offline by tools/laptop_item_art.py"
+    },
+    {
       "row": 1,
       "column": 0,
       "style": "chumrunner",
@@ -163,6 +170,13 @@
         6
       ],
       "commit": "6c11213dc968"
+    },
+    {
+      "row": 1,
+      "column": 7,
+      "style": "chumrunner",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style laptop item; chroma-keyed and fitted offline by tools/laptop_item_art.py"
     },
     {
       "row": 2,
@@ -243,6 +257,13 @@
       "commit": "824f1267f22b"
     },
     {
+      "row": 2,
+      "column": 7,
+      "style": "fantasy",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style laptop item; chroma-keyed and fitted offline by tools/laptop_item_art.py"
+    },
+    {
       "row": 3,
       "column": 0,
       "style": "pleb-bound",
@@ -319,6 +340,13 @@
         2
       ],
       "commit": "25d070210619"
+    },
+    {
+      "row": 3,
+      "column": 7,
+      "style": "pleb-bound",
+      "source": "Gemini image generation (gemini-3-pro-image)",
+      "notes": "original per-style laptop item; chroma-keyed and fitted offline by tools/laptop_item_art.py"
     }
   ]
 }

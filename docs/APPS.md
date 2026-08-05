@@ -74,6 +74,62 @@ open in the file-manager candidate table at that path. Deleting the line
 
 Dialogue with housemate NPCs is proximity + interact, also fully in-process.
 
+## The laptop
+
+The study spawns a **laptop** (`core:tool/laptop`) — the one item whose
+Enter does not pocket it. A set-up laptop opens a session menu instead;
+picking it up is the menu's explicit **PICK UP LAPTOP** row. Carried, it is
+an ordinary placeable: **Space** sets it up again wherever you stand — any
+desk or clear surface in any room — and the placement persists in
+`world.state` like every other world item.
+
+The menu lists **laptop profiles**, one convention shared by every kilix
+desktop that ships a laptop (kilix-cap's Study laptop reads the same
+directory):
+
+```
+~/.local/gpu_terminal/laptop/<id>.profile
+```
+
+(`KILIX_LAPTOP_PROFILES` overrides the directory with an absolute path —
+tests use this.) A profile is a plain `KEY=value` file; `#` comments. The
+first time the directory has to be created it is seeded with the bundled
+examples from `assets/laptop/`; an existing directory is never reseeded.
+The menu shows the first 8 profiles, re-scanned every time it opens.
+
+| Key            | Meaning |
+|---|---|
+| `name=`        | display name (defaults to the file stem) |
+| `desktop=`     | open a provider instead of a session: `desktop`, `95`, `xp`, `cap`, `tui`, `land` |
+| `layout=`      | `splits` (panes tile one tab, default) or `tabs` |
+| `pane.N.title=`| pane/tab title (N = 1..8, contiguous) |
+| `pane.N.cwd=`  | working directory; `~/…` allowed. With `ssh=`, the remote directory |
+| `pane.N.ssh=`  | remote destination, `[user@]host` only |
+| `pane.N.cmd=`  | command to run (default: your shell). With `ssh=`, runs remotely |
+
+A profile is either `desktop=` **or** panes, never both. Values cannot
+contain double quotes or control characters — they feed a kitty session
+file — and `ssh=` accepts only `[user@]host` characters, so a destination
+can never smuggle options or a command. Example:
+
+```
+name=Remote Ops
+layout=tabs
+pane.1.cwd=~
+pane.2.ssh=admin@example-host
+pane.2.cwd=/var/log
+pane.2.cmd=tail -f syslog
+```
+
+Choosing a **pane profile** writes a generated kitty `--session` file
+under the config home and runs `kilix --detach --session <file>` — the
+laptop gets its own kilix window. Choosing a **desktop profile** runs
+`kilix <provider>` (`95` maps to `kilix desktop 95`). Both are fixed argv
+vectors through `posix_spawnp` under the same session gate, kill switch,
+and toast reporting as every row above. `./kilix-land-desktop
+--laptop-test` covers profile parsing, the menu state machine, pickup and
+set-up, and world.state persistence.
+
 ## Debug menu
 
 The pause menu (Esc) grows a **DEBUG** entry whose submenu holds the

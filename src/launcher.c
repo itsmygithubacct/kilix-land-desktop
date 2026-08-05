@@ -1,5 +1,6 @@
 #include "kilix_land_desktop.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -374,6 +375,166 @@ static void track_pending_child(pid_t pid)
     pending_children[0] = pid;
 }
 
+static bool tab_session_ready(void);
+
+/* A direct detached spawn for the laptop: the command is a fixed argv
+ * (never a shell string) with stdio on /dev/null. `kilix --detach
+ * --session` opens the profile's own kilix window; `kilix <provider>`
+ * relies on the session environment this desktop already runs in to place
+ * the provider tab. The bounded wait mirrors spawn_tab so an immediate
+ * failure surfaces as one instead of a false "Opened" toast. */
+static bool spawn_detached(const char *const *command, size_t command_count)
+{
+    char *argv[LAUNCH_COMMAND_MAX + 1];
+    size_t index;
+    posix_spawn_file_actions_t actions;
+    pid_t pid = -1;
+    int result;
+
+    if (command_count == 0u || command_count > LAUNCH_COMMAND_MAX)
+        return false;
+    for (index = 0u; index < command_count; ++index)
+        argv[index] = (char *)command[index];
+    argv[command_count] = NULL;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
+                                         "/dev/null", O_RDONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+    result = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+    (void)posix_spawn_file_actions_destroy(&actions);
+    if (result != 0) return false;
+    for (index = 0u; index < 20u; ++index) {
+        int status = 0;
+        pid_t reaped = waitpid(pid, &status, WNOHANG);
+        if (reaped == pid)
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (reaped < 0) return true;
+        {
+            struct timespec delay = { 0, 10L * 1000L * 1000L };
+            (void)nanosleep(&delay, NULL);
+        }
+    }
+    track_pending_child(pid);
+    return true;
+}
+
+/* The config home the state stores use, created 0700 on demand so the
+ * generated session file has a private place to live. */
+static bool laptop_session_home(char *path, size_t size)
+{
+    const char *override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    int written;
+    if (override_dir && override_dir[0] == '/')
+        written = snprintf(path, size, "%s", override_dir);
+    else if (home && home[0] == '/')
+        written = snprintf(path, size,
+                           "%s/.local/gpu_terminal/kilix-land-desktop",
+                           home);
+    else
+        return false;
+    if (written < 0 || (size_t)written >= size) return false;
+    {
+        /* Create each missing level 0700; existing directories are left
+         * exactly as found. */
+        char partial[LAUNCH_PATH_CAPACITY];
+        size_t offset = 1u;
+        size_t length = strlen(path);
+        if (length >= sizeof partial) return false;
+        while (offset <= length) {
+            if (path[offset] == '/' || path[offset] == '\0') {
+                (void)memcpy(partial, path, offset);
+                partial[offset] = '\0';
+                if (mkdir(partial, 0700) != 0 && errno != EEXIST)
+                    return false;
+            }
+            ++offset;
+        }
+    }
+    return true;
+}
+
+/* One chosen laptop profile: a desktop profile becomes `kilix
+ * <provider>`; a pane profile becomes a generated kitty --session file
+ * opened with `kilix --detach --session`. */
+static void service_laptop(desk_launcher *launcher, desk_state *state,
+                           const char *profile_id)
+{
+    char kilix_path[LAUNCH_PATH_CAPACITY];
+    char message[DESK_TOAST_CAPACITY];
+    char error[DESK_LAPTOP_ERROR_CAPACITY];
+    desk_laptop_profile profile;
+    const char *command[LAUNCH_COMMAND_MAX];
+    const char *desktop_arguments[2] = { NULL, NULL };
+    size_t command_count = 0u;
+    size_t desktop_argument_count;
+    const char *kilix;
+
+    if (!launcher->external_enabled) {
+        set_status(launcher, state, "External apps are disabled.");
+        return;
+    }
+    if (!tab_session_ready()) {
+        set_status(launcher, state,
+                   "Kilix session not detected - launch inside kilix");
+        return;
+    }
+    if (!desk_laptop_load(profile_id, &profile, error, sizeof error)) {
+        set_status(launcher, state, error);
+        return;
+    }
+    kilix = resolve_kilix(kilix_path, sizeof kilix_path);
+    if (!kilix) {
+        set_status(launcher, state, "Kilix is required for the laptop");
+        return;
+    }
+    command[command_count++] = kilix;
+    desktop_argument_count =
+        desk_laptop_desktop_arguments(&profile, desktop_arguments);
+    if (desktop_argument_count > 0u) {
+        size_t index;
+        for (index = 0u; index < desktop_argument_count; ++index)
+            command[command_count++] = desktop_arguments[index];
+    } else {
+        static char session_path[LAUNCH_PATH_CAPACITY];
+        char session_home[LAUNCH_PATH_CAPACITY];
+        int written;
+        if (!laptop_session_home(session_home, sizeof session_home)) {
+            set_status(launcher, state,
+                       "The laptop session file has no home");
+            return;
+        }
+        written = snprintf(session_path, sizeof session_path,
+                           "%s/laptop-%s.session", session_home,
+                           profile.id);
+        if (written < 0 || (size_t)written >= sizeof session_path) {
+            set_status(launcher, state,
+                       "The laptop session path is too long");
+            return;
+        }
+        if (!desk_laptop_write_session(&profile, session_path, error,
+                                       sizeof error)) {
+            set_status(launcher, state, error);
+            return;
+        }
+        command[command_count++] = "--detach";
+        command[command_count++] = "--session";
+        command[command_count++] = session_path;
+    }
+    if (spawn_detached(command, command_count))
+        (void)snprintf(message, sizeof message, "Opened %s", profile.name);
+    else
+        (void)snprintf(message, sizeof message, "Could not open %s",
+                       profile.name);
+    set_status(launcher, state, message);
+}
+
 /* Checked on every activation, never cached. */
 static bool tab_session_ready(void)
 {
@@ -465,6 +626,13 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
 
     if (!launcher || !state) return false;
     reap_pending_children();
+    {
+        char laptop_id[DESK_LAPTOP_ID_CAPACITY];
+        if (desk_take_laptop_request(state, laptop_id)) {
+            service_laptop(launcher, state, laptop_id);
+            return true;
+        }
+    }
     (void)snprintf(object_id, sizeof object_id, "%s",
                    state->pending_launch_object);
     target = desk_take_launch_request(state);

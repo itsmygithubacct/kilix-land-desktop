@@ -1245,6 +1245,64 @@ static void draw_pause(ki_td_soft_renderer *renderer, const ki_td_view *view,
                 COLOR_MUTED, 1);
 }
 
+/* The set-up laptop's session menu: the pause panel's dress, sized to the
+ * scanned profile rows plus the two fixed rows. */
+static void draw_laptop_menu(ki_td_soft_renderer *renderer,
+                             const ki_td_view *view, sr_canvas *canvas,
+                             const desk_state *state)
+{
+    const char *items[DESK_LAPTOP_MENU_PROFILES + 2];
+    kilix_ui_style outer_style;
+    kilix_ui_style list_style;
+    kilix_ui_focus focus;
+    uint32_t accent = desk_actor_color(visible_cast(state),
+                                       DESK_ACTOR_HERO);
+    int count = desk_laptop_menu_count(state);
+    int index;
+    int panel_height;
+    int panel_y;
+    if (count < 2) count = 2;
+    if (count > DESK_LAPTOP_MENU_PROFILES + 2)
+        count = DESK_LAPTOP_MENU_PROFILES + 2;
+    for (index = 0; index < count; ++index)
+        items[index] = desk_laptop_menu_item(state, index);
+    panel_height = 48 + count * 20;
+    panel_y = (DESK_LOGICAL_HEIGHT - panel_height) / 2;
+    if (panel_y < 2) panel_y = 2;
+    ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
+                         (float)DESK_LOGICAL_WIDTH,
+                         (float)DESK_LOGICAL_HEIGHT,
+                         UINT32_C(0x02040a), 0.55f);
+    base_style(&outer_style, accent);
+    outer_style.border_color = COLOR_GOLD;
+    outer_style.padding = 8;
+    list_style = outer_style;
+    list_style.border_color = COLOR_PANEL_LIGHT;
+    list_style.row_height = 20;
+    list_style.padding = 5;
+    kilix_ui_focus_init(&focus, (uint32_t)count, (uint32_t)count);
+    focus.selected = clamp_cursor(state->laptop_menu_cursor,
+                                  (uint32_t)count);
+    kilix_ui_draw_panel(renderer, view,
+                        (ki_td_rect){152, panel_y, 176, panel_height},
+                        &outer_style, NULL);
+    ki_td_soft_fill_rect(renderer, view, 155.0f, (float)(panel_y + 3),
+                         170.0f, 3.0f, accent, 1.0f);
+    center_text(canvas, view, 240.0f, (float)(panel_y + 10), "LAPTOP",
+                COLOR_INK, text_scale(view));
+    kilix_ui_draw_list(renderer, view,
+                       (ki_td_rect){164, panel_y + 24, 152,
+                                    count * 20 + 10},
+                       &list_style, NULL, &focus, items, NULL,
+                       (size_t)count);
+    center_text(canvas, view, 240.0f,
+                (float)(panel_y + panel_height - 11),
+                state->laptop_menu_count == 0
+                    ? "NO PROFILES YET - SEE DOCS/APPS.MD"
+                    : "ENTER OPEN  ESC CLOSE",
+                COLOR_MUTED, 1);
+}
+
 #define INVENTORY_SLOT_SIZE 28
 #define INVENTORY_COLUMNS 6
 
@@ -1834,6 +1892,8 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
         draw_dialogue(renderer, &view, canvas, state, graphics);
     else if (state->mode == DESK_MODE_PAUSE)
         draw_pause(renderer, &view, canvas, state);
+    else if (state->mode == DESK_MODE_LAPTOP)
+        draw_laptop_menu(renderer, &view, canvas, state);
     else if (state->mode == DESK_MODE_CONFIRM)
         draw_confirm(renderer, &view, canvas, state);
     else if (state->mode == DESK_MODE_STATUS)

@@ -11,6 +11,7 @@
 
 #include "source_parity.h"
 #include "items.h"
+#include "laptop.h"
 #include "world_state.h"
 
 #define DESK_LOGICAL_WIDTH 480
@@ -95,8 +96,14 @@ typedef enum desk_mode {
     DESK_MODE_PAUSE = 3,
     DESK_MODE_CONFIRM = 4,
     DESK_MODE_STATUS = 5,
-    DESK_MODE_INVENTORY = 6
+    DESK_MODE_INVENTORY = 6,
+    DESK_MODE_LAPTOP = 7
 } desk_mode;
+
+/* The laptop menu lists at most this many profiles plus its two fixed
+ * rows (PICK UP LAPTOP, CLOSE), so the tallest menu still fits the
+ * 480x270 logical canvas. */
+#define DESK_LAPTOP_MENU_PROFILES 8
 
 typedef enum desk_wizard_step {
     DESK_WIZARD_CAST = 0,
@@ -352,6 +359,15 @@ typedef struct desk_state {
     int pause_cursor;
     int inventory_cursor;
     int inventory_mark; /* -1 = none */
+    /* The set-up laptop's session menu (DESK_MODE_LAPTOP): profile ids
+     * scanned when the menu opened, plus PICK UP LAPTOP and CLOSE rows. */
+    int laptop_menu_count; /* profiles listed, 0..DESK_LAPTOP_MENU_PROFILES */
+    int laptop_menu_cursor;
+    int laptop_menu_item; /* world-item index the open menu belongs to */
+    char laptop_menu_ids[DESK_LAPTOP_MENU_PROFILES]
+                        [DESK_LAPTOP_ID_CAPACITY];
+    bool laptop_pending; /* take-and-clear, like pending_launch */
+    char pending_laptop[DESK_LAPTOP_ID_CAPACITY];
     bool debug_menu;  /* desktop.conf debug_menu flag, read at pause open */
     bool pause_debug; /* inside the Debug submenu */
     char status_lines[DESK_STATUS_LINE_COUNT][DESK_STATUS_LINE_CAPACITY];
@@ -476,6 +492,10 @@ bool desk_placement_preview(const desk_state *state,
 bool desk_text_input(desk_state *state, uint32_t codepoint);
 bool desk_text_backspace(desk_state *state);
 desk_target desk_take_launch_request(desk_state *state);
+/* The set-up laptop's session request: true copies the chosen profile id
+ * and clears the request, exactly one take per choice. */
+bool desk_take_laptop_request(desk_state *state,
+                              char id[DESK_LAPTOP_ID_CAPACITY]);
 int desk_take_audio_events(desk_state *state,
                            desk_audio_event events[4]);
 bool desk_validate(const desk_state *state, const desk_world *world,
@@ -499,6 +519,8 @@ bool desk_interact_anchor(const desk_state *state, const desk_world *world,
 int desk_interact_npc(const desk_state *state, const desk_world *world);
 int desk_pause_item_count(const desk_state *state);
 const char *desk_pause_item(const desk_state *state, int index);
+int desk_laptop_menu_count(const desk_state *state);
+const char *desk_laptop_menu_item(const desk_state *state, int index);
 
 bool desk_profile_load(desk_profile *profile);
 bool desk_profile_save(const desk_profile *profile);

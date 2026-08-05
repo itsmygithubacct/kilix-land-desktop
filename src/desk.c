@@ -1543,6 +1543,11 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
         delta = move_y != 0 ? move_y : move_x;
         if (move_cursor(&state->confirm_cursor, delta, 2))
             queue_audio(state, DESK_AUDIO_UI_MOVE);
+    } else if (state->mode == DESK_MODE_LAPTOP) {
+        delta = move_y != 0 ? move_y : move_x;
+        if (move_cursor(&state->laptop_menu_cursor, delta,
+                        desk_laptop_menu_count(state)))
+            queue_audio(state, DESK_AUDIO_UI_MOVE);
     }
     state->simulation_tick += 1u;
     if (state->toast_ticks > 0) state->toast_ticks--;
@@ -2015,6 +2020,62 @@ static bool interact_collect(desk_state *state, const desk_room *room,
     return true;
 }
 
+/* True when the world item is a set-up terminal (the laptop): Enter opens
+ * its session menu instead of pocketing it; picking it back up is the
+ * menu's explicit PICK UP row. */
+static bool world_item_is_terminal(const desk_state *state, int index)
+{
+    const desk_item_def *def;
+    int tag = desk_item_tag_index("terminal");
+    if (tag < 0 || !state->catalog || index < 0 ||
+        index >= state->items.item_count)
+        return false;
+    def = desk_items_def(state->catalog,
+                         state->items.items[index].item.definition);
+    return def &&
+           (def->tags & ((desk_item_tags)1u << (unsigned int)tag)) != 0u;
+}
+
+/* The bundled example profiles live under the asset root the way every
+ * other shipped data file does; they seed the shared profile directory
+ * on its very first use only. */
+static void laptop_seed_directory(char *path, size_t size)
+{
+    const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
+    int written;
+    if (!root || root[0] == '\0') root = ".";
+    written = snprintf(path, size, "%s/assets/laptop", root);
+    if (written < 0 || (size_t)written >= size) path[0] = '\0';
+}
+
+/* Profiles are re-scanned on every open — the same freshness rule as
+ * bindings.conf — so an edited profile shows up without a restart. */
+static bool open_laptop_menu(desk_state *state)
+{
+    char seed[512];
+    desk_laptop_list list;
+    int index;
+    int count;
+
+    laptop_seed_directory(seed, sizeof seed);
+    if (desk_laptop_scan(seed[0] != '\0' ? seed : NULL, &list) < 0)
+        list.count = 0;
+    count = list.count;
+    if (count > DESK_LAPTOP_MENU_PROFILES)
+        count = DESK_LAPTOP_MENU_PROFILES;
+    state->laptop_menu_count = count;
+    for (index = 0; index < count; ++index)
+        (void)snprintf(state->laptop_menu_ids[index],
+                       sizeof state->laptop_menu_ids[index], "%s",
+                       list.ids[index]);
+    state->laptop_menu_cursor = 0;
+    state->laptop_menu_item = state->nearest_world_item;
+    state->mode = DESK_MODE_LAPTOP;
+    state->player_moving = false;
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    return true;
+}
+
 static bool interact_room(desk_state *state, const desk_world *world,
                           const desk_room *room)
 {
@@ -2022,8 +2083,11 @@ static bool interact_room(desk_state *state, const desk_world *world,
     if (!room) return false;
     /* The body is busy until the action clip completes or cancels. */
     if (state->action.active) return false;
-    if (world_item_selected(state, room))
+    if (world_item_selected(state, room)) {
+        if (world_item_is_terminal(state, state->nearest_world_item))
+            return open_laptop_menu(state);
         return interact_pickup(state);
+    }
     if (npc_selected(state, room)) {
         state->mode = DESK_MODE_DIALOGUE;
         state->conversation_npc = room->npcs[state->nearest_npc].actor;
@@ -2272,6 +2336,70 @@ static bool interact_pause(desk_state *state, const desk_world *world)
     return true;
 }
 
+int desk_laptop_menu_count(const desk_state *state)
+{
+    if (!state) return 0;
+    return state->laptop_menu_count + 2; /* + PICK UP LAPTOP + CLOSE */
+}
+
+const char *desk_laptop_menu_item(const desk_state *state, int index)
+{
+    if (!state || index < 0 || index >= desk_laptop_menu_count(state))
+        return "";
+    if (index < state->laptop_menu_count)
+        return state->laptop_menu_ids[index];
+    return index == state->laptop_menu_count ? "PICK UP LAPTOP" : "CLOSE";
+}
+
+static bool interact_laptop(desk_state *state, const desk_world *world)
+{
+    int cursor = state->laptop_menu_cursor;
+    if (cursor < 0 || cursor >= desk_laptop_menu_count(state)) {
+        state->mode = DESK_MODE_ROOM;
+        update_nearest(state, world);
+        return false;
+    }
+    if (cursor < state->laptop_menu_count) {
+        (void)snprintf(state->pending_laptop,
+                       sizeof state->pending_laptop, "%s",
+                       state->laptop_menu_ids[cursor]);
+        state->laptop_pending = true;
+        state->mode = DESK_MODE_ROOM;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        update_nearest(state, world);
+        return true;
+    }
+    if (cursor == state->laptop_menu_count) {
+        /* PICK UP LAPTOP: the ordinary pickup path, aimed back at the
+         * item this menu was opened on; the index is still valid because
+         * the menu is modal. */
+        state->mode = DESK_MODE_ROOM;
+        if (state->laptop_menu_item >= 0 &&
+            state->laptop_menu_item < state->items.item_count) {
+            state->nearest_world_item = state->laptop_menu_item;
+            (void)interact_pickup(state);
+        }
+        update_nearest(state, world);
+        return true;
+    }
+    state->mode = DESK_MODE_ROOM;
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+    update_nearest(state, world);
+    return true;
+}
+
+bool desk_take_laptop_request(desk_state *state,
+                              char id[DESK_LAPTOP_ID_CAPACITY])
+{
+    if (!state || !state->laptop_pending) return false;
+    if (id != NULL)
+        (void)snprintf(id, DESK_LAPTOP_ID_CAPACITY, "%s",
+                       state->pending_laptop);
+    state->laptop_pending = false;
+    (void)memset(state->pending_laptop, 0, sizeof state->pending_laptop);
+    return true;
+}
+
 static bool interact_confirm(desk_state *state, const desk_world *world)
 {
     if (state->confirm == DESK_CONFIRM_QUIT) {
@@ -2355,6 +2483,8 @@ bool desk_interact(desk_state *state, const desk_world *world)
         return true;
     case DESK_MODE_INVENTORY:
         return interact_inventory(state);
+    case DESK_MODE_LAPTOP:
+        return interact_laptop(state, world);
     }
     return false;
 }
@@ -2403,6 +2533,11 @@ void desk_cancel(desk_state *state, const desk_world *world)
         update_nearest(state, world);
         return;
     case DESK_MODE_STATUS:
+        state->mode = DESK_MODE_ROOM;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        update_nearest(state, world);
+        return;
+    case DESK_MODE_LAPTOP:
         state->mode = DESK_MODE_ROOM;
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         update_nearest(state, world);
@@ -2535,7 +2670,7 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         state->player_y > room->walk.y + room->walk.h)
         return validate_fail(error, error_size, "player outside walk rect");
     if ((int)state->mode < (int)DESK_MODE_WIZARD ||
-        (int)state->mode > (int)DESK_MODE_INVENTORY)
+        (int)state->mode > (int)DESK_MODE_LAPTOP)
         return validate_fail(error, error_size, "mode out of range");
     if (state->status_line_count < 0 ||
         state->status_line_count > DESK_STATUS_LINE_COUNT)
@@ -2573,6 +2708,14 @@ bool desk_validate(const desk_state *state, const desk_world *world,
                              "wizard confirm cursor out of range");
     if (state->pause_cursor < 0 || state->pause_cursor > 3)
         return validate_fail(error, error_size, "pause cursor out of range");
+    if (state->laptop_menu_count < 0 ||
+        state->laptop_menu_count > DESK_LAPTOP_MENU_PROFILES)
+        return validate_fail(error, error_size,
+                             "laptop menu count out of range");
+    if (state->laptop_menu_cursor < 0 ||
+        state->laptop_menu_cursor >= state->laptop_menu_count + 2)
+        return validate_fail(error, error_size,
+                             "laptop menu cursor out of range");
     if (state->inventory_cursor < 0 ||
         state->inventory_cursor >= DESK_INVENTORY_SLOTS)
         return validate_fail(error, error_size,
@@ -2798,7 +2941,10 @@ const char *desk_interact_prompt(const desk_state *state,
             desk_items_def(state->catalog, entry->item.definition);
 
         if (!def) return NULL;
-        if (entry->item.quantity > 1u)
+        if (world_item_is_terminal(state, state->nearest_world_item))
+            (void)snprintf(prompt, sizeof prompt, "Open %.39s",
+                           def->name);
+        else if (entry->item.quantity > 1u)
             (void)snprintf(prompt, sizeof prompt, "Pick up %.30s x%u",
                            def->name, (unsigned)entry->item.quantity);
         else

@@ -539,6 +539,13 @@
           "quantity": 1,
           "x": 150,
           "y": 230
+        },
+        {
+          "id": "study-laptop",
+          "item": "core:tool/laptop",
+          "quantity": 1,
+          "x": 300,
+          "y": 232
         }
       ],
       "walkbehinds": [

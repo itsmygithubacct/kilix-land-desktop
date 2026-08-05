@@ -28,7 +28,7 @@ LDLIBS := $(KILIX_ASSETS_LDLIBS) $(KILIX_GAME_KIT_LDLIBS)
 
 BIN := kilix-land-desktop
 SRC := src/main.c src/desk.c src/rooms.c src/json_reader.c src/items.c \
-	src/world_state.c src/state_store.c src/launcher.c \
+	src/world_state.c src/state_store.c src/launcher.c src/laptop.c \
 	src/graphics.c src/render.c src/audio.c
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 DEPENDENCIES := $(OBJ:.o=.d)
@@ -45,7 +45,8 @@ $(BIN): $(OBJ) $(GRAPHICS_MANIFEST) $(KILIX_UI_LIB) $(KILIX_TD_LIBS) \
 		$(KILIX_ASSETS_LIB) $(KILIX_GAME_KIT_LIB) $(LDLIBS)
 
 build/%.o: src/%.c src/kilix_land_desktop.h src/source_parity.h \
-	src/json_reader.h src/items.h src/world_state.h src/state_store.h \
+	src/json_reader.h src/items.h src/laptop.h src/world_state.h \
+	src/state_store.h \
 	$(KILIX_ASSETS_ROOT)/include/kilix_assets.h \
 	$(KILIX_UI_ROOT)/include/kilix_ui.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
@@ -103,6 +104,7 @@ test: parity-check $(BIN)
 	./$(BIN) --items-test
 	./$(BIN) --world-test
 	./$(BIN) --profile-test
+	./$(BIN) --laptop-test
 	./$(BIN) --wizard-render-test build/wizard-preview
 	./$(BIN) --room-render-test build/room-preview
 	./$(BIN) --outfit-render-test build/outfit-preview

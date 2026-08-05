@@ -1282,6 +1282,11 @@ bool desk_graphics_item_cell(const desk_graphics *graphics,
         (int)style >= DESK_CAST_COUNT || column < 0 ||
         column >= DESK_ITEM_SPRITE_COLUMNS)
         return false;
+    /* A fully transparent authored cell — art still pending review in
+     * this checkout — degrades to column 0, the drawn missing-item icon,
+     * so the item stays visible and interactable. */
+    if (column != 0 && !graphics->item_metrics[style][column].valid)
+        column = 0;
     return desk_graphics_cell(graphics, DESK_GRAPHIC_ITEMS, column,
                               (int)style, image);
 }
@@ -1310,6 +1315,9 @@ bool desk_graphics_item_cell_metrics(const desk_graphics *graphics,
         (int)style >= DESK_CAST_COUNT || column < 0 ||
         column >= DESK_ITEM_SPRITE_COLUMNS)
         return false;
+    /* Match desk_graphics_item_cell's missing-art fallback. */
+    if (column != 0 && !graphics->item_metrics[style][column].valid)
+        column = 0;
     *metrics = graphics->item_metrics[style][column];
     return metrics->valid;
 }

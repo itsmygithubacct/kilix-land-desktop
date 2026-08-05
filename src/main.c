@@ -2943,11 +2943,12 @@ static int items_test(void)
         ok = false;
     }
     if (ok &&
-        (catalog.definition_count != 9 || catalog.receiver_count != 3 ||
+        (catalog.definition_count != 10 || catalog.receiver_count != 3 ||
          catalog.taste_count != 12 ||
          desk_items_find(&catalog, DESK_ITEM_MISSING_ID) !=
              (int)DESK_ITEM_DEF_MISSING ||
-         desk_items_find(&catalog, "core:media/record") <= 0)) {
+         desk_items_find(&catalog, "core:media/record") <= 0 ||
+         desk_items_find(&catalog, "core:tool/laptop") <= 0)) {
         (void)fprintf(stderr, "FAIL items shipped catalog shape\n");
         ok = false;
     }
@@ -3667,6 +3668,259 @@ static int style_index(const char *name)
     return -1;
 }
 
+static bool laptop_write_fixture(const char *directory, const char *name,
+                                 const char *contents)
+{
+    char path[1024];
+    FILE *handle;
+    int written = snprintf(path, sizeof path, "%s/%s", directory, name);
+    if (written < 0 || (size_t)written >= sizeof path) return false;
+    handle = fopen(path, "w");
+    if (!handle) return false;
+    if (fputs(contents, handle) == EOF) {
+        (void)fclose(handle);
+        return false;
+    }
+    return fclose(handle) == 0;
+}
+
+static int laptop_inventory_slot(const desk_state *state, int definition)
+{
+    int slot;
+    for (slot = 0; slot < DESK_INVENTORY_SLOTS; ++slot) {
+        const desk_item *item = &state->items.inventory.slots[slot];
+        if (!desk_item_is_empty(item) &&
+            item->definition == (uint16_t)definition)
+            return slot;
+    }
+    return -1;
+}
+
+static int laptop_world_item_index(const desk_state *state, int definition)
+{
+    int index;
+    for (index = 0; index < state->items.item_count; ++index)
+        if (state->items.items[index].item.definition ==
+            (uint16_t)definition)
+            return index;
+    return -1;
+}
+
+/* The set-up laptop's whole loop: menu on Enter, profile choice raised as
+ * one take-and-clear request, PICK UP back into the hand, Space to set it
+ * up again, and the placed laptop persisting through a world.state
+ * round trip like every other world item. */
+static int laptop_test_body(const char *config_dir)
+{
+    char profiles_dir[1024];
+    char taken[DESK_LAPTOP_ID_CAPACITY];
+    char error[DESK_ERROR_CAPACITY];
+    desk_world world;
+    desk_item_catalog catalog;
+    desk_state state;
+    int study;
+    int laptop_def;
+    int slot;
+    int written;
+
+    if (!desk_laptop_selftest()) {
+        (void)fprintf(stderr, "FAIL laptop module selftest\n");
+        return EXIT_FAILURE;
+    }
+
+    written = snprintf(profiles_dir, sizeof profiles_dir, "%s/profiles",
+                       config_dir);
+    if (written < 0 || (size_t)written >= sizeof profiles_dir ||
+        mkdir(profiles_dir, 0700) != 0 ||
+        setenv("KILIX_LAPTOP_PROFILES", profiles_dir, 1) != 0) {
+        (void)fprintf(stderr, "FAIL laptop profiles fixture dir\n");
+        return EXIT_FAILURE;
+    }
+    if (!laptop_write_fixture(profiles_dir, "bench.profile",
+                              "name=Bench\npane.1.cwd=~\n") ||
+        !laptop_write_fixture(profiles_dir, "ops.profile",
+                              "name=Ops\nlayout=tabs\n"
+                              "pane.1.ssh=admin@example-host\n")) {
+        (void)fprintf(stderr, "FAIL laptop profile fixtures\n");
+        return EXIT_FAILURE;
+    }
+
+    if (!load_world(&world, &catalog, error, sizeof error)) {
+        (void)fprintf(stderr, "FAIL laptop world: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    laptop_def = desk_items_find(&catalog, "core:tool/laptop");
+    study = desk_world_room_index(&world, "study");
+    if (laptop_def <= 0 || study < 0) {
+        (void)fprintf(stderr, "FAIL laptop catalog/world lookup\n");
+        return EXIT_FAILURE;
+    }
+    desk_init(&state, &world, &catalog);
+    if (state.mode != DESK_MODE_WIZARD ||
+        !complete_wizard(&state, &world)) {
+        (void)fprintf(stderr, "FAIL laptop wizard\n");
+        return EXIT_FAILURE;
+    }
+
+    /* Stand just below the authored study spawn and interact. */
+    state.room = study;
+    state.player_x = 300.0f;
+    state.player_y = 244.0f;
+    state.facing = DESK_FACING_DOWN;
+    state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+    desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+    if (laptop_world_item_index(&state, laptop_def) < 0 ||
+        state.nearest_world_item < 0 ||
+        state.items.items[state.nearest_world_item].item.definition !=
+            (uint16_t)laptop_def) {
+        (void)fprintf(stderr, "FAIL laptop spawn not nearest\n");
+        return EXIT_FAILURE;
+    }
+    if (!desk_interact(&state, &world) ||
+        state.mode != DESK_MODE_LAPTOP ||
+        state.laptop_menu_count != 2 ||
+        strcmp(desk_laptop_menu_item(&state, 0), "bench") != 0 ||
+        strcmp(desk_laptop_menu_item(&state, 1), "ops") != 0 ||
+        strcmp(desk_laptop_menu_item(&state, 2), "PICK UP LAPTOP") != 0 ||
+        strcmp(desk_laptop_menu_item(&state, 3), "CLOSE") != 0) {
+        (void)fprintf(stderr, "FAIL laptop menu open\n");
+        return EXIT_FAILURE;
+    }
+
+    /* Cursor to the second profile and choose it. */
+    desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+    if (state.laptop_menu_cursor != 1 || !desk_interact(&state, &world) ||
+        state.mode != DESK_MODE_ROOM ||
+        !desk_take_laptop_request(&state, taken) ||
+        strcmp(taken, "ops") != 0 ||
+        desk_take_laptop_request(&state, taken)) {
+        (void)fprintf(stderr, "FAIL laptop profile choice\n");
+        return EXIT_FAILURE;
+    }
+
+    /* Escape closes without choosing. */
+    if (!desk_interact(&state, &world) ||
+        state.mode != DESK_MODE_LAPTOP)
+        return EXIT_FAILURE;
+    desk_cancel(&state, &world);
+    if (state.mode != DESK_MODE_ROOM ||
+        desk_take_laptop_request(&state, taken)) {
+        (void)fprintf(stderr, "FAIL laptop escape\n");
+        return EXIT_FAILURE;
+    }
+
+    /* PICK UP LAPTOP pockets it through the ordinary pickup path. */
+    if (!desk_interact(&state, &world) ||
+        state.mode != DESK_MODE_LAPTOP)
+        return EXIT_FAILURE;
+    desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+    desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+    if (state.laptop_menu_cursor != 2 || !desk_interact(&state, &world) ||
+        state.mode != DESK_MODE_ROOM ||
+        laptop_world_item_index(&state, laptop_def) >= 0 ||
+        (slot = laptop_inventory_slot(&state, laptop_def)) < 0) {
+        (void)fprintf(stderr, "FAIL laptop pick up\n");
+        return EXIT_FAILURE;
+    }
+
+    /* Space sets it up again in front of the player. */
+    desk_select_slot(&state, slot);
+    if (!desk_use_item(&state, &world) ||
+        laptop_world_item_index(&state, laptop_def) < 0 ||
+        laptop_inventory_slot(&state, laptop_def) >= 0) {
+        (void)fprintf(stderr, "FAIL laptop set up\n");
+        return EXIT_FAILURE;
+    }
+
+    /* The placed laptop persists like every other world item. */
+    if (!desk_world_state_save(&state.items, &catalog)) {
+        (void)fprintf(stderr, "FAIL laptop world save\n");
+        return EXIT_FAILURE;
+    }
+    {
+        desk_world_state reloaded;
+        bool corrupt = false;
+        int index;
+        if (!desk_world_state_load(&reloaded, &catalog, &corrupt) ||
+            corrupt) {
+            (void)fprintf(stderr, "FAIL laptop world reload\n");
+            return EXIT_FAILURE;
+        }
+        index = -1;
+        {
+            int cursor;
+            for (cursor = 0; cursor < reloaded.item_count; ++cursor)
+                if (reloaded.items[cursor].item.definition ==
+                    (uint16_t)laptop_def)
+                    index = cursor;
+        }
+        /* The codec stores room ids, not runtime indexes; a fresh load is
+         * unresolved (-1) until the simulation adopts it. */
+        if (index < 0 ||
+            strcmp(reloaded.items[index].room_id, "study") != 0) {
+            (void)fprintf(stderr, "FAIL laptop persistence\n");
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* An empty profile directory still opens a usable menu. */
+    {
+        char empty_dir[1024];
+        written = snprintf(empty_dir, sizeof empty_dir, "%s/empty",
+                           config_dir);
+        if (written < 0 || (size_t)written >= sizeof empty_dir ||
+            mkdir(empty_dir, 0700) != 0 ||
+            setenv("KILIX_LAPTOP_PROFILES", empty_dir, 1) != 0)
+            return EXIT_FAILURE;
+        desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (!desk_interact(&state, &world) ||
+            state.mode != DESK_MODE_LAPTOP ||
+            state.laptop_menu_count != 0 ||
+            strcmp(desk_laptop_menu_item(&state, 0),
+                   "PICK UP LAPTOP") != 0) {
+            (void)fprintf(stderr, "FAIL laptop empty menu\n");
+            return EXIT_FAILURE;
+        }
+        desk_cancel(&state, &world);
+    }
+    (void)unsetenv("KILIX_LAPTOP_PROFILES");
+
+    /* remove_tree only clears one level; empty the fixture subdirectory
+     * so the caller's cleanup can rmdir it. */
+    {
+        char path[1024];
+        written = snprintf(path, sizeof path, "%s/bench.profile",
+                           profiles_dir);
+        if (written > 0 && (size_t)written < sizeof path)
+            (void)unlink(path);
+        written = snprintf(path, sizeof path, "%s/ops.profile",
+                           profiles_dir);
+        if (written > 0 && (size_t)written < sizeof path)
+            (void)unlink(path);
+    }
+
+    (void)printf(
+        "PASS laptop profiles=2 menu=open/choose/escape/pickup "
+        "setup=placed persistence=world.state empty=usable\n");
+    return EXIT_SUCCESS;
+}
+
+static int laptop_test(void)
+{
+    char config_dir[1024];
+    int result;
+    if (!make_temp_config(config_dir, sizeof config_dir)) {
+        (void)fprintf(stderr, "FAIL laptop temp config\n");
+        return EXIT_FAILURE;
+    }
+    result = laptop_test_body(config_dir);
+    if (!remove_tree(config_dir) && result == EXIT_SUCCESS) {
+        (void)fprintf(stderr, "FAIL laptop temp cleanup\n");
+        result = EXIT_FAILURE;
+    }
+    return result;
+}
+
 /* Review workflow (IMPLEMENTATION.md section 13): render one frame of an
  * arbitrary room in an arbitrary style to PATH as a P6 PPM. */
 static int screenshot(const char *path, const char *room_id,
@@ -3737,7 +3991,8 @@ static void usage(const char *program)
     (void)fprintf(stderr,
         "usage: %s [--selftest | --audio-test | --graphics-test | "
         "--json-test | --items-test | "
-        "--world-test | --profile-test | --wizard-render-test DIR | "
+        "--world-test | --profile-test | --laptop-test | "
+        "--wizard-render-test DIR | "
         "--room-render-test DIR | --outfit-render-test DIR | "
         "--walk-render-test DIR | --items-render-test DIR | "
         "--screenshot PATH [--room ID] [--style STYLE] | --version]\n",
@@ -3760,6 +4015,8 @@ int main(int argc, char **argv)
         return world_test();
     if (argc == 2 && strcmp(argv[1], "--profile-test") == 0)
         return profile_test();
+    if (argc == 2 && strcmp(argv[1], "--laptop-test") == 0)
+        return laptop_test();
     if (argc == 3 && strcmp(argv[1], "--wizard-render-test") == 0)
         return wizard_render_test(argv[2]);
     if (argc == 3 && strcmp(argv[1], "--room-render-test") == 0)

@@ -195,6 +195,19 @@
         "giftable"
       ],
       "effect_ticks": 2400
+    },
+    {
+      "id": "core:tool/laptop",
+      "name": "Laptop",
+      "description": "A portable kilix terminal. Set it up on a desk, then open a session profile.",
+      "family": "placeable",
+      "behavior": "place",
+      "sprite": 7,
+      "max_stack": 1,
+      "tags": [
+        "placeable",
+        "terminal"
+      ]
     }
   ],
   "receivers": [
