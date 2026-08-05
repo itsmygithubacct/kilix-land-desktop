@@ -774,6 +774,62 @@ static bool load_graphic(desk_graphics *graphics,
     return true;
 }
 
+/* The laptop's closed-lid art: items/laptop-lid.png, one 32x32 cell per
+ * style row in the desktop-items row order, generated per style by
+ * tools/laptop_lid_art.py from the Gemini image pipeline. It ships
+ * outside the manifest because it is OPTIONAL — like a room plate, a
+ * missing or wrong-sized sheet is not an error, the laptop just keeps
+ * drawing its open sprite — so review-pending art never breaks a tree. */
+#define DESK_LAPTOP_LID_CELL 32
+
+static void load_laptop_lid(desk_graphics *graphics,
+                            const kilix_asset_locator *locator,
+                            const kilix_asset_limits *limits)
+{
+    char path[1024];
+    kilix_asset_image image = {0};
+    uint8_t *pixels;
+    int style;
+    int y;
+
+    graphics->laptop_lid_ready = false;
+    if (kilix_asset_resolve(locator,
+                            "assets/graphics/items/laptop-lid.png", path,
+                            sizeof path) != KILIX_ASSET_OK)
+        return;
+    if (kilix_asset_image_load_png(&image, path, limits) != KILIX_ASSET_OK)
+        return;
+    if (!kilix_asset_image_is_valid(&image) ||
+        image.width != (uint32_t)DESK_LAPTOP_LID_CELL ||
+        image.height != (uint32_t)(DESK_LAPTOP_LID_CELL *
+                                   DESK_CAST_COUNT)) {
+        kilix_asset_image_clear(&image);
+        return;
+    }
+    pixels = malloc((size_t)image.width * (size_t)image.height * 4u);
+    if (!pixels) {
+        kilix_asset_image_clear(&image);
+        return;
+    }
+    for (y = 0; y < (int)image.height; ++y)
+        (void)memcpy(pixels + (size_t)y * (size_t)image.width * 4u,
+                     image.pixels + (size_t)y * image.stride,
+                     (size_t)image.width * 4u);
+    kilix_asset_image_clear(&image);
+    graphics->laptop_lid_pixels = pixels;
+    for (style = 0; style < DESK_CAST_COUNT; ++style) {
+        graphics->laptop_lid_cells[style] = ki_td_rgba8_make(
+            pixels + (size_t)style * DESK_LAPTOP_LID_CELL *
+                         DESK_LAPTOP_LID_CELL * 4u,
+            DESK_LAPTOP_LID_CELL, DESK_LAPTOP_LID_CELL);
+        /* A transparent style cell simply stays invalid: that style
+         * falls back to the open sprite, the others keep their art. */
+        (void)measure_sprite(&graphics->laptop_lid_cells[style],
+                             &graphics->laptop_lid_metrics[style]);
+    }
+    graphics->laptop_lid_ready = true;
+}
+
 bool desk_graphics_init(desk_graphics *graphics, const char *asset_root)
 {
     kilix_asset_locator locator;
@@ -824,6 +880,7 @@ bool desk_graphics_init(desk_graphics *graphics, const char *asset_root)
                         &cell, &graphics->item_metrics[style][column]);
             }
     }
+    load_laptop_lid(graphics, &locator, &limits);
     graphics->legend_opposite_step_pixels =
         malloc((size_t)DESK_LEGEND_CELL * DESK_LEGEND_CELL * 4u * 4u);
     graphics->hero_motion_pixels =
@@ -850,6 +907,7 @@ void desk_graphics_shutdown(desk_graphics *graphics)
     free(graphics->outfit_pixels);
     free(graphics->legend_opposite_step_pixels);
     free(graphics->hero_motion_pixels);
+    free(graphics->laptop_lid_pixels);
     kilix_asset_manifest_clear(&graphics->manifest);
     if (graphics->cache_ready) kilix_asset_cache_clear(&graphics->cache);
     (void)memset(graphics, 0, sizeof *graphics);
@@ -1270,6 +1328,30 @@ bool desk_graphics_legend_opposite_step_metrics(
         (int)facing > (int)DESK_FACING_UP)
         return false;
     *metrics = graphics->legend_opposite_step_metrics[facing];
+    return metrics->valid;
+}
+
+bool desk_graphics_laptop_lid_cell(const desk_graphics *graphics,
+                                   desk_cast style, ki_td_rgba8 *image)
+{
+    if (image) *image = (ki_td_rgba8){0};
+    if (!graphics || !image || !graphics->laptop_lid_ready ||
+        (int)style < 0 || (int)style >= DESK_CAST_COUNT ||
+        !graphics->laptop_lid_metrics[style].valid)
+        return false;
+    *image = graphics->laptop_lid_cells[style];
+    return ki_td_rgba8_is_valid(image);
+}
+
+bool desk_graphics_laptop_lid_metrics(const desk_graphics *graphics,
+                                      desk_cast style,
+                                      desk_sprite_metrics *metrics)
+{
+    if (metrics) (void)memset(metrics, 0, sizeof *metrics);
+    if (!graphics || !metrics || !graphics->laptop_lid_ready ||
+        (int)style < 0 || (int)style >= DESK_CAST_COUNT)
+        return false;
+    *metrics = graphics->laptop_lid_metrics[style];
     return metrics->valid;
 }
 

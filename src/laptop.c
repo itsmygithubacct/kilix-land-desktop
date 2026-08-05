@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -824,6 +825,123 @@ bool desk_laptop_write_session(const desk_laptop_profile *profile, const char *p
     return true;
 }
 
+/* ---- run registry ----
+ *
+ * The shared contract (see laptop.h): run/<id>.pid beside the profiles,
+ * one pid per line, written at spawn, and never believed without a real
+ * process check. All four laptop surfaces implement exactly these rules,
+ * so a session opened anywhere shows as running — and can be closed —
+ * everywhere. */
+
+bool desk_laptop_run_directory(char *path, size_t size)
+{
+    char profiles[PATH_MAX];
+    if (!desk_laptop_directory(profiles, sizeof profiles)) return false;
+    return format_text(path, size, "%s/run", profiles, NULL);
+}
+
+static bool run_pid_path(const char *id, char *path, size_t size)
+{
+    char directory[PATH_MAX];
+    if (!valid_id(id) ||
+        !desk_laptop_run_directory(directory, sizeof directory))
+        return false;
+    return format_text(path, size, "%s/%s.pid", directory, id);
+}
+
+/* kill(pid, 0) is the contract's liveness check: EPERM still means the
+ * process exists; a /proc zombie does not count — its window is already
+ * gone, and only an unreaped parent keeps the pid answering. */
+static bool run_pid_alive(long pid)
+{
+    char stat_path[64];
+    char stat_text[512];
+    size_t stat_length = 0;
+    if (pid <= 1) return false;
+    if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return false;
+    if (snprintf(stat_path, sizeof stat_path, "/proc/%ld/stat", pid) > 0 &&
+        read_small_file(stat_path, stat_text, sizeof stat_text,
+                        &stat_length)) {
+        const char *closing = strrchr(stat_text, ')');
+        if (closing != NULL && closing[1] == ' ' && closing[2] == 'Z')
+            return false;
+    }
+    return true;
+}
+
+bool desk_laptop_run_record(const char *id, long pid)
+{
+    char path[PATH_MAX];
+    char text[32];
+    int written;
+    if (pid <= 1 || !run_pid_path(id, path, sizeof path)) return false;
+    {
+        char directory[PATH_MAX];
+        if (!desk_laptop_run_directory(directory, sizeof directory) ||
+            !ensure_directory(directory))
+            return false;
+    }
+    written = snprintf(text, sizeof text, "%ld\n", pid);
+    if (written <= 0 || (size_t)written >= sizeof text) return false;
+    return write_private_file(path, text, (size_t)written);
+}
+
+int desk_laptop_run_status(const char *id, long *pid)
+{
+    char path[PATH_MAX];
+    char text[64];
+    size_t length = 0;
+    char *end = NULL;
+    long value;
+    if (pid != NULL) *pid = 0;
+    if (!run_pid_path(id, path, sizeof path)) return -1;
+    if (!read_small_file(path, text, sizeof text, &length)) return 0;
+    value = strtol(text, &end, 10);
+    if (end != NULL && end != text && (*end == '\n' || *end == '\0') &&
+        run_pid_alive(value)) {
+        if (pid != NULL) *pid = value;
+        return 1;
+    }
+    /* Stale: the recorded process is gone or the file is garbled. The
+     * contract says whichever reader notices cleans up. */
+    (void)unlink(path);
+    return 0;
+}
+
+bool desk_laptop_run_terminate(const char *id)
+{
+    long pid = 0;
+    int status = desk_laptop_run_status(id, &pid);
+    if (status < 0) return false;
+    if (status == 0) return true; /* already gone counts as closed */
+    if (kill((pid_t)pid, SIGTERM) != 0 && errno != ESRCH) return false;
+    return true;
+}
+
+bool desk_laptop_run_any(void)
+{
+    char directory[PATH_MAX];
+    DIR *entries;
+    struct dirent *entry;
+    bool any = false;
+    if (!desk_laptop_run_directory(directory, sizeof directory))
+        return false;
+    entries = opendir(directory);
+    if (entries == NULL) return false; /* never used = never created */
+    while (!any && (entry = readdir(entries)) != NULL) {
+        char id[DESK_LAPTOP_ID_CAPACITY];
+        const char *dot = strrchr(entry->d_name, '.');
+        if (dot == NULL || strcmp(dot, ".pid") != 0) continue;
+        if ((size_t)(dot - entry->d_name) >= sizeof id) continue;
+        memcpy(id, entry->d_name, (size_t)(dot - entry->d_name));
+        id[dot - entry->d_name] = '\0';
+        if (!valid_id(id)) continue;
+        any = desk_laptop_run_status(id, NULL) == 1;
+    }
+    closedir(entries);
+    return any;
+}
+
 /* ---- selftest ---- */
 
 static bool expect(bool condition, const char *label)
@@ -1020,6 +1138,37 @@ bool desk_laptop_selftest(void)
                  "unknown keys are rejected");
     ok &= expect(!desk_laptop_load("../escape", &profile, error, sizeof error),
                  "path traversal ids are rejected");
+
+    /* The run registry: recorded live pids read back; a dead pid or a
+     * garbled file is stale, and reading it cleans it up; terminate on a
+     * stopped profile counts as closed. */
+    {
+        char run_directory[PATH_MAX];
+        char stale_path[PATH_MAX];
+        long pid = 0;
+        ok &= expect(desk_laptop_run_status("dev", NULL) == 0,
+                     "an unrecorded profile is not running");
+        ok &= expect(desk_laptop_run_record("dev", (long)getpid()) &&
+                         desk_laptop_run_status("dev", &pid) == 1 &&
+                         pid == (long)getpid(),
+                     "a recorded live session reads back");
+        ok &= expect(desk_laptop_run_terminate("ops"),
+                     "terminating a stopped session counts as closed");
+        ok &= expect(desk_laptop_run_directory(run_directory,
+                                               sizeof run_directory) &&
+                         format_text(stale_path, sizeof stale_path,
+                                     "%s/ops.pid", run_directory, NULL) &&
+                         write_private_file(stale_path, "not-a-pid\n", 10) &&
+                         desk_laptop_run_status("ops", NULL) == 0 &&
+                         access(stale_path, F_OK) != 0,
+                     "a garbled pid file is cleaned up on read");
+        ok &= expect(write_private_file(stale_path, "1\n", 2) &&
+                         desk_laptop_run_status("ops", NULL) == 0 &&
+                         access(stale_path, F_OK) != 0,
+                     "pid 1 and below never count as a session");
+        ok &= expect(desk_laptop_run_status("../escape", NULL) == -1,
+                     "registry ids follow the profile id rules");
+    }
 
     unsetenv("KILIX_LAPTOP_PROFILES");
     remove_test_tree(root);

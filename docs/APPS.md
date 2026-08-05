@@ -51,7 +51,7 @@ intents opens a **choice panel** (below) whose rows name them.
 
 | Target | Reached from | Resolution |
 |---|---|---|
-| `settings` | shed, computer, pause menu | `kilix-settings` → `kilix settings`; tab |
+| `settings` | **fuse box (yard)**, computer, pause menu | `kilix-settings` → `kilix settings`; tab |
 | `update` | shed | `plebian-os` (the stack control TUI) → `kilix update`; tab |
 | `catalog` | computer | `kilix-launcher` → `python3 tools/land_catalog.py`; tab |
 | `dictation` | phone | `kilix-stt` → `kilix stt`; tab |
@@ -106,7 +106,7 @@ compiled one — never to the rows the panel adds.
 | Fixture | Rows |
 |---|---|
 | bed (bedroom) | rest (leave the desktop) · sleep (log out) · wake anew (restart) · power down the house · stay up |
-| shed (yard) | tune the appliances (bindings) · read the fuse box (settings) · service the house (update) · shut the shed |
+| shed (yard) | tune the appliances (bindings) · service the house (update) · shut the shed |
 | phone (living) | listen (read aloud) · speak (dictation) · ask the operator (voice status) · hang up |
 | dev rig (study) | coding agents · persistent sessions · tmux manager · share this session · leave it running |
 | bookshelf (study) | the system manual · the recovery guide · man pages · put it back |
@@ -213,15 +213,41 @@ pane.2.cwd=/var/log
 pane.2.cmd=tail -f syslog
 ```
 
-Choosing a **pane profile** writes a generated kitty `--session` file
-under the config home and runs `kilix --detach --session <file>
---start-as=fullscreen` — the laptop gets its own kilix window, opened full
-screen, because the laptop opens a machine rather than a window. (`kilix`
-forwards anything it does not recognise straight to kitty.) Choosing a
-**desktop profile** runs `kilix <provider>` (`95` maps to `kilix desktop
-95`) with no such flag: a provider owns its own presentation.  Both are
-fixed argv vectors through `posix_spawnp` under the same session gate,
-kill switch, and toast reporting as every row above.
+Choosing a profile prefers the host's own verb when it exists: the
+launcher probes `kilix laptop help` once (the same probe-never-assume
+pattern as the games handoff) and delegates to `kilix laptop open <id>`,
+which spawns the session and records it in the shared run registry. On a
+host that predates the verb, the fallback keeps everything working: a
+**pane profile** writes a generated kitty `--session` file under the
+config home and runs `kilix --session <file> --start-as=fullscreen` —
+un-detached, so the spawned pid is the session window itself and this
+desktop records it in the registry — and a **desktop profile** runs
+`kilix <provider>` (`95` maps to `kilix desktop 95`) with no such flag: a
+provider owns its own presentation. Everything is a fixed argv vector
+through `posix_spawnp` under the same session gate, kill switch, and
+toast reporting as every row above.
+
+### Running sessions, the lid, and closing
+
+The registry — `run/<id>.pid` beside the profiles, one pid per file,
+written at spawn, and never believed without a real `kill(pid, 0)` check
+(a stale or garbled file is deleted by whichever reader notices) — is one
+contract shared with kilix-cap, `kilix laptop`, and the launcher TUI, so
+a session opened anywhere shows as running everywhere. In the house it
+shows twice:
+
+- The **set-up laptop itself is stateful art**: closed while nothing
+  runs, open while any profile session is live, with a short lid
+  animation between (the closed frame comes from the optional per-style
+  `items/laptop-lid.png` sheet; without it the open sprite compresses
+  toward the desk instead, so the states stay readable with no art at
+  all). A **carried laptop always reads as closed** in the hotbar and
+  inventory.
+- The **home page marks running profiles** (`RUNNING - ENTER CLOSES`),
+  and Enter on such a row closes that session — `kilix laptop close`
+  when the host verb exists, a SIGTERM to the recorded pid otherwise —
+  instead of opening a duplicate. Walking away just leaves the session
+  running and the lid open.
 
 ### Configuring profiles from inside the house
 
@@ -252,8 +278,10 @@ Deleting asks first.
 `./kilix-land-desktop --laptop-test` covers profile parsing, the screen's
 page machine, the whole configuration round trip (create, rename, toggle
 kind, pick a provider, add and edit a pane, a refused ssh destination,
-save, reload from disk, delete), pickup and set-up, and world.state
-persistence.
+save, reload from disk, delete), pickup and set-up, world.state
+persistence, and the run registry (a recorded live session opens the lid
+frame by frame, the home page marks it, Enter raises one close request,
+and a cleared registry closes the lid again).
 
 ## Debug menu
 

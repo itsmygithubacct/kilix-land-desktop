@@ -4059,6 +4059,79 @@ static int laptop_test_body(const char *config_dir)
         }
     }
 
+    /* The run registry drives the lid: a recorded live session opens it
+     * (one frame per DESK_LAPTOP_LID_TICKS after the per-second refresh
+     * notices), the open menu marks the running profile, Enter on that
+     * row raises exactly one close request, and a cleared registry
+     * closes the lid again. */
+    {
+        char close_id[DESK_LAPTOP_ID_CAPACITY];
+        char run_dir[1024];
+        char pid_path[1024];
+        int tick;
+        int settle = DESK_SIMULATION_HZ +
+                     DESK_LAPTOP_LID_FRAMES * DESK_LAPTOP_LID_TICKS + 2;
+        if (state.laptop_on || state.laptop_lid_frame != 0) {
+            (void)fprintf(stderr, "FAIL laptop starts closed\n");
+            return EXIT_FAILURE;
+        }
+        if (!desk_laptop_run_record("ops", (long)getpid())) {
+            (void)fprintf(stderr, "FAIL laptop run record\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < settle; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (!state.laptop_on ||
+            state.laptop_lid_frame != DESK_LAPTOP_LID_FRAMES - 1) {
+            (void)fprintf(stderr,
+                          "FAIL laptop lid opens with a live session\n");
+            return EXIT_FAILURE;
+        }
+        if (!desk_interact(&state, &world) ||
+            state.mode != DESK_MODE_LAPTOP ||
+            state.laptop_menu_running[0] ||
+            !state.laptop_menu_running[1] ||
+            strcmp(desk_laptop_row_value(&state, 1),
+                   "RUNNING - ENTER CLOSES") != 0 ||
+            strcmp(desk_laptop_row_value(&state, 0), "") != 0) {
+            (void)fprintf(stderr, "FAIL laptop running row marker\n");
+            return EXIT_FAILURE;
+        }
+        desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+        if (state.laptop.cursor != 1 || !desk_interact(&state, &world) ||
+            state.mode != DESK_MODE_LAPTOP ||
+            !desk_take_laptop_close_request(&state, close_id) ||
+            strcmp(close_id, "ops") != 0 ||
+            desk_take_laptop_close_request(&state, close_id)) {
+            (void)fprintf(stderr, "FAIL laptop close request\n");
+            return EXIT_FAILURE;
+        }
+        desk_cancel(&state, &world);
+        if (state.mode != DESK_MODE_ROOM) {
+            (void)fprintf(stderr, "FAIL laptop close request escape\n");
+            return EXIT_FAILURE;
+        }
+        if (!desk_laptop_run_directory(run_dir, sizeof run_dir)) {
+            (void)fprintf(stderr, "FAIL laptop run directory\n");
+            return EXIT_FAILURE;
+        }
+        written = snprintf(pid_path, sizeof pid_path, "%s/ops.pid",
+                           run_dir);
+        if (written < 0 || (size_t)written >= sizeof pid_path ||
+            unlink(pid_path) != 0) {
+            (void)fprintf(stderr, "FAIL laptop registry cleanup\n");
+            return EXIT_FAILURE;
+        }
+        for (tick = 0; tick < settle; ++tick)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (state.laptop_on || state.laptop_lid_frame != 0) {
+            (void)fprintf(stderr,
+                          "FAIL laptop lid closes when the session ends\n");
+            return EXIT_FAILURE;
+        }
+        (void)rmdir(run_dir);
+    }
+
     /* An empty profile directory still opens a usable menu. */
     {
         char empty_dir[1024];
@@ -4099,7 +4172,8 @@ static int laptop_test_body(const char *config_dir)
     (void)printf(
         "PASS laptop profiles=2 menu=open/choose/escape/pickup "
         "config=new/name/kind/provider/layout/panes/refusal/save/delete "
-        "setup=placed persistence=world.state empty=usable\n");
+        "setup=placed persistence=world.state "
+        "registry=lid-open/marker/close-request/lid-close empty=usable\n");
     return EXIT_SUCCESS;
 }
 
@@ -4133,6 +4207,10 @@ typedef struct panel_shot {
 } panel_shot;
 
 static const panel_shot PANEL_SHOTS[] = {
+    /* Zero activations frames the fixture with its prompt chip up, which
+     * is how a wall fixture's placement against the painted plate gets
+     * checked per house style. */
+    { "fuse-box", "yard", "fuse-box", 0 },
     { "bed", "bedroom", "bed", 1 },
     { "shed", "yard", "shed", 1 },
     { "phone", "living", "phone", 1 },

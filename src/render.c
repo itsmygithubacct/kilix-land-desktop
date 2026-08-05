@@ -519,6 +519,30 @@ static void apply_walkbehinds(ki_td_soft_renderer *renderer,
 
 #define ITEM_WORLD_RENDER_SIZE 22
 
+/* Whether a definition is the set-up terminal (the laptop) — the same
+ * "terminal" tag desk.c keys the session menu on. */
+static bool item_def_is_terminal(const desk_item_def *def)
+{
+    int tag = desk_item_tag_index("terminal");
+    return def != NULL && tag >= 0 &&
+           (def->tags & ((desk_item_tags)1u << (unsigned int)tag)) != 0u;
+}
+
+/* The carried laptop reads as closed: hotbar and inventory icons use the
+ * closed-lid cell when the optional sheet carries one for this style,
+ * and the item's ordinary sprite otherwise. */
+static bool item_icon_cell(const desk_state *state,
+                           const desk_graphics *graphics,
+                           const desk_item_def *def, int sprite,
+                           ki_td_rgba8 *cell)
+{
+    if (item_def_is_terminal(def) &&
+        desk_graphics_laptop_lid_cell(graphics, visible_cast(state), cell))
+        return true;
+    return desk_graphics_item_cell(graphics, visible_cast(state), sprite,
+                                   cell);
+}
+
 static void draw_world_item(ki_td_soft_renderer *renderer,
                             const ki_td_view *view, const desk_state *state,
                             const desk_graphics *graphics, int index,
@@ -538,6 +562,40 @@ static void draw_world_item(ki_td_soft_renderer *renderer,
                                 11.0f * 0.29f, COLOR_GOLD, 0.22f);
         bounds_add(bounds, entry->x - 11.0f, entry->y - 11.0f * 0.29f,
                    22.0f, 11.0f * 0.58f);
+    }
+    if (item_def_is_terminal(def)) {
+        /* The laptop follows its lid (desk.c drives the frame from the
+         * run registry): frame 0 is the closed-lid art, the top frame is
+         * the open sprite, and the frames between draw the open sprite
+         * rising from the desk — a procedural tween, so the lid still
+         * animates when only one closed frame of art exists. */
+        int frame = state->laptop_lid_frame;
+        int height;
+        if (frame < 0) frame = 0;
+        if (frame >= DESK_LAPTOP_LID_FRAMES)
+            frame = DESK_LAPTOP_LID_FRAMES - 1;
+        if (frame == 0 &&
+            desk_graphics_laptop_lid_cell(graphics, visible_cast(state),
+                                          &cell) &&
+            desk_graphics_laptop_lid_metrics(graphics,
+                                             visible_cast(state),
+                                             &metrics)) {
+            draw_foot_anchored(renderer, view, &cell, &metrics, entry->x,
+                               entry->y, ITEM_WORLD_RENDER_SIZE,
+                               ITEM_WORLD_RENDER_SIZE, 1.0f, bounds);
+            return;
+        }
+        height = ITEM_WORLD_RENDER_SIZE *
+                     (40 + 60 * frame / (DESK_LAPTOP_LID_FRAMES - 1)) /
+                     100;
+        if (desk_graphics_item_cell(graphics, visible_cast(state), sprite,
+                                    &cell) &&
+            desk_graphics_item_cell_metrics(graphics, visible_cast(state),
+                                            sprite, &metrics))
+            draw_foot_anchored(renderer, view, &cell, &metrics, entry->x,
+                               entry->y, ITEM_WORLD_RENDER_SIZE, height,
+                               1.0f, bounds);
+        return;
     }
     if (desk_graphics_item_cell(graphics, visible_cast(state), sprite,
                                 &cell) &&
@@ -941,8 +999,8 @@ static void draw_hotbar(ki_td_soft_renderer *renderer,
             int sprite = def ? (int)def->sprite : 0;
             ki_td_rgba8 cell;
 
-            if (desk_graphics_item_cell(graphics, visible_cast(state),
-                                        sprite, &cell))
+            /* Carried = closed: the pocketed laptop shows its lid. */
+            if (item_icon_cell(state, graphics, def, sprite, &cell))
                 ki_td_soft_rgba_resized(renderer, view, x + 2.0f,
                                         HOTBAR_TOP + 2.0f, &cell, 20, 20,
                                         1.0f);
@@ -1518,8 +1576,8 @@ static void draw_inventory(ki_td_soft_renderer *renderer,
             int sprite = def ? (int)def->sprite : 0;
             ki_td_rgba8 cell;
 
-            if (desk_graphics_item_cell(graphics, visible_cast(state),
-                                        sprite, &cell))
+            /* Carried = closed, matching the hotbar. */
+            if (item_icon_cell(state, graphics, def, sprite, &cell))
                 ki_td_soft_rgba_resized(renderer, view, x + 3.0f,
                                         y + 3.0f, &cell, 22, 22, 1.0f);
             if (item->quantity > 1u) {

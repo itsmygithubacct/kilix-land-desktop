@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -490,11 +491,12 @@ static void track_pending_child(pid_t pid)
 static bool tab_session_ready(void);
 
 /* A direct detached spawn for the laptop: the command is a fixed argv
- * (never a shell string) with stdio on /dev/null. `kilix --detach
- * --session` opens the profile's own kilix window; `kilix <provider>`
- * relies on the session environment this desktop already runs in to place
- * the provider tab. The bounded wait mirrors spawn_tab so an immediate
- * failure surfaces as one instead of a false "Opened" toast. */
+ * (never a shell string) with stdio on /dev/null. `kilix laptop open`
+ * (or the fallback `kilix --session`) opens the profile's own kilix
+ * window; `kilix <provider>` relies on the session environment this
+ * desktop already runs in to place the provider tab. The bounded wait
+ * mirrors spawn_tab so an immediate failure surfaces as one instead of a
+ * false "Opened" toast. */
 static bool spawn_detached(const char *const *command, size_t command_count)
 {
     char *argv[LAUNCH_COMMAND_MAX + 1];
@@ -536,6 +538,133 @@ static bool spawn_detached(const char *const *command, size_t command_count)
     return true;
 }
 
+/* Like spawn_detached, but for a process that must STAY alive: the
+ * un-detached session window whose pid the run registry records. Here a
+ * quick exit — even a clean one — means the window never came up, so it
+ * is a failure rather than a success. */
+static bool spawn_tracked(const char *const *command, size_t command_count,
+                          pid_t *out_pid)
+{
+    char *argv[LAUNCH_COMMAND_MAX + 1];
+    size_t index;
+    posix_spawn_file_actions_t actions;
+    pid_t pid = -1;
+    int result;
+
+    if (out_pid == NULL || command_count == 0u ||
+        command_count > LAUNCH_COMMAND_MAX)
+        return false;
+    *out_pid = -1;
+    for (index = 0u; index < command_count; ++index)
+        argv[index] = (char *)command[index];
+    argv[command_count] = NULL;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
+                                         "/dev/null", O_RDONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+    result = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+    (void)posix_spawn_file_actions_destroy(&actions);
+    if (result != 0) return false;
+    for (index = 0u; index < 20u; ++index) {
+        int status = 0;
+        pid_t reaped = waitpid(pid, &status, WNOHANG);
+        if (reaped == pid) return false; /* the window never came up */
+        if (reaped < 0) break;
+        {
+            struct timespec delay = { 0, 10L * 1000L * 1000L };
+            (void)nanosleep(&delay, NULL);
+        }
+    }
+    track_pending_child(pid);
+    *out_pid = pid;
+    return true;
+}
+
+/* Whether this host's kilix knows the `laptop` verb, probed the way the
+ * reference desktop's games module probes `kilix games play`: run
+ * `kilix laptop help`, bounded, and require the usage token — never
+ * assume, so an old host keeps this desktop's own path working, and
+ * never trust exit codes alone, because an old launcher forwards unknown
+ * words to the terminal engine. Probed once per process. */
+static bool laptop_host_verb_available(const char *kilix)
+{
+    static int cached = -1;
+    int pipe_fds[2];
+    posix_spawn_file_actions_t actions;
+    pid_t pid = -1;
+    char output[256];
+    size_t output_length = 0u;
+    int status = 0;
+    bool exited = false;
+    size_t waited;
+    const char *argv_words[3] = { "laptop", "help", NULL };
+    char *argv[4];
+
+    if (cached >= 0) return cached == 1;
+    cached = 0;
+    if (kilix == NULL || pipe(pipe_fds) != 0) return false;
+    argv[0] = (char *)kilix;
+    argv[1] = (char *)argv_words[0];
+    argv[2] = (char *)argv_words[1];
+    argv[3] = NULL;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return false;
+    }
+    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
+                                         "/dev/null", O_RDONLY, 0) != 0 ||
+        posix_spawn_file_actions_adddup2(&actions, pipe_fds[1],
+                                         STDOUT_FILENO) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, pipe_fds[0]) != 0 ||
+        posix_spawnp(&pid, kilix, &actions, NULL, argv, environ) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return false;
+    }
+    (void)posix_spawn_file_actions_destroy(&actions);
+    close(pipe_fds[1]);
+    (void)fcntl(pipe_fds[0], F_SETFL, O_NONBLOCK);
+    /* Up to two seconds: read what arrives, then collect the exit. */
+    for (waited = 0u; waited < 200u; ++waited) {
+        ssize_t got = read(pipe_fds[0], output + output_length,
+                           sizeof output - 1u - output_length);
+        if (got > 0 && output_length < sizeof output - 1u)
+            output_length += (size_t)got;
+        if (!exited) {
+            pid_t reaped = waitpid(pid, &status, WNOHANG);
+            if (reaped == pid) exited = true;
+            else if (reaped < 0) break;
+        }
+        if (exited && (got == 0 || output_length >= sizeof output - 1u))
+            break;
+        if (!exited || got < 0) {
+            struct timespec delay = { 0, 10L * 1000L * 1000L };
+            (void)nanosleep(&delay, NULL);
+        }
+    }
+    close(pipe_fds[0]);
+    if (!exited) {
+        (void)kill(pid, SIGKILL);
+        (void)waitpid(pid, &status, 0);
+        return false;
+    }
+    output[output_length] = '\0';
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        strstr(output, "open PROFILE") != NULL)
+        cached = 1;
+    return cached == 1;
+}
+
 /* The config home the state stores use, created 0700 on demand so the
  * generated session file has a private place to live. */
 static bool laptop_session_home(char *path, size_t size)
@@ -572,9 +701,13 @@ static bool laptop_session_home(char *path, size_t size)
     return true;
 }
 
-/* One chosen laptop profile: a desktop profile becomes `kilix
+/* One chosen laptop profile. The host's `kilix laptop open` is preferred
+ * when the verb exists — it owns the run registry, so a session opened
+ * here shows as running on every other surface. On an old host the
+ * fallback keeps everything working: a desktop profile becomes `kilix
  * <provider>`; a pane profile becomes a generated kitty --session file
- * opened with `kilix --detach --session`. */
+ * spawned un-detached so this desktop can record the window's own pid in
+ * the registry itself. */
 static void service_laptop(desk_launcher *launcher, desk_state *state,
                            const char *profile_id)
 {
@@ -606,6 +739,31 @@ static void service_laptop(desk_launcher *launcher, desk_state *state,
         set_status(launcher, state, "Kilix is required for the laptop");
         return;
     }
+    if (profile.desktop[0] == '\0' &&
+        desk_laptop_run_status(profile.id, NULL) == 1) {
+        (void)snprintf(message, sizeof message, "%s is already running",
+                       profile.name);
+        set_status(launcher, state, message);
+        return;
+    }
+    if (laptop_host_verb_available(kilix)) {
+        /* The host verb spawns the session and records its pid in the
+         * shared run registry; this desktop only has to ask. */
+        command[command_count++] = kilix;
+        command[command_count++] = "laptop";
+        command[command_count++] = "open";
+        command[command_count++] = profile_id;
+        if (spawn_detached(command, command_count)) {
+            if (profile.desktop[0] == '\0') state->laptop_on = true;
+            (void)snprintf(message, sizeof message, "Opened %s",
+                           profile.name);
+        } else {
+            (void)snprintf(message, sizeof message, "Could not open %s",
+                           profile.name);
+        }
+        set_status(launcher, state, message);
+        return;
+    }
     command[command_count++] = kilix;
     desktop_argument_count =
         desk_laptop_desktop_arguments(&profile, desktop_arguments);
@@ -616,6 +774,7 @@ static void service_laptop(desk_launcher *launcher, desk_state *state,
     } else {
         static char session_path[LAUNCH_PATH_CAPACITY];
         char session_home[LAUNCH_PATH_CAPACITY];
+        pid_t session_pid = -1;
         int written;
         if (!laptop_session_home(session_home, sizeof session_home)) {
             set_status(launcher, state,
@@ -635,20 +794,68 @@ static void service_laptop(desk_launcher *launcher, desk_state *state,
             set_status(launcher, state, error);
             return;
         }
-        command[command_count++] = "--detach";
         command[command_count++] = "--session";
         command[command_count++] = session_path;
         /* The laptop opens a machine, not a window: the session takes
          * the screen the way this desktop did. kilix forwards anything
          * it does not recognise straight to kitty. Desktop profiles skip
-         * this — a provider owns its own presentation. */
+         * this — a provider owns its own presentation. Un-detached, so
+         * the spawned pid IS the session window and the run registry
+         * records the truth; the pending-children reaper collects it. */
         command[command_count++] = "--start-as=fullscreen";
+        if (spawn_tracked(command, command_count, &session_pid)) {
+            (void)desk_laptop_run_record(profile.id, (long)session_pid);
+            state->laptop_on = true;
+            (void)snprintf(message, sizeof message, "Opened %s",
+                           profile.name);
+        } else {
+            (void)snprintf(message, sizeof message, "Could not open %s",
+                           profile.name);
+        }
+        set_status(launcher, state, message);
+        return;
     }
     if (spawn_detached(command, command_count))
         (void)snprintf(message, sizeof message, "Opened %s", profile.name);
     else
         (void)snprintf(message, sizeof message, "Could not open %s",
                        profile.name);
+    set_status(launcher, state, message);
+}
+
+/* Closing a running session: the host verb owns the registry when it
+ * exists (`kilix laptop close` SIGTERMs the recorded pid and clears the
+ * file); otherwise this desktop signals the recorded pid itself and the
+ * per-second refresh clears the entry once the process is gone. Either
+ * way the lid follows the registry, not the click. */
+static void service_laptop_close(desk_launcher *launcher, desk_state *state,
+                                 const char *profile_id)
+{
+    char kilix_path[LAUNCH_PATH_CAPACITY];
+    char message[DESK_TOAST_CAPACITY];
+    const char *kilix;
+
+    kilix = launcher->external_enabled
+                ? resolve_kilix(kilix_path, sizeof kilix_path)
+                : NULL;
+    if (kilix != NULL && laptop_host_verb_available(kilix)) {
+        const char *command[4];
+        command[0] = kilix;
+        command[1] = "laptop";
+        command[2] = "close";
+        command[3] = profile_id;
+        if (spawn_detached(command, 4u)) {
+            (void)snprintf(message, sizeof message, "Closing %s",
+                           profile_id);
+            set_status(launcher, state, message);
+            return;
+        }
+    }
+    if (desk_laptop_run_terminate(profile_id))
+        (void)snprintf(message, sizeof message, "Closing %s", profile_id);
+    else
+        (void)snprintf(message, sizeof message, "Could not close %s",
+                       profile_id);
     set_status(launcher, state, message);
 }
 
@@ -844,6 +1051,10 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
         char laptop_id[DESK_LAPTOP_ID_CAPACITY];
         if (desk_take_laptop_request(state, laptop_id)) {
             service_laptop(launcher, state, laptop_id);
+            return true;
+        }
+        if (desk_take_laptop_close_request(state, laptop_id)) {
+            service_laptop_close(launcher, state, laptop_id);
             return true;
         }
     }

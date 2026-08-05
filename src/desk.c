@@ -12,6 +12,8 @@
 /* Not in the module header; matches kilix-land's dialogue text budget. */
 #define DESK_DIALOGUE_TEXT_CAPACITY 192
 
+static void advance_laptop_lid(desk_state *state);
+
 #define DESK_PROFILE_FILENAME "profile.state"
 #define DESK_PROFILE_PAYLOAD_SIZE 96u
 #define DESK_PROFILE_MAX_PAYLOAD 256u
@@ -1561,6 +1563,7 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
             queue_audio(state, DESK_AUDIO_UI_MOVE);
     }
     state->simulation_tick += 1u;
+    advance_laptop_lid(state);
     if (state->toast_ticks > 0) state->toast_ticks--;
     if (state->door_cooldown_ticks > 0) state->door_cooldown_ticks--;
     if (state->mode == DESK_MODE_DIALOGUE) state->dialogue_age++;
@@ -2216,6 +2219,44 @@ static void laptop_seed_directory(char *path, size_t size)
     if (written < 0 || (size_t)written >= size) path[0] = '\0';
 }
 
+/* Which listed profiles have a live session, from the run registry. The
+ * registry (laptop.h) is the one source of that truth — the file is
+ * never believed without the real process check laptop.c performs. */
+static void laptop_refresh_menu_running(desk_state *state)
+{
+    int index;
+    (void)memset(state->laptop_menu_running, 0,
+                 sizeof state->laptop_menu_running);
+    for (index = 0; index < state->laptop_menu_count; ++index)
+        state->laptop_menu_running[index] =
+            desk_laptop_run_status(state->laptop_menu_ids[index],
+                                   NULL) == 1;
+}
+
+/* The lid follows the run registry: open while any profile session is
+ * live, closed otherwise, one frame per DESK_LAPTOP_LID_TICKS toward the
+ * target — the item-clip idiom of compiled frame timing. The registry is
+ * consulted once a second (and the open screen's per-row flags with it);
+ * the frames between are pure animation. */
+static void advance_laptop_lid(desk_state *state)
+{
+    int target;
+    if ((state->simulation_tick % (uint64_t)DESK_SIMULATION_HZ) == 1u) {
+        state->laptop_on = desk_laptop_run_any();
+        if (state->mode == DESK_MODE_LAPTOP)
+            laptop_refresh_menu_running(state);
+    }
+    target = state->laptop_on ? DESK_LAPTOP_LID_FRAMES - 1 : 0;
+    if (state->laptop_lid_frame == target) {
+        state->laptop_lid_ticks = 0;
+        return;
+    }
+    state->laptop_lid_ticks += 1;
+    if (state->laptop_lid_ticks < DESK_LAPTOP_LID_TICKS) return;
+    state->laptop_lid_ticks = 0;
+    state->laptop_lid_frame += state->laptop_lid_frame < target ? 1 : -1;
+}
+
 /* Profiles are re-scanned on every open — the same freshness rule as
  * bindings.conf — so an edited profile shows up without a restart. */
 static void laptop_rescan(desk_state *state)
@@ -2237,6 +2278,7 @@ static void laptop_rescan(desk_state *state)
         (void)snprintf(state->laptop_menu_ids[index],
                        sizeof state->laptop_menu_ids[index], "%s",
                        list.ids[index]);
+    laptop_refresh_menu_running(state);
 }
 
 static bool open_laptop_menu(desk_state *state)
@@ -2299,11 +2341,12 @@ static const choice_menu_def choice_menus[] = {
         { "POWER DOWN THE HOUSE", CHOICE_CONFIRM, 0,
           DESK_CONFIRM_POWEROFF, false },
         { "STAY UP", CHOICE_CLOSE, 0, 0, false } } },
-    [DESK_CHOICE_SHED] = { "THE SHED", 4, {
+    /* The fuse box on the wall beside the shed owns settings; the shed
+     * itself stays maintenance, so neither fixture answers for the
+     * other. */
+    [DESK_CHOICE_SHED] = { "THE SHED", 3, {
         { "TUNE THE APPLIANCES", CHOICE_LAUNCH, DESK_TARGET_MAINTENANCE,
           0, false },
-        { "READ THE FUSE BOX", CHOICE_LAUNCH, DESK_TARGET_SETTINGS, 0,
-          false },
         { "SERVICE THE HOUSE", CHOICE_LAUNCH, DESK_TARGET_UPDATE, 0,
           false },
         { "SHUT THE SHED", CHOICE_CLOSE, 0, 0, false } } },
@@ -2868,10 +2911,15 @@ const char *desk_laptop_hint(const desk_state *state)
     if (state->laptop.editing)
         return "TYPE  ENTER KEEP  ESC UNDO";
     switch (state->laptop.page) {
-    case DESK_LAPTOP_PAGE_HOME:
-        return state->laptop_menu_count == 0
-                   ? "NO PROFILES YET - CONFIGURE TO ADD ONE"
-                   : "ENTER OPEN  ESC CLOSE THE LID";
+    case DESK_LAPTOP_PAGE_HOME: {
+        int index;
+        if (state->laptop_menu_count == 0)
+            return "NO PROFILES YET - CONFIGURE TO ADD ONE";
+        for (index = 0; index < state->laptop_menu_count; ++index)
+            if (state->laptop_menu_running[index])
+                return "ENTER OPEN OR CLOSE  ESC CLOSE THE LID";
+        return "ENTER OPEN  ESC CLOSE THE LID";
+    }
     case DESK_LAPTOP_PAGE_DELETE:
         return "ENTER CHOOSE  ESC KEEP";
     default:
@@ -3029,6 +3077,12 @@ const char *desk_laptop_row_value(const desk_state *state, int index)
             return "CURRENT";
         return "";
     case DESK_LAPTOP_PAGE_HOME:
+        /* The run registry's word on each profile: a running session's
+         * row closes it instead of opening a duplicate. */
+        if (index < state->laptop_menu_count &&
+            state->laptop_menu_running[index])
+            return "RUNNING - ENTER CLOSES";
+        break;
     case DESK_LAPTOP_PAGE_PROFILES:
     case DESK_LAPTOP_PAGE_DELETE:
         break;
@@ -3218,6 +3272,18 @@ static bool interact_laptop_home(desk_state *state, const desk_world *world)
     int profiles = state->laptop_menu_count;
 
     if (cursor < profiles) {
+        if (state->laptop_menu_running[cursor]) {
+            /* A live session: Enter closes it rather than opening a
+             * duplicate. The screen stays up; the row flips once the
+             * registry sees the session gone. */
+            (void)snprintf(state->pending_laptop_close,
+                           sizeof state->pending_laptop_close, "%s",
+                           state->laptop_menu_ids[cursor]);
+            state->laptop_close_pending = true;
+            laptop_set_message(state, "Closing the session.");
+            queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+            return true;
+        }
         (void)snprintf(state->pending_laptop,
                        sizeof state->pending_laptop, "%s",
                        state->laptop_menu_ids[cursor]);
@@ -3508,6 +3574,19 @@ bool desk_take_laptop_request(desk_state *state,
                        state->pending_laptop);
     state->laptop_pending = false;
     (void)memset(state->pending_laptop, 0, sizeof state->pending_laptop);
+    return true;
+}
+
+bool desk_take_laptop_close_request(desk_state *state,
+                                    char id[DESK_LAPTOP_ID_CAPACITY])
+{
+    if (!state || !state->laptop_close_pending) return false;
+    if (id != NULL)
+        (void)snprintf(id, DESK_LAPTOP_ID_CAPACITY, "%s",
+                       state->pending_laptop_close);
+    state->laptop_close_pending = false;
+    (void)memset(state->pending_laptop_close, 0,
+                 sizeof state->pending_laptop_close);
     return true;
 }
 

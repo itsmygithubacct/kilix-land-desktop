@@ -107,6 +107,34 @@ bool desk_laptop_save(const desk_laptop_profile *profile, char *error,
  * removed. */
 bool desk_laptop_delete(const char *id, char *error, size_t error_size);
 
+/* ---- run registry ----
+ *
+ * One contract shared by every laptop surface (this desktop, kilix-cap,
+ * `kilix laptop`, and the launcher TUI — spelled out in the kilix
+ * checkout's config/laptop.py): <profiles>/run/<id>.pid holds the ASCII
+ * decimal pid of a pane profile's live session process, one line plus a
+ * trailing newline, written 0600 via a same-directory temp file + rename
+ * at spawn time by whichever surface spawned it. Liveness is a real
+ * process check — kill(pid, 0), where EPERM still counts as alive and a
+ * /proc zombie does not — never the file alone; a stale or unparsable
+ * file is deleted by whichever reader notices it. Desktop profiles are
+ * never tracked: their wrapper exits once the provider tab exists, so
+ * there is no long-lived pid to record. */
+bool desk_laptop_run_directory(char *path, size_t size);
+/* Records a freshly spawned session's pid. */
+bool desk_laptop_run_record(const char *id, long pid);
+/* 1 = running (pid filled in when asked), 0 = not running (a stale file
+ * is cleaned up on the way), -1 = no registry directory or invalid id. */
+int desk_laptop_run_status(const char *id, long *pid);
+/* SIGTERM to the recorded session; the desk's per-second refresh notices
+ * the exit and clears the entry. A session that is already gone counts
+ * as closed. False only for an invalid id or an unsignalable pid. */
+bool desk_laptop_run_terminate(const char *id);
+/* True while any profile session is live — the laptop's power light.
+ * Never creates the profile directory: a machine that has never used
+ * the laptop stays untouched. */
+bool desk_laptop_run_any(void);
+
 /* Headless self-checks over a private temp directory. */
 bool desk_laptop_selftest(void);
 
