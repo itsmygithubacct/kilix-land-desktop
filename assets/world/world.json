@@ -828,6 +828,12 @@
           "target": "mailbox"
         },
         {
+          "id": "fuse-box",
+          "prompt": "Check the fuse box",
+          "rect": { "x": 300, "y": 92, "w": 40, "h": 98 },
+          "target": "settings"
+        },
+        {
           "id": "shed",
           "prompt": "Open the shed",
           "rect": {
