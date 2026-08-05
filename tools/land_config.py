@@ -40,7 +40,18 @@ TARGET_LABELS = {
     "games": "Games", "music": "Music player", "voice": "Voice",
     "trash": "Trash", "mailbox": "Mailbox", "maintenance": "Configuration",
     "wardrobe": "Wardrobe", "bed": "Bed", "status-board": "Status board",
-    "gate-locked": "Locked gate",
+    "gate-locked": "Locked gate", "kettle": "Kettle",
+    "browser": "Text browser",
+    # Choice-panel rows. A binding still applies only to a fixture's own
+    # default row, so these appear here for the label column, not as new
+    # bindable objects.
+    "settings": "Settings", "update": "Update", "catalog": "Programs",
+    "dictation": "Dictation", "voice-help": "Voice status",
+    "sessions": "Sessions", "tmux": "Tmux manager",
+    "mux": "Shared session", "temps": "Thermals", "password": "Password",
+    "manual": "System manual", "recovery": "Recovery guide",
+    "web": "Web browser", "power-logout": "Log out",
+    "power-reboot": "Restart", "power-poweroff": "Shut down",
 }
 
 

@@ -73,6 +73,40 @@ bool desk_laptop_write_session(const desk_laptop_profile *profile,
 size_t desk_laptop_desktop_arguments(const desk_laptop_profile *profile,
                                      const char *arguments[2]);
 
+/* ---- authoring ----
+ *
+ * The in-desktop configuration pages build a profile in memory and hand
+ * it here. Writing goes through the same rules the reader enforces, so a
+ * profile the pages produced can never be one the loader rejects.
+ */
+
+/* No double quotes and no control characters — the two things that could
+ * change how kitty splits a generated session line. */
+bool desk_laptop_text_ok(const char *value);
+/* [user@]host only: a destination can never smuggle options or commands. */
+bool desk_laptop_host_ok(const char *value);
+/* The providers a desktop profile may name, in menu order. */
+size_t desk_laptop_provider_count(void);
+const char *desk_laptop_provider(size_t index);
+
+/* Whole-profile check: a desktop or panes (never both), a name that
+ * fits, contiguous panes, and every value legal. */
+bool desk_laptop_validate(const desk_laptop_profile *profile, char *error,
+                          size_t error_size);
+
+/* Turns a display name into a usable file id, avoiding collisions with
+ * profiles that already exist. */
+bool desk_laptop_make_id(const char *name, char *id, size_t size);
+
+/* Writes <id>.profile 0600 via a same-directory temp file and rename.
+ * Validates first; a rejected profile leaves the file untouched. */
+bool desk_laptop_save(const desk_laptop_profile *profile, char *error,
+                      size_t error_size);
+
+/* Removes <id>.profile. A profile that is already gone counts as
+ * removed. */
+bool desk_laptop_delete(const char *id, char *error, size_t error_size);
+
 /* Headless self-checks over a private temp directory. */
 bool desk_laptop_selftest(void);
 

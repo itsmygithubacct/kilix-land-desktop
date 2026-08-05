@@ -65,8 +65,11 @@
 #define DESK_TOAST_TICKS 180
 #define DESK_DIALOGUE_REVEAL_TICKS_PER_CHAR 2
 #define DESK_PROFILE_SCHEMA 1
-#define DESK_STATUS_LINE_COUNT 6
+#define DESK_STATUS_LINE_COUNT 10
 #define DESK_STATUS_LINE_CAPACITY 64
+/* A fixture's choice panel never grows past this; the panel is sized from
+ * the row count and still has to fit the 480x270 canvas. */
+#define DESK_CHOICE_MAX_ROWS 6
 
 typedef enum desk_cast {
     DESK_CAST_LEGEND = 0,
@@ -97,8 +100,14 @@ typedef enum desk_mode {
     DESK_MODE_CONFIRM = 4,
     DESK_MODE_STATUS = 5,
     DESK_MODE_INVENTORY = 6,
-    DESK_MODE_LAPTOP = 7
+    DESK_MODE_LAPTOP = 7,
+    /* A fixture that offers several intents (the bed's power options, the
+     * shed's maintenance jobs, the phone's two directions). One object =
+     * one intent stays the rule; a choice panel is how an object states
+     * which intents it owns. */
+    DESK_MODE_CHOICE = 8
 } desk_mode;
+#define DESK_MODE_LAST DESK_MODE_CHOICE
 
 /* The laptop menu lists at most this many profiles plus its two fixed
  * rows (PICK UP LAPTOP, CLOSE), so the tallest menu still fits the
@@ -116,8 +125,30 @@ typedef enum desk_wizard_step {
 typedef enum desk_confirm {
     DESK_CONFIRM_NONE = 0,
     DESK_CONFIRM_QUIT = 1,
-    DESK_CONFIRM_CAST_CHANGE = 2
+    DESK_CONFIRM_CAST_CHANGE = 2,
+    /* Session and machine power, each behind the same YES/NO panel the
+     * bed already used for turning in. The argv lives in launcher.c and
+     * mirrors kilix-tui-utils' privileged.py, the fleet's one list. */
+    DESK_CONFIRM_LOGOUT = 3,
+    DESK_CONFIRM_REBOOT = 4,
+    DESK_CONFIRM_POWEROFF = 5
 } desk_confirm;
+
+/* Which fixture's choice panel is open. The menus themselves are compiled
+ * tables in desk.c keyed by the activated object's target, so world data
+ * gains no new vocabulary and per-object bindings keep applying to each
+ * fixture's default row. */
+typedef enum desk_choice_menu {
+    DESK_CHOICE_NONE = 0,
+    DESK_CHOICE_BED = 1,
+    DESK_CHOICE_SHED = 2,
+    DESK_CHOICE_PHONE = 3,
+    DESK_CHOICE_DEV_RIG = 4,
+    DESK_CHOICE_BOOKSHELF = 5,
+    DESK_CHOICE_MONITOR = 6,
+    DESK_CHOICE_COMPUTER = 7,
+    DESK_CHOICE_NOTICE_BOARD = 8
+} desk_choice_menu;
 
 typedef enum desk_graphic {
     DESK_GRAPHIC_LEGEND_PLAYER = 0,
@@ -182,9 +213,29 @@ typedef enum desk_target {
     /* external (serviced by launcher.c). Appended rather than filed with the
      * other external targets because these values are compiled into saved
      * state; renumbering them would repoint existing worlds. */
-    DESK_TARGET_BROWSER = 18
+    DESK_TARGET_BROWSER = 18,
+    /* Parity fixtures (0.1.8). Same append-only rule: new rows go at the
+     * end, existing numbers never move. */
+    DESK_TARGET_SETTINGS = 19,
+    DESK_TARGET_UPDATE = 20,
+    DESK_TARGET_CATALOG = 21,
+    DESK_TARGET_DICTATION = 22,
+    DESK_TARGET_VOICE_HELP = 23,
+    DESK_TARGET_PTY = 24,
+    DESK_TARGET_TMUX = 25,
+    DESK_TARGET_MUX = 26,
+    DESK_TARGET_TEMPS = 27,
+    DESK_TARGET_PASSWORD = 28,
+    DESK_TARGET_MANUAL = 29,
+    DESK_TARGET_RECOVERY = 30,
+    DESK_TARGET_WEB = 31,
+    /* Power actions run detached rather than in a tab: the machine is on
+     * its way down, and a failure has to survive the tab it would close. */
+    DESK_TARGET_POWER_LOGOUT = 32,
+    DESK_TARGET_POWER_REBOOT = 33,
+    DESK_TARGET_POWER_POWEROFF = 34
 } desk_target;
-#define DESK_TARGET_COUNT 19
+#define DESK_TARGET_COUNT 35
 
 typedef struct desk_rect {
     float x;
@@ -293,6 +344,43 @@ typedef enum desk_clip_id {
 } desk_clip_id;
 #define DESK_CLIP_COUNT 5
 
+/* The laptop screen. Opening a set-up laptop hands the whole canvas to
+ * these pages — the machine is the screen, not a panel floating over the
+ * room — and closing the lid gives the house back. HOME keeps the fast
+ * path (Enter on a profile opens that session); everything else lives
+ * behind CONFIGURE PROFILES so authoring never sits in front of use. */
+typedef enum desk_laptop_page {
+    DESK_LAPTOP_PAGE_HOME = 0,
+    DESK_LAPTOP_PAGE_PROFILES = 1, /* configure: pick a profile or add one */
+    DESK_LAPTOP_PAGE_EDIT = 2,     /* one profile's fields */
+    DESK_LAPTOP_PAGE_PANES = 3,    /* its pane list */
+    DESK_LAPTOP_PAGE_PANE = 4,     /* one pane's fields */
+    DESK_LAPTOP_PAGE_PROVIDER = 5, /* which desktop a desktop profile opens */
+    DESK_LAPTOP_PAGE_DELETE = 6    /* delete confirmation */
+} desk_laptop_page;
+#define DESK_LAPTOP_PAGE_LAST DESK_LAPTOP_PAGE_DELETE
+/* Rows on the widest laptop page (EDIT: name, kind, layout/provider,
+ * panes, save, delete, back). */
+#define DESK_LAPTOP_ROWS_MAX (DESK_LAPTOP_MENU_PROFILES + 4)
+
+typedef struct desk_laptop_ui {
+    desk_laptop_page page;
+    int cursor;      /* row cursor on the open page */
+    int home_cursor; /* remembered across a trip through the pages */
+    int pane_index;  /* pane the PANE page edits */
+    /* Field editing is in-place: the row keeps its position and grows a
+     * caret. Committing writes the field, never the file. */
+    bool editing;
+    int edit_row;
+    int edit_length;
+    char edit_buffer[DESK_LAPTOP_VALUE_CAPACITY];
+    desk_laptop_profile working; /* the profile under edit */
+    bool working_loaded;
+    bool working_dirty;  /* edited since the last save */
+    bool creating;       /* a new profile with no file behind it yet */
+    char message[DESK_LAPTOP_ERROR_CAPACITY];
+} desk_laptop_ui;
+
 typedef struct desk_animator {
     desk_clip_id clip;
     int frame;
@@ -362,12 +450,24 @@ typedef struct desk_state {
     /* The set-up laptop's session menu (DESK_MODE_LAPTOP): profile ids
      * scanned when the menu opened, plus PICK UP LAPTOP and CLOSE rows. */
     int laptop_menu_count; /* profiles listed, 0..DESK_LAPTOP_MENU_PROFILES */
-    int laptop_menu_cursor;
     int laptop_menu_item; /* world-item index the open menu belongs to */
     char laptop_menu_ids[DESK_LAPTOP_MENU_PROFILES]
                         [DESK_LAPTOP_ID_CAPACITY];
     bool laptop_pending; /* take-and-clear, like pending_launch */
     char pending_laptop[DESK_LAPTOP_ID_CAPACITY];
+    desk_laptop_ui laptop;
+    /* The open fixture choice panel, its visible rows (conditional rows
+     * are filtered out when the menu opens) and its cursor. */
+    desk_choice_menu choice;
+    int choice_cursor;
+    int choice_count;
+    uint8_t choice_rows[DESK_CHOICE_MAX_ROWS];
+    char choice_object[DESK_ID_CAPACITY]; /* object the panel belongs to */
+    /* Whether the login password is still the shipped default, resolved
+     * once at start-up by launcher.c (the only place allowed to run a
+     * program) and read here to decide whether the notice board grows
+     * its "change the locks" note. */
+    bool default_password;
     bool debug_menu;  /* desktop.conf debug_menu flag, read at pause open */
     bool pause_debug; /* inside the Debug submenu */
     char status_lines[DESK_STATUS_LINE_COUNT][DESK_STATUS_LINE_CAPACITY];
@@ -521,6 +621,20 @@ int desk_pause_item_count(const desk_state *state);
 const char *desk_pause_item(const desk_state *state, int index);
 int desk_laptop_menu_count(const desk_state *state);
 const char *desk_laptop_menu_item(const desk_state *state, int index);
+/* Render-side reads for the laptop screen: the page's title, its rows,
+ * the value column beside a row ("" when the row has none), the footer
+ * hint, and the last message the pages produced. */
+const char *desk_laptop_page_title(const desk_state *state);
+const char *desk_laptop_row_value(const desk_state *state, int index);
+const char *desk_laptop_hint(const desk_state *state);
+const char *desk_laptop_message(const desk_state *state);
+/* True while a laptop row is being typed into, so the host routes text
+ * and backspaces here the way it does for the wizard's name step. */
+bool desk_text_entry_active(const desk_state *state);
+/* Fixture choice panels. */
+int desk_choice_count(const desk_state *state);
+const char *desk_choice_item(const desk_state *state, int index);
+const char *desk_choice_title(const desk_state *state);
 
 bool desk_profile_load(desk_profile *profile);
 bool desk_profile_save(const desk_profile *profile);
@@ -528,6 +642,10 @@ bool desk_profile_reset(void); /* --profile-test helper */
 
 /* launcher.c — target registry and request servicing */
 void desk_launcher_init(desk_launcher *launcher);
+/* True only when the login password can be confirmed to be the shipped
+ * default. Runs the Plebian-OS helper once; every uncertainty answers
+ * false. launcher.c owns it because desk.c never runs a program. */
+bool desk_launcher_password_is_default(void);
 bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
                            const desk_world *world);
 desk_target desk_target_from_string(const char *name);

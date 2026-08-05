@@ -24,28 +24,48 @@ extern char **environ;
 typedef struct target_entry {
     const char *name;
     const char *label;
+    /* Whether servicing this row runs a program. Internal rows are
+     * handled inside desk.c and never reach a spawn. */
+    bool external;
 } target_entry;
 
 static const target_entry target_table[DESK_TARGET_COUNT] = {
-    [DESK_TARGET_NONE] = { "", "" },
-    [DESK_TARGET_TERMINAL] = { "terminal", "Terminal" },
-    [DESK_TARGET_CODING_AGENTS] = { "coding-agents", "Coding agents" },
-    [DESK_TARGET_FILES] = { "files", "File manager" },
-    [DESK_TARGET_MANUALS] = { "manuals", "Manuals" },
-    [DESK_TARGET_MODELS] = { "models", "Models" },
-    [DESK_TARGET_GAMES] = { "games", "Games" },
-    [DESK_TARGET_MUSIC] = { "music", "Music player" },
-    [DESK_TARGET_VOICE] = { "voice", "Voice" },
-    [DESK_TARGET_TRASH] = { "trash", "Trash" },
-    [DESK_TARGET_MAILBOX] = { "mailbox", "Mailbox" },
-    [DESK_TARGET_MAINTENANCE] = { "maintenance", "Configuration" },
-    [DESK_TARGET_WARDROBE] = { "wardrobe", "Wardrobe" },
-    [DESK_TARGET_BED] = { "bed", "Bed" },
-    [DESK_TARGET_STATUS_BOARD] = { "status-board", "Status board" },
-    [DESK_TARGET_GATE_LOCKED] = { "gate-locked", "Locked gate" },
-    [DESK_TARGET_WALK_EDITOR] = { "walk-editor", "Walk editor" },
-    [DESK_TARGET_KETTLE] = { "kettle", "Kettle" },
-    [DESK_TARGET_BROWSER] = { "browser", "Text browser" }
+    [DESK_TARGET_NONE] = { "", "", false },
+    [DESK_TARGET_TERMINAL] = { "terminal", "Terminal", true },
+    [DESK_TARGET_CODING_AGENTS] = { "coding-agents", "Coding agents",
+                                    true },
+    [DESK_TARGET_FILES] = { "files", "File manager", true },
+    [DESK_TARGET_MANUALS] = { "manuals", "Manuals", true },
+    [DESK_TARGET_MODELS] = { "models", "Models", true },
+    [DESK_TARGET_GAMES] = { "games", "Games", true },
+    [DESK_TARGET_MUSIC] = { "music", "Music player", true },
+    [DESK_TARGET_VOICE] = { "voice", "Voice", true },
+    [DESK_TARGET_TRASH] = { "trash", "Trash", true },
+    [DESK_TARGET_MAILBOX] = { "mailbox", "Mailbox", true },
+    [DESK_TARGET_MAINTENANCE] = { "maintenance", "Configuration", true },
+    [DESK_TARGET_WARDROBE] = { "wardrobe", "Wardrobe", false },
+    [DESK_TARGET_BED] = { "bed", "Bed", false },
+    [DESK_TARGET_STATUS_BOARD] = { "status-board", "Status board", false },
+    [DESK_TARGET_GATE_LOCKED] = { "gate-locked", "Locked gate", false },
+    [DESK_TARGET_WALK_EDITOR] = { "walk-editor", "Walk editor", true },
+    [DESK_TARGET_KETTLE] = { "kettle", "Kettle", false },
+    [DESK_TARGET_BROWSER] = { "browser", "Text browser", true },
+    [DESK_TARGET_SETTINGS] = { "settings", "Settings", true },
+    [DESK_TARGET_UPDATE] = { "update", "Update", true },
+    [DESK_TARGET_CATALOG] = { "catalog", "Programs", true },
+    [DESK_TARGET_DICTATION] = { "dictation", "Dictation", true },
+    [DESK_TARGET_VOICE_HELP] = { "voice-help", "Voice status", true },
+    [DESK_TARGET_PTY] = { "sessions", "Sessions", true },
+    [DESK_TARGET_TMUX] = { "tmux", "Tmux manager", true },
+    [DESK_TARGET_MUX] = { "mux", "Shared session", true },
+    [DESK_TARGET_TEMPS] = { "temps", "Thermals", true },
+    [DESK_TARGET_PASSWORD] = { "password", "Password", true },
+    [DESK_TARGET_MANUAL] = { "manual", "System manual", true },
+    [DESK_TARGET_RECOVERY] = { "recovery", "Recovery guide", true },
+    [DESK_TARGET_WEB] = { "web", "Web browser", true },
+    [DESK_TARGET_POWER_LOGOUT] = { "power-logout", "Log out", true },
+    [DESK_TARGET_POWER_REBOOT] = { "power-reboot", "Restart", true },
+    [DESK_TARGET_POWER_POWEROFF] = { "power-poweroff", "Shut down", true }
 };
 
 desk_target desk_target_from_string(const char *name)
@@ -73,10 +93,18 @@ const char *desk_target_label(desk_target target)
 
 bool desk_target_is_external(desk_target target)
 {
-    return (target >= DESK_TARGET_TERMINAL &&
-            target <= DESK_TARGET_MAINTENANCE) ||
-           target == DESK_TARGET_WALK_EDITOR ||
-           target == DESK_TARGET_BROWSER;
+    if ((int)target < 0 || (int)target >= DESK_TARGET_COUNT) return false;
+    return target_table[target].external;
+}
+
+/* Power actions are the one family that does not open a tab: the machine
+ * is on its way down, and a tab would close before anyone could read a
+ * refusal. They run detached and report through the toast. */
+static bool target_is_power(desk_target target)
+{
+    return target == DESK_TARGET_POWER_LOGOUT ||
+           target == DESK_TARGET_POWER_REBOOT ||
+           target == DESK_TARGET_POWER_POWEROFF;
 }
 
 void desk_launcher_init(desk_launcher *launcher)
@@ -178,6 +206,90 @@ static bool resolve_file_manager(char *path, size_t size)
         if (which(candidates[index], path, size)) return true;
     }
     return false;
+}
+
+/* Documentation shelves: the first readable candidate wins, exactly like
+ * the file-manager table, so a source checkout, an installed prefix and a
+ * relocated copy all resolve without the desktop knowing which it has. */
+static bool first_readable(const char *const *candidates, size_t count,
+                           char *path, size_t size)
+{
+    size_t index;
+    for (index = 0u; index < count; ++index) {
+        if (!candidates[index] || candidates[index][0] == '\0') continue;
+        if ((size_t)snprintf(path, size, "%s", candidates[index]) >= size)
+            continue;
+        if (access(path, R_OK) == 0) return true;
+    }
+    return false;
+}
+
+static bool resolve_pager(char *path, size_t size)
+{
+    return which("less", path, size) || which("more", path, size);
+}
+
+/* $KILIX_HOME/README.md and friends: the stack's own manual, whichever
+ * copy this machine has. */
+static bool resolve_manual(char *path, size_t size)
+{
+    char installed[LAUNCH_PATH_CAPACITY];
+    char source[LAUNCH_PATH_CAPACITY];
+    char desktop[LAUNCH_PATH_CAPACITY];
+    const char *candidates[4];
+    const char *base;
+    size_t count = 0u;
+
+    base = getenv("KILIX_HOME");
+    if (base && base[0] != '\0' &&
+        (size_t)snprintf(installed, sizeof installed, "%s/README.md",
+                         base) < sizeof installed)
+        candidates[count++] = installed;
+    base = getenv("GPU_TERMINAL_SOURCE_HOME");
+    if (base && base[0] != '\0' &&
+        (size_t)snprintf(source, sizeof source, "%s/kilix/README.md",
+                         base) < sizeof source)
+        candidates[count++] = source;
+    candidates[count++] = "/usr/local/share/doc/kilix/README.md";
+    base = getenv("KILIX_LAND_DESKTOP_ASSETS");
+    if (!base || base[0] == '\0') base = ".";
+    if ((size_t)snprintf(desktop, sizeof desktop, "%s/README.md", base) <
+        sizeof desktop)
+        candidates[count++] = desktop;
+    return first_readable(candidates, count, path, size);
+}
+
+/* Pleb's recovery guide, in the same installed-then-source order the
+ * kilix-95 Start menu uses. */
+static bool resolve_recovery_guide(char *path, size_t size)
+{
+    char source[LAUNCH_PATH_CAPACITY];
+    const char *candidates[3];
+    const char *base;
+    size_t count = 0u;
+
+    base = getenv("PLEB_RECOVERY_DOC_DST");
+    if (base && base[0] != '\0') candidates[count++] = base;
+    candidates[count++] = "/usr/local/share/doc/pleb/RECOVERY.md";
+    base = getenv("GPU_TERMINAL_SOURCE_HOME");
+    if (base && base[0] != '\0' &&
+        (size_t)snprintf(source, sizeof source, "%s/pleb/docs/RECOVERY.md",
+                         base) < sizeof source)
+        candidates[count++] = source;
+    return first_readable(candidates, count, path, size);
+}
+
+/* A tool shipped beside this desktop (tools/<name>). Same convention as
+ * main.c's asset_root(): the env names the checkout root that CONTAINS
+ * assets/ and tools/. */
+static bool resolve_own_tool(const char *name, char *path, size_t size)
+{
+    const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
+    int written;
+    if (!root || root[0] == '\0') root = ".";
+    written = snprintf(path, size, "%s/tools/%s", root, name);
+    return written > 0 && (size_t)written < size &&
+           access(path, R_OK) == 0;
 }
 
 /* Open only a private, user-owned binding store. The editor creates this
@@ -526,6 +638,11 @@ static void service_laptop(desk_launcher *launcher, desk_state *state,
         command[command_count++] = "--detach";
         command[command_count++] = "--session";
         command[command_count++] = session_path;
+        /* The laptop opens a machine, not a window: the session takes
+         * the screen the way this desktop did. kilix forwards anything
+         * it does not recognise straight to kitty. Desktop profiles skip
+         * this — a provider owns its own presentation. */
+        command[command_count++] = "--start-as=fullscreen";
     }
     if (spawn_detached(command, command_count))
         (void)snprintf(message, sizeof message, "Opened %s", profile.name);
@@ -533,6 +650,103 @@ static void service_laptop(desk_launcher *launcher, desk_state *state,
         (void)snprintf(message, sizeof message, "Could not open %s",
                        profile.name);
     set_status(launcher, state, message);
+}
+
+/* Session and machine power. The argv list is the fleet's one list —
+ * kilix-tui-utils' privileged.py names exactly these three — mirrored
+ * rather than imported because a C desktop cannot import Python. Nothing
+ * here confirms: desk.c already asked, in the house's own words. */
+static void service_power(desk_launcher *launcher, desk_state *state,
+                          desk_target target)
+{
+    char resolved[LAUNCH_PATH_CAPACITY];
+    const char *command[LAUNCH_COMMAND_MAX];
+    size_t command_count = 0u;
+    const char *done;
+    const char *failed;
+
+    if (target == DESK_TARGET_POWER_LOGOUT) {
+        const char *session = getenv("XDG_SESSION_ID");
+        if (!session || session[0] == '\0') {
+            set_status(launcher, state, "There is no session to leave.");
+            return;
+        }
+        if (!which("loginctl", resolved, sizeof resolved)) {
+            set_status(launcher, state, "loginctl is not installed.");
+            return;
+        }
+        command[command_count++] = resolved;
+        command[command_count++] = "terminate-session";
+        command[command_count++] = session;
+        done = "Logging out.";
+        failed = "The session would not end.";
+    } else {
+        if (!which("systemctl", resolved, sizeof resolved)) {
+            set_status(launcher, state, "systemctl is not installed.");
+            return;
+        }
+        command[command_count++] = resolved;
+        if (target == DESK_TARGET_POWER_REBOOT) {
+            command[command_count++] = "reboot";
+            done = "Waking anew.";
+            failed = "The house would not restart.";
+        } else {
+            command[command_count++] = "poweroff";
+            done = "Powering down the house.";
+            failed = "The house would not power down.";
+        }
+    }
+    set_status(launcher, state,
+               spawn_detached(command, command_count) ? done : failed);
+}
+
+/* The Plebian-OS default-password helper, asked once at start-up. True
+ * only when it CONFIRMS the login password is still the shipped one; a
+ * missing helper, a missing sudo rule, a timeout or an error all read as
+ * false, so the note never appears spuriously. */
+bool desk_launcher_password_is_default(void)
+{
+    static const char helper[] = "/usr/local/sbin/plebian-os-passwd";
+    char sudo_path[LAUNCH_PATH_CAPACITY];
+    char *argv[5];
+    posix_spawn_file_actions_t actions;
+    pid_t pid = -1;
+    size_t attempt;
+
+    if (access(helper, X_OK) != 0) return false;
+    if (!which("sudo", sudo_path, sizeof sudo_path)) return false;
+    argv[0] = sudo_path;
+    argv[1] = (char *)"-n";
+    argv[2] = (char *)helper;
+    argv[3] = (char *)"check";
+    argv[4] = NULL;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
+                                         "/dev/null", O_RDONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0 ||
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                         "/dev/null", O_WRONLY, 0) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+    if (posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+    (void)posix_spawn_file_actions_destroy(&actions);
+    /* Two seconds, then give up and answer "cannot confirm". */
+    for (attempt = 0u; attempt < 200u; ++attempt) {
+        int status = 0;
+        pid_t reaped = waitpid(pid, &status, WNOHANG);
+        struct timespec delay = { 0, 10L * 1000L * 1000L };
+        if (reaped == pid)
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (reaped < 0) return false;
+        (void)nanosleep(&delay, NULL);
+    }
+    track_pending_child(pid);
+    return false;
 }
 
 /* Checked on every activation, never cached. */
@@ -643,6 +857,13 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
         set_status(launcher, state, "External apps are disabled.");
         return true;
     }
+    /* Power runs without a tab, so it also runs without the tab gate: a
+     * desktop that has lost remote control must still be able to shut
+     * the machine down. */
+    if (target_is_power(target)) {
+        service_power(launcher, state, target);
+        return true;
+    }
     if (!tab_session_ready()) {
         set_status(launcher, state,
                    "Kilix session not detected - launch inside kilix");
@@ -709,21 +930,12 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
         command_count = tool_or_kilix("kilix-bonsai", "bonsai",
                                       resolved, sizeof resolved, command);
         break;
-    case DESK_TARGET_GAMES: {
-        /* Same convention as main.c's asset_root(): the env names the
-         * checkout root that CONTAINS assets/ and tools/. */
-        const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
-        int written;
-        if (!root || root[0] == '\0') root = ".";
-        written = snprintf(resolved, sizeof resolved,
-                           "%s/tools/land_games.py", root);
-        if (written > 0 && (size_t)written < sizeof resolved &&
-            access(resolved, R_OK) == 0) {
+    case DESK_TARGET_GAMES:
+        if (resolve_own_tool("land_games.py", resolved, sizeof resolved)) {
             command[command_count++] = "python3";
             command[command_count++] = resolved;
         }
         break;
-    }
     case DESK_TARGET_MUSIC:
         command_count = tool_or_kilix("kilix-amp", "amp",
                                       resolved, sizeof resolved, command);
@@ -757,31 +969,95 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
         command_count = tool_or_kilix("kilix-memory", "memory",
                                       resolved, sizeof resolved, command);
         break;
-    case DESK_TARGET_MAINTENANCE: {
+    case DESK_TARGET_MAINTENANCE:
         /* The shed opens the desktop's own configuration TUI. */
-        const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
-        int written;
-        if (!root || root[0] == '\0') root = ".";
-        written = snprintf(resolved, sizeof resolved,
-                           "%s/tools/land_config.py", root);
-        if (written > 0 && (size_t)written < sizeof resolved &&
-            access(resolved, R_OK) == 0) {
+        if (resolve_own_tool("land_config.py", resolved, sizeof resolved)) {
             command[command_count++] = "python3";
             command[command_count++] = resolved;
         }
         break;
+    case DESK_TARGET_SETTINGS:
+        command_count = tool_or_kilix("kilix-settings", "settings",
+                                      resolved, sizeof resolved, command);
+        break;
+    case DESK_TARGET_UPDATE:
+        /* The best updater this machine has: the Plebian-OS control TUI
+         * owns the whole stack, and `kilix update` is the fallback for a
+         * box that only installed Kilix. */
+        if (which("plebian-os", resolved, sizeof resolved))
+            command[command_count++] = resolved;
+        else
+            command_count = kilix_command(resolved, sizeof resolved,
+                                          "update", command);
+        break;
+    case DESK_TARGET_CATALOG:
+        /* A host-owned catalog wins when one exists; the desktop's own
+         * tool is what makes a land-only box able to run anything at
+         * all. No `kilix launcher` rung: an unknown subcommand would
+         * consume the fallback. */
+        if (which("kilix-launcher", resolved, sizeof resolved)) {
+            command[command_count++] = resolved;
+        } else if (resolve_own_tool("land_catalog.py", resolved,
+                                    sizeof resolved)) {
+            command[command_count++] = "python3";
+            command[command_count++] = resolved;
+        }
+        break;
+    case DESK_TARGET_DICTATION:
+        command_count = tool_or_kilix("kilix-stt", "stt", resolved,
+                                      sizeof resolved, command);
+        break;
+    case DESK_TARGET_VOICE_HELP:
+        command_count = kilix_command(resolved, sizeof resolved, "voice",
+                                      command);
+        if (command_count > 0u) command[command_count++] = "status";
+        break;
+    case DESK_TARGET_PTY:
+        command_count = tool_or_kilix("kilix-pty", "pty", resolved,
+                                      sizeof resolved, command);
+        break;
+    case DESK_TARGET_TMUX:
+        command_count = tool_or_kilix("tmux-tui", "tmux", resolved,
+                                      sizeof resolved, command);
+        break;
+    case DESK_TARGET_MUX:
+        command_count = kilix_command(resolved, sizeof resolved, "mux",
+                                      command);
+        break;
+    case DESK_TARGET_TEMPS:
+        command_count = tool_or_kilix("kilix-temps", "temps", resolved,
+                                      sizeof resolved, command);
+        break;
+    case DESK_TARGET_PASSWORD:
+        if (which("passwd", resolved, sizeof resolved))
+            command[command_count++] = resolved;
+        break;
+    case DESK_TARGET_MANUAL:
+    case DESK_TARGET_RECOVERY: {
+        static char document[LAUNCH_PATH_CAPACITY];
+        bool found = target == DESK_TARGET_MANUAL
+                         ? resolve_manual(document, sizeof document)
+                         : resolve_recovery_guide(document,
+                                                  sizeof document);
+        if (found && resolve_pager(resolved, sizeof resolved)) {
+            command[command_count++] = resolved;
+            command[command_count++] = document;
+        }
+        break;
     }
+    case DESK_TARGET_WEB:
+        /* `kilix open-url` picks a real browser when the machine has one
+         * and renders in a pane when it does not — the same containment
+         * kilix-95 uses by default. */
+        command_count = kilix_command(resolved, sizeof resolved,
+                                      "open-url", command);
+        break;
     case DESK_TARGET_WALK_EDITOR: {
         static const char *const style_directories[DESK_CAST_COUNT] = {
             "legend", "chumrunner", "fantasy", "pleb-bound"
         };
-        const char *root = getenv("KILIX_LAND_DESKTOP_ASSETS");
-        int written;
-        if (!root || root[0] == '\0') root = ".";
-        written = snprintf(resolved, sizeof resolved,
-                           "%s/tools/walk_editor.py", root);
-        if (written > 0 && (size_t)written < sizeof resolved &&
-            access(resolved, R_OK) == 0) {
+        if (resolve_own_tool("walk_editor.py", resolved,
+                             sizeof resolved)) {
             command[command_count++] = "python3";
             command[command_count++] = resolved;
             command[command_count++] = "--style";
@@ -797,6 +1073,12 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
         if (target == DESK_TARGET_FILES || target == DESK_TARGET_TRASH)
             (void)snprintf(message, sizeof message,
                            "No file manager is installed");
+        else if (target == DESK_TARGET_MANUAL)
+            (void)snprintf(message, sizeof message,
+                           "That shelf is empty on this machine");
+        else if (target == DESK_TARGET_RECOVERY)
+            (void)snprintf(message, sizeof message,
+                           "The recovery guide is not installed");
         else
             (void)snprintf(message, sizeof message, "%s is not installed",
                            label);

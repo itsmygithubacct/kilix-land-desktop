@@ -242,14 +242,18 @@ static bool valid_ssh_destination(const char *value)
     return true;
 }
 
+/* The providers a desktop profile may name. One list: the parser checks
+ * against it and the configuration pages offer it. */
+static const char *const laptop_providers[] = {
+    "desktop", "95", "xp", "cap", "tui", "land"
+};
+
 static bool known_desktop(const char *word)
 {
-    static const char *const providers[] = {
-        "desktop", "95", "xp", "cap", "tui", "land"
-    };
     size_t i;
-    for (i = 0; i < sizeof providers / sizeof providers[0]; i++)
-        if (strcmp(word, providers[i]) == 0) return true;
+    for (i = 0; i < sizeof laptop_providers / sizeof laptop_providers[0];
+         i++)
+        if (strcmp(word, laptop_providers[i]) == 0) return true;
     return false;
 }
 
@@ -447,6 +451,249 @@ size_t desk_laptop_desktop_arguments(const desk_laptop_profile *profile,
     }
     arguments[0] = profile->desktop;
     return 1;
+}
+
+/* ---- authoring ---- */
+
+bool desk_laptop_text_ok(const char *value)
+{
+    return value != NULL && valid_value(value);
+}
+
+bool desk_laptop_host_ok(const char *value)
+{
+    return value != NULL && valid_ssh_destination(value);
+}
+
+size_t desk_laptop_provider_count(void)
+{
+    return sizeof laptop_providers / sizeof laptop_providers[0];
+}
+
+const char *desk_laptop_provider(size_t index)
+{
+    return index < desk_laptop_provider_count() ? laptop_providers[index]
+                                                : "";
+}
+
+bool desk_laptop_validate(const desk_laptop_profile *profile, char *error,
+                          size_t error_size)
+{
+    int i;
+
+    set_error(error, error_size, "");
+    if (profile == NULL) {
+        set_error(error, error_size, "There is no profile to save.");
+        return false;
+    }
+    if (!valid_id(profile->id)) {
+        set_error(error, error_size, "That profile name is not valid.");
+        return false;
+    }
+    if (profile->name[0] == '\0' ||
+        strlen(profile->name) >= sizeof profile->name ||
+        !valid_value(profile->name)) {
+        set_error(error, error_size, "The profile name will not fit.");
+        return false;
+    }
+    if (profile->desktop[0] != '\0') {
+        if (profile->pane_count != 0) {
+            set_error(error, error_size,
+                      "A profile is a desktop or panes, not both.");
+            return false;
+        }
+        if (!known_desktop(profile->desktop)) {
+            set_error(error, error_size,
+                      "desktop= must name a kilix provider.");
+            return false;
+        }
+        return true;
+    }
+    if (profile->pane_count < 1 ||
+        profile->pane_count > DESK_LAPTOP_PANES_MAX) {
+        set_error(error, error_size, "A profile needs at least one pane.");
+        return false;
+    }
+    for (i = 0; i < profile->pane_count; i++) {
+        const desk_laptop_pane *pane = &profile->panes[i];
+        if (!valid_value(pane->title) || !valid_value(pane->cwd) ||
+            !valid_value(pane->cmd)) {
+            set_error(error, error_size,
+                      "Panes cannot hold quotes or control characters.");
+            return false;
+        }
+        if (pane->ssh[0] != '\0' && !valid_ssh_destination(pane->ssh)) {
+            set_error(error, error_size,
+                      "ssh destinations are [user@]host only.");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool profile_exists(const char *id)
+{
+    char directory[PATH_MAX];
+    char path[PATH_MAX];
+    struct stat info;
+    if (!desk_laptop_directory(directory, sizeof directory) ||
+        !format_text(path, sizeof path, "%s/%s.profile", directory, id))
+        return false;
+    return stat(path, &info) == 0;
+}
+
+bool desk_laptop_make_id(const char *name, char *id, size_t size)
+{
+    size_t length = 0;
+    size_t i;
+    char base[DESK_LAPTOP_ID_CAPACITY];
+
+    if (name == NULL || id == NULL || size == 0) return false;
+    for (i = 0; name[i] != '\0' && length + 1 < sizeof base; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+            c == '_' || c == '.') {
+            base[length++] = c;
+        } else if (c == ' ') {
+            /* One dash between words, never a leading or doubled one. */
+            if (length > 0 && base[length - 1] != '-') base[length++] = '-';
+        }
+    }
+    while (length > 0 && (base[length - 1] == '-' ||
+                          base[length - 1] == '.'))
+        length--;
+    base[length] = '\0';
+    if (!valid_id(base)) (void)copy_text(base, sizeof base, "session");
+    if (!copy_text(id, size, base)) return false;
+    if (!profile_exists(id)) return true;
+    /* Taken: session, session-2, session-3 … */
+    for (i = 2; i < 100; i++) {
+        char candidate[DESK_LAPTOP_ID_CAPACITY];
+        char suffix[8];
+        (void)snprintf(suffix, sizeof suffix, "-%d", (int)i);
+        if (strlen(base) + strlen(suffix) >= sizeof candidate) {
+            base[sizeof candidate - strlen(suffix) - 1] = '\0';
+        }
+        if (!format_text(candidate, sizeof candidate, "%s%s", base,
+                         suffix))
+            return false;
+        if (!profile_exists(candidate))
+            return copy_text(id, size, candidate);
+    }
+    return false;
+}
+
+bool desk_laptop_save(const desk_laptop_profile *profile, char *error,
+                      size_t error_size)
+{
+    char directory[PATH_MAX];
+    char path[PATH_MAX];
+    char text[DESK_LAPTOP_FILE_CAPACITY];
+    size_t length = 0;
+    int i;
+    int written;
+
+    if (!desk_laptop_validate(profile, error, error_size)) return false;
+    if (!desk_laptop_directory(directory, sizeof directory) ||
+        !ensure_directory(directory) ||
+        !format_text(path, sizeof path, "%s/%s.profile", directory,
+                     profile->id)) {
+        set_error(error, error_size, "No laptop profile directory.");
+        return false;
+    }
+    written = snprintf(text, sizeof text,
+                       "# Written by the laptop's configuration pages.\n"
+                       "name=%s\n", profile->name);
+    if (written < 0 || (size_t)written >= sizeof text) {
+        set_error(error, error_size, "The profile is too large.");
+        return false;
+    }
+    length = (size_t)written;
+    if (profile->desktop[0] != '\0') {
+        written = snprintf(text + length, sizeof text - length,
+                           "desktop=%s\n", profile->desktop);
+        if (written < 0 || (size_t)written >= sizeof text - length) {
+            set_error(error, error_size, "The profile is too large.");
+            return false;
+        }
+        length += (size_t)written;
+    } else {
+        written = snprintf(text + length, sizeof text - length,
+                           "layout=%s\n",
+                           profile->tabs ? "tabs" : "splits");
+        if (written < 0 || (size_t)written >= sizeof text - length) {
+            set_error(error, error_size, "The profile is too large.");
+            return false;
+        }
+        length += (size_t)written;
+        for (i = 0; i < profile->pane_count; i++) {
+            const desk_laptop_pane *pane = &profile->panes[i];
+            struct {
+                const char *key;
+                const char *value;
+            } fields[4] = {
+                { "title", pane->title }, { "cwd", pane->cwd },
+                { "ssh", pane->ssh },     { "cmd", pane->cmd }
+            };
+            size_t field;
+            for (field = 0; field < 4; field++) {
+                if (fields[field].value[0] == '\0') continue;
+                written = snprintf(text + length, sizeof text - length,
+                                   "pane.%d.%s=%s\n", i + 1,
+                                   fields[field].key,
+                                   fields[field].value);
+                if (written < 0 ||
+                    (size_t)written >= sizeof text - length) {
+                    set_error(error, error_size,
+                              "The profile is too large.");
+                    return false;
+                }
+                length += (size_t)written;
+            }
+            /* A pane with nothing set still has to exist, or the reader
+             * would see a gap in the numbering. */
+            if (pane->title[0] == '\0' && pane->cwd[0] == '\0' &&
+                pane->ssh[0] == '\0' && pane->cmd[0] == '\0') {
+                written = snprintf(text + length, sizeof text - length,
+                                   "pane.%d.cmd=\n", i + 1);
+                if (written < 0 ||
+                    (size_t)written >= sizeof text - length) {
+                    set_error(error, error_size,
+                              "The profile is too large.");
+                    return false;
+                }
+                length += (size_t)written;
+            }
+        }
+    }
+    if (!write_private_file(path, text, length)) {
+        set_error(error, error_size, "The profile cannot be written.");
+        return false;
+    }
+    return true;
+}
+
+bool desk_laptop_delete(const char *id, char *error, size_t error_size)
+{
+    char directory[PATH_MAX];
+    char path[PATH_MAX];
+
+    set_error(error, error_size, "");
+    if (!valid_id(id)) {
+        set_error(error, error_size, "That profile name is not valid.");
+        return false;
+    }
+    if (!desk_laptop_directory(directory, sizeof directory) ||
+        !format_text(path, sizeof path, "%s/%s.profile", directory, id)) {
+        set_error(error, error_size, "No laptop profile directory.");
+        return false;
+    }
+    if (unlink(path) != 0 && errno != ENOENT) {
+        set_error(error, error_size, "That profile cannot be removed.");
+        return false;
+    }
+    return true;
 }
 
 typedef struct session_text {

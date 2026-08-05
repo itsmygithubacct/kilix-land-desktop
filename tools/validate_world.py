@@ -40,6 +40,12 @@ TARGETS = {
     "music", "voice", "trash", "mailbox", "maintenance",
     "wardrobe", "bed", "status-board", "gate-locked", "walk-editor",
     "kettle", "browser",
+    # Rows a fixture's choice panel adds. They are never authored on an
+    # object — desk.c reaches them from a panel — but the registry is one
+    # vocabulary, so the validator knows them too.
+    "settings", "update", "catalog", "dictation", "voice-help",
+    "sessions", "tmux", "mux", "temps", "password", "manual", "recovery",
+    "web", "power-logout", "power-reboot", "power-poweroff",
 }
 
 

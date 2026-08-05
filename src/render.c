@@ -1201,7 +1201,7 @@ static void draw_dialogue(ki_td_soft_renderer *renderer,
 static void draw_pause(ki_td_soft_renderer *renderer, const ki_td_view *view,
                        sr_canvas *canvas, const desk_state *state)
 {
-    const char *items[4];
+    const char *items[5];
     kilix_ui_style outer_style;
     kilix_ui_style list_style;
     kilix_ui_focus focus;
@@ -1211,7 +1211,7 @@ static void draw_pause(ki_td_soft_renderer *renderer, const ki_td_view *view,
     int index;
     int panel_height;
     if (count < 1) count = 1;
-    if (count > 4) count = 4;
+    if (count > 5) count = 5;
     for (index = 0; index < count; ++index)
         items[index] = desk_pause_item(state, index);
     panel_height = 48 + count * 20;
@@ -1245,28 +1245,30 @@ static void draw_pause(ki_td_soft_renderer *renderer, const ki_td_view *view,
                 COLOR_MUTED, 1);
 }
 
-/* The set-up laptop's session menu: the pause panel's dress, sized to the
- * scanned profile rows plus the two fixed rows. */
-static void draw_laptop_menu(ki_td_soft_renderer *renderer,
-                             const ki_td_view *view, sr_canvas *canvas,
-                             const desk_state *state)
+/* A fixture's choice panel: the pause panel's dress, titled with the
+ * fixture rather than the desktop, and sized to its rows. */
+static void draw_choice(ki_td_soft_renderer *renderer,
+                        const ki_td_view *view, sr_canvas *canvas,
+                        const desk_state *state)
 {
-    const char *items[DESK_LAPTOP_MENU_PROFILES + 2];
+    const char *items[DESK_CHOICE_MAX_ROWS];
     kilix_ui_style outer_style;
     kilix_ui_style list_style;
     kilix_ui_focus focus;
     uint32_t accent = desk_actor_color(visible_cast(state),
                                        DESK_ACTOR_HERO);
-    int count = desk_laptop_menu_count(state);
+    int count = desk_choice_count(state);
     int index;
     int panel_height;
     int panel_y;
-    if (count < 2) count = 2;
-    if (count > DESK_LAPTOP_MENU_PROFILES + 2)
-        count = DESK_LAPTOP_MENU_PROFILES + 2;
+
+    if (count < 1) return;
+    if (count > DESK_CHOICE_MAX_ROWS) count = DESK_CHOICE_MAX_ROWS;
     for (index = 0; index < count; ++index)
-        items[index] = desk_laptop_menu_item(state, index);
-    panel_height = 48 + count * 20;
+        items[index] = desk_choice_item(state, index);
+    /* Sized so the hint line clears the border rather than sitting on
+     * it, which the taller row counts here would otherwise do. */
+    panel_height = 56 + count * 20;
     panel_y = (DESK_LOGICAL_HEIGHT - panel_height) / 2;
     if (panel_y < 2) panel_y = 2;
     ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
@@ -1281,26 +1283,147 @@ static void draw_laptop_menu(ki_td_soft_renderer *renderer,
     list_style.row_height = 20;
     list_style.padding = 5;
     kilix_ui_focus_init(&focus, (uint32_t)count, (uint32_t)count);
-    focus.selected = clamp_cursor(state->laptop_menu_cursor,
-                                  (uint32_t)count);
+    focus.selected = clamp_cursor(state->choice_cursor, (uint32_t)count);
     kilix_ui_draw_panel(renderer, view,
-                        (ki_td_rect){152, panel_y, 176, panel_height},
+                        (ki_td_rect){140, panel_y, 200, panel_height},
                         &outer_style, NULL);
-    ki_td_soft_fill_rect(renderer, view, 155.0f, (float)(panel_y + 3),
-                         170.0f, 3.0f, accent, 1.0f);
-    center_text(canvas, view, 240.0f, (float)(panel_y + 10), "LAPTOP",
-                COLOR_INK, text_scale(view));
+    ki_td_soft_fill_rect(renderer, view, 143.0f, (float)(panel_y + 3),
+                         194.0f, 3.0f, accent, 1.0f);
+    center_text(canvas, view, 240.0f, (float)(panel_y + 10),
+                desk_choice_title(state), COLOR_INK, text_scale(view));
     kilix_ui_draw_list(renderer, view,
-                       (ki_td_rect){164, panel_y + 24, 152,
+                       (ki_td_rect){152, panel_y + 24, 176,
                                     count * 20 + 10},
                        &list_style, NULL, &focus, items, NULL,
                        (size_t)count);
     center_text(canvas, view, 240.0f,
-                (float)(panel_y + panel_height - 11),
-                state->laptop_menu_count == 0
-                    ? "NO PROFILES YET - SEE DOCS/APPS.MD"
-                    : "ENTER OPEN  ESC CLOSE",
-                COLOR_MUTED, 1);
+                (float)(panel_y + panel_height - 18),
+                "ENTER CHOOSE  ESC BACK", COLOR_MUTED, 1);
+}
+
+#define LAPTOP_SCREEN_MARGIN 10
+#define LAPTOP_ROW_HEIGHT 17
+#define LAPTOP_VALUE_X 300
+
+/* The laptop screen. Opening the lid hands the whole canvas over: the
+ * room is not dimmed behind a panel, it is gone, because you are looking
+ * at a machine. The bezel is the only thing that says otherwise. */
+static void draw_laptop_screen(ki_td_soft_renderer *renderer,
+                               const ki_td_view *view, sr_canvas *canvas,
+                               const desk_state *state)
+{
+    uint32_t accent = desk_actor_color(visible_cast(state),
+                                       DESK_ACTOR_HERO);
+    int count = desk_laptop_menu_count(state);
+    int rows_visible;
+    int first_row;
+    int index;
+    int body_top = LAPTOP_SCREEN_MARGIN + 28;
+    int body_bottom = DESK_LOGICAL_HEIGHT - LAPTOP_SCREEN_MARGIN - 24;
+    const char *message = desk_laptop_message(state);
+
+    /* Bezel, then screen. */
+    ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
+                         (float)DESK_LOGICAL_WIDTH,
+                         (float)DESK_LOGICAL_HEIGHT,
+                         UINT32_C(0x05070d), 1.0f);
+    ki_td_soft_fill_rect(renderer, view, 4.0f, 4.0f,
+                         (float)(DESK_LOGICAL_WIDTH - 8),
+                         (float)(DESK_LOGICAL_HEIGHT - 8),
+                         UINT32_C(0x1a1f2b), 1.0f);
+    ki_td_soft_fill_rect(renderer, view, (float)LAPTOP_SCREEN_MARGIN - 4.0f,
+                         (float)LAPTOP_SCREEN_MARGIN - 4.0f,
+                         (float)(DESK_LOGICAL_WIDTH -
+                                 2 * LAPTOP_SCREEN_MARGIN + 8),
+                         (float)(DESK_LOGICAL_HEIGHT -
+                                 2 * LAPTOP_SCREEN_MARGIN + 8),
+                         COLOR_PANEL, 1.0f);
+    /* Title bar, with the accent rule below the text rather than through
+     * it: sr_text draws a few rows under the y it is given. */
+    ki_td_soft_fill_rect(renderer, view, (float)LAPTOP_SCREEN_MARGIN - 4.0f,
+                         (float)LAPTOP_SCREEN_MARGIN - 4.0f,
+                         (float)(DESK_LOGICAL_WIDTH -
+                                 2 * LAPTOP_SCREEN_MARGIN + 8),
+                         20.0f, COLOR_PANEL_LIGHT, 1.0f);
+    ki_td_soft_fill_rect(renderer, view, (float)LAPTOP_SCREEN_MARGIN - 4.0f,
+                         (float)LAPTOP_SCREEN_MARGIN + 16.0f,
+                         (float)(DESK_LOGICAL_WIDTH -
+                                 2 * LAPTOP_SCREEN_MARGIN + 8),
+                         2.0f, accent, 1.0f);
+    small_text(canvas, view, (float)LAPTOP_SCREEN_MARGIN + 2.0f,
+               (float)LAPTOP_SCREEN_MARGIN + 2.0f,
+               desk_laptop_page_title(state), COLOR_GOLD);
+    if (state->laptop.page != DESK_LAPTOP_PAGE_HOME &&
+        state->laptop.working.name[0] != '\0') {
+        int width = sr_text_width(state->laptop.working.name, 1);
+        small_text(canvas, view,
+                   (float)(DESK_LOGICAL_WIDTH - LAPTOP_SCREEN_MARGIN - 2) -
+                       (float)width,
+                   (float)LAPTOP_SCREEN_MARGIN + 2.0f,
+                   state->laptop.working.name, COLOR_MUTED);
+    }
+
+    /* Rows. The list scrolls only when a page is taller than the screen,
+     * which today only the profile lists can be. */
+    rows_visible = (body_bottom - body_top) / LAPTOP_ROW_HEIGHT;
+    if (rows_visible < 1) rows_visible = 1;
+    first_row = 0;
+    if (count > rows_visible) {
+        first_row = state->laptop.cursor - rows_visible / 2;
+        if (first_row < 0) first_row = 0;
+        if (first_row > count - rows_visible)
+            first_row = count - rows_visible;
+    }
+    for (index = first_row;
+         index < count && index < first_row + rows_visible; ++index) {
+        float row_y = (float)(body_top +
+                              (index - first_row) * LAPTOP_ROW_HEIGHT);
+        bool selected = index == state->laptop.cursor;
+        const char *label = desk_laptop_menu_item(state, index);
+        const char *value = desk_laptop_row_value(state, index);
+        bool editing = state->laptop.editing &&
+                       state->laptop.edit_row == index;
+
+        if (selected)
+            ki_td_soft_fill_rect(renderer, view,
+                                 (float)LAPTOP_SCREEN_MARGIN, row_y - 3.0f,
+                                 (float)(DESK_LOGICAL_WIDTH -
+                                         2 * LAPTOP_SCREEN_MARGIN),
+                                 (float)LAPTOP_ROW_HEIGHT - 2.0f,
+                                 editing ? COLOR_MARKED : accent,
+                                 editing ? 0.30f : 0.22f);
+        small_text(canvas, view, (float)LAPTOP_SCREEN_MARGIN + 8.0f, row_y,
+                   label, selected ? COLOR_INK : COLOR_MUTED);
+        if (value[0] != '\0' || editing) {
+            char shown[54];
+            /* A caret marks the field the keyboard currently owns. */
+            (void)snprintf(shown, sizeof shown, "%s%s", value,
+                           editing ? "_" : "");
+            small_text(canvas, view, (float)LAPTOP_VALUE_X, row_y, shown,
+                       editing ? COLOR_INK : COLOR_GOLD);
+        }
+    }
+    if (count > rows_visible) {
+        char position[24];
+        (void)snprintf(position, sizeof position, "%d/%d",
+                       state->laptop.cursor + 1, count);
+        small_text(canvas, view,
+                   (float)(DESK_LOGICAL_WIDTH - LAPTOP_SCREEN_MARGIN - 30),
+                   (float)(body_bottom + 2), position, COLOR_MUTED);
+    }
+
+    /* Footer: the last thing the pages said, then the key hints. */
+    ki_td_soft_fill_rect(renderer, view, (float)LAPTOP_SCREEN_MARGIN,
+                         (float)(body_bottom - 2),
+                         (float)(DESK_LOGICAL_WIDTH -
+                                 2 * LAPTOP_SCREEN_MARGIN),
+                         1.0f, COLOR_PANEL_LIGHT, 1.0f);
+    if (message[0] != '\0')
+        small_text(canvas, view, (float)LAPTOP_SCREEN_MARGIN + 8.0f,
+                   (float)(body_bottom + 2), message, COLOR_GOLD);
+    center_text(canvas, view, 240.0f,
+                (float)(DESK_LOGICAL_HEIGHT - LAPTOP_SCREEN_MARGIN - 12),
+                desk_laptop_hint(state), COLOR_MUTED, 1);
 }
 
 #define INVENTORY_SLOT_SIZE 28
@@ -1467,10 +1590,24 @@ static void draw_confirm(ki_td_soft_renderer *renderer,
                          const desk_state *state)
 {
     static const char *const items[2] = {"YES", "NO"};
-    const char *question =
-        state->confirm == DESK_CONFIRM_QUIT ?
-        "Rest and leave the desktop?" :
-        "Switch casts? Your housemates move out.";
+    const char *question;
+    switch (state->confirm) {
+    case DESK_CONFIRM_QUIT:
+        question = "Rest and leave the desktop?";
+        break;
+    case DESK_CONFIRM_LOGOUT:
+        question = "Sleep? This ends your session.";
+        break;
+    case DESK_CONFIRM_REBOOT:
+        question = "Wake anew? The machine restarts.";
+        break;
+    case DESK_CONFIRM_POWEROFF:
+        question = "Power down the whole house?";
+        break;
+    default:
+        question = "Switch casts? Your housemates move out.";
+        break;
+    }
     kilix_ui_style outer_style;
     kilix_ui_style list_style;
     kilix_ui_focus focus;
@@ -1509,9 +1646,13 @@ static void draw_status(ki_td_soft_renderer *renderer,
                                        DESK_ACTOR_HERO);
     int count = clamp_int(state->status_line_count, 0,
                           DESK_STATUS_LINE_COUNT);
-    int height = 52 + count * 14;
+    /* The board grew from five facts to ten, so the panel is sized from
+     * the lines it actually has and widened to hold the longest of
+     * them. */
+    int height = 64 + count * 14;
     int top = (DESK_LOGICAL_HEIGHT - height) / 2;
     int line;
+    if (top < 2) top = 2;
     ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
                          (float)DESK_LOGICAL_WIDTH,
                          (float)DESK_LOGICAL_HEIGHT,
@@ -1520,17 +1661,17 @@ static void draw_status(ki_td_soft_renderer *renderer,
     outer_style.border_color = COLOR_GOLD;
     outer_style.padding = 8;
     kilix_ui_draw_panel(renderer, view,
-                        (ki_td_rect){120, top, 240, height},
+                        (ki_td_rect){106, top, 268, height},
                         &outer_style, NULL);
-    ki_td_soft_fill_rect(renderer, view, 123.0f, (float)top + 3.0f,
-                         234.0f, 3.0f, accent, 1.0f);
+    ki_td_soft_fill_rect(renderer, view, 109.0f, (float)top + 3.0f,
+                         262.0f, 3.0f, accent, 1.0f);
     center_text(canvas, view, 240.0f, (float)top + 10.0f, "NOTICE BOARD",
                 COLOR_INK, text_scale(view));
     for (line = 0; line < count; ++line)
-        small_text(canvas, view, 134.0f, (float)(top + 30 + line * 14),
+        small_text(canvas, view, 120.0f, (float)(top + 30 + line * 14),
                    state->status_lines[line],
                    line == 0 ? COLOR_GOLD : COLOR_INK);
-    center_text(canvas, view, 240.0f, (float)(top + height - 15),
+    center_text(canvas, view, 240.0f, (float)(top + height - 18),
                 "ENTER CLOSE", COLOR_MUTED, 1);
 }
 
@@ -1872,6 +2013,14 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
         draw_toast(renderer, &view, canvas, state);
         return ki_td_soft_pack_rgba(renderer) != NULL;
     }
+    /* The laptop owns the whole canvas: no room behind it, no hotbar
+     * over it. You are looking at a screen, not at a room with a screen
+     * in it. */
+    if (state->mode == DESK_MODE_LAPTOP) {
+        draw_laptop_screen(renderer, &view, canvas, state);
+        draw_toast(renderer, &view, canvas, state);
+        return ki_td_soft_pack_rgba(renderer) != NULL;
+    }
     {
         const desk_room *room = active_room(state, world);
         if (room) {
@@ -1892,8 +2041,8 @@ bool desk_render(ki_td_soft_renderer *renderer, const desk_state *state,
         draw_dialogue(renderer, &view, canvas, state, graphics);
     else if (state->mode == DESK_MODE_PAUSE)
         draw_pause(renderer, &view, canvas, state);
-    else if (state->mode == DESK_MODE_LAPTOP)
-        draw_laptop_menu(renderer, &view, canvas, state);
+    else if (state->mode == DESK_MODE_CHOICE)
+        draw_choice(renderer, &view, canvas, state);
     else if (state->mode == DESK_MODE_CONFIRM)
         draw_confirm(renderer, &view, canvas, state);
     else if (state->mode == DESK_MODE_STATUS)

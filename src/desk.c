@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <dirent.h>
 
 /* Not in the module header; matches kilix-land's dialogue text budget. */
 #define DESK_DIALOGUE_TEXT_CAPACITY 192
@@ -1544,9 +1546,18 @@ void desk_update(desk_state *state, const desk_world *world, int move_x,
         if (move_cursor(&state->confirm_cursor, delta, 2))
             queue_audio(state, DESK_AUDIO_UI_MOVE);
     } else if (state->mode == DESK_MODE_LAPTOP) {
+        /* Typing into a field owns the arrow keys' row, so the cursor
+         * only walks while no row is being edited. */
+        if (!state->laptop.editing) {
+            delta = move_y != 0 ? move_y : move_x;
+            if (move_cursor(&state->laptop.cursor, delta,
+                            desk_laptop_menu_count(state)))
+                queue_audio(state, DESK_AUDIO_UI_MOVE);
+        }
+    } else if (state->mode == DESK_MODE_CHOICE) {
         delta = move_y != 0 ? move_y : move_x;
-        if (move_cursor(&state->laptop_menu_cursor, delta,
-                        desk_laptop_menu_count(state)))
+        if (move_cursor(&state->choice_cursor, delta,
+                        desk_choice_count(state)))
             queue_audio(state, DESK_AUDIO_UI_MOVE);
     }
     state->simulation_tick += 1u;
@@ -1900,6 +1911,143 @@ static bool read_fact_line(const char *path, char *line, size_t size)
     return line[0] != '\0';
 }
 
+/* One numeric fact from a /sys or /proc file. */
+static bool read_fact_long(const char *path, long *out)
+{
+    char line[DESK_STATUS_LINE_CAPACITY];
+    char *end = NULL;
+    long value;
+    if (!read_fact_line(path, line, sizeof line)) return false;
+    value = strtol(line, &end, 10);
+    if (end == line) return false;
+    *out = value;
+    return true;
+}
+
+/* The battery, if this machine has one. Directory names are fixed rather
+ * than globbed: the board reads files, it does not walk the tree. */
+static bool read_battery(char *text, size_t size)
+{
+    static const char *const batteries[] = {
+        "/sys/class/power_supply/BAT0", "/sys/class/power_supply/BAT1",
+        "/sys/class/power_supply/battery"
+    };
+    size_t index;
+    for (index = 0u; index < sizeof batteries / sizeof batteries[0];
+         ++index) {
+        char path[128];
+        char status[DESK_STATUS_LINE_CAPACITY];
+        long capacity = 0;
+        (void)snprintf(path, sizeof path, "%s/capacity", batteries[index]);
+        if (!read_fact_long(path, &capacity)) continue;
+        (void)snprintf(path, sizeof path, "%s/status", batteries[index]);
+        if (!read_fact_line(path, status, sizeof status))
+            (void)snprintf(status, sizeof status, "unknown");
+        (void)snprintf(text, size, "battery %ld%% (%.20s)", capacity,
+                       status);
+        return true;
+    }
+    return false;
+}
+
+/* Carrier state for the first real interface that reports one; "network"
+ * here means "is this house connected", not an IP stack summary — the
+ * chrome and kilix-settings own the detail. Interface names are not
+ * guessable, so the directory is listed rather than a fixed table
+ * consulted; a connected interface wins over a disconnected one. */
+static bool read_network(char *text, size_t size)
+{
+    DIR *entries = opendir("/sys/class/net");
+    struct dirent *entry;
+    char best[64] = "";
+    bool best_up = false;
+    bool found = false;
+
+    if (!entries) return false;
+    while ((entry = readdir(entries)) != NULL) {
+        char path[128];
+        long carrier = 0;
+        if (entry->d_name[0] == '.') continue;
+        if (strcmp(entry->d_name, "lo") == 0) continue;
+        /* Bridges the user did not make are noise on a notice board. */
+        if (strncmp(entry->d_name, "docker", 6) == 0 ||
+            strncmp(entry->d_name, "veth", 4) == 0 ||
+            strncmp(entry->d_name, "br-", 3) == 0 ||
+            strncmp(entry->d_name, "virbr", 5) == 0)
+            continue;
+        (void)snprintf(path, sizeof path, "/sys/class/net/%.63s/carrier",
+                       entry->d_name);
+        if (!read_fact_long(path, &carrier)) continue;
+        if (!found || (carrier != 0 && !best_up)) {
+            (void)snprintf(best, sizeof best, "%.63s", entry->d_name);
+            best_up = carrier != 0;
+            found = true;
+        }
+        if (best_up) break;
+    }
+    (void)closedir(entries);
+    if (!found) return false;
+    (void)snprintf(text, size, "network %.24s %s", best,
+                   best_up ? "up" : "down");
+    return true;
+}
+
+static bool read_thermal(char *text, size_t size)
+{
+    long millidegrees = 0;
+    if (!read_fact_long("/sys/class/thermal/thermal_zone0/temp",
+                        &millidegrees) ||
+        millidegrees <= 0)
+        return false;
+    (void)snprintf(text, size, "house temperature %ld C",
+                   millidegrees / 1000L);
+    return true;
+}
+
+static bool read_memory(char *text, size_t size)
+{
+    FILE *handle = fopen("/proc/meminfo", "r");
+    char line[128];
+    long total = 0;
+    long available = 0;
+    if (!handle) return false;
+    while (fgets(line, (int)sizeof line, handle)) {
+        long value = 0;
+        if (sscanf(line, "MemTotal: %ld kB", &value) == 1) total = value;
+        else if (sscanf(line, "MemAvailable: %ld kB", &value) == 1)
+            available = value;
+        if (total > 0 && available > 0) break;
+    }
+    (void)fclose(handle);
+    if (total <= 0 || available < 0 || available > total) return false;
+    (void)snprintf(text, size, "memory %ld%% free",
+                   (available * 100L) / total);
+    return true;
+}
+
+/* The clock reads the chrome's own preference so the board and the top
+ * bar never disagree about 12- or 24-hour time. */
+static void read_clock(char *text, size_t size)
+{
+    const char *format = getenv("KILIX_CHROME_CLOCK_FORMAT");
+    bool twelve_hour = format != NULL && strstr(format, "12") != NULL;
+    time_t now = time(NULL);
+    struct tm parts;
+    if (now == (time_t)-1 || !localtime_r(&now, &parts)) {
+        (void)snprintf(text, size, "the clock has stopped");
+        return;
+    }
+    if (twelve_hour) {
+        int hour = parts.tm_hour % 12;
+        if (hour == 0) hour = 12;
+        (void)snprintf(text, size, "%d:%02d %s", hour, parts.tm_min,
+                       parts.tm_hour < 12 ? "am" : "pm");
+    } else {
+        (void)snprintf(text, size, "%02d:%02d", parts.tm_hour,
+                       parts.tm_min);
+    }
+}
+
 static void open_status_board(desk_state *state, const desk_world *world)
 {
     char value[DESK_STATUS_LINE_CAPACITY];
@@ -1908,8 +2056,11 @@ static void open_status_board(desk_state *state, const desk_world *world)
     (void)snprintf(state->status_lines[count++], DESK_STATUS_LINE_CAPACITY,
                    "%s of %s", state->profile.name,
                    desk_cast_house_name(state->profile.cast));
+    read_clock(value, sizeof value);
     (void)snprintf(state->status_lines[count++], DESK_STATUS_LINE_CAPACITY,
-                   "kilix-land-desktop 0.1.0 // %d rooms",
+                   "the hall clock says %.40s", value);
+    (void)snprintf(state->status_lines[count++], DESK_STATUS_LINE_CAPACITY,
+                   "kilix-land-desktop 0.1.0 - %d rooms",
                    world->room_count);
     if (read_fact_line("/proc/sys/kernel/hostname", value, sizeof value))
         (void)snprintf(state->status_lines[count++],
@@ -1927,6 +2078,23 @@ static void open_status_board(desk_state *state, const desk_world *world)
         (void)snprintf(state->status_lines[count++],
                        DESK_STATUS_LINE_CAPACITY, "load %.56s", value);
     }
+    if (count < DESK_STATUS_LINE_COUNT && read_memory(value, sizeof value))
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY, "%.60s", value);
+    if (count < DESK_STATUS_LINE_COUNT && read_battery(value, sizeof value))
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY, "%.60s", value);
+    if (count < DESK_STATUS_LINE_COUNT && read_network(value, sizeof value))
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY, "%.60s", value);
+    if (count < DESK_STATUS_LINE_COUNT && read_thermal(value, sizeof value))
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY, "%.60s", value);
+    if (count < DESK_STATUS_LINE_COUNT && state->default_password)
+        (void)snprintf(state->status_lines[count++],
+                       DESK_STATUS_LINE_CAPACITY,
+                       "note: change the locks - the key is the one it "
+                       "shipped with");
     state->status_line_count = count;
     state->mode = DESK_MODE_STATUS;
     state->player_moving = false;
@@ -2050,7 +2218,7 @@ static void laptop_seed_directory(char *path, size_t size)
 
 /* Profiles are re-scanned on every open — the same freshness rule as
  * bindings.conf — so an edited profile shows up without a restart. */
-static bool open_laptop_menu(desk_state *state)
+static void laptop_rescan(desk_state *state)
 {
     char seed[512];
     desk_laptop_list list;
@@ -2064,11 +2232,22 @@ static bool open_laptop_menu(desk_state *state)
     if (count > DESK_LAPTOP_MENU_PROFILES)
         count = DESK_LAPTOP_MENU_PROFILES;
     state->laptop_menu_count = count;
+    (void)memset(state->laptop_menu_ids, 0, sizeof state->laptop_menu_ids);
     for (index = 0; index < count; ++index)
         (void)snprintf(state->laptop_menu_ids[index],
                        sizeof state->laptop_menu_ids[index], "%s",
                        list.ids[index]);
-    state->laptop_menu_cursor = 0;
+}
+
+static bool open_laptop_menu(desk_state *state)
+{
+    /* Profiles are re-scanned on every open — the same freshness rule as
+     * bindings.conf — so a profile edited anywhere shows up without a
+     * restart. */
+    laptop_rescan(state);
+    (void)memset(&state->laptop, 0, sizeof state->laptop);
+    state->laptop.page = DESK_LAPTOP_PAGE_HOME;
+    state->laptop.cursor = 0;
     state->laptop_menu_item = state->nearest_world_item;
     state->mode = DESK_MODE_LAPTOP;
     state->player_moving = false;
@@ -2076,8 +2255,263 @@ static bool open_laptop_menu(desk_state *state)
     return true;
 }
 
-static bool interact_room(desk_state *state, const desk_world *world,
-                          const desk_room *room)
+/* ---- fixture choice panels ----
+ *
+ * A house fixture owns one intent; a few of them own a small family of
+ * intents (the bed ends things, the shed maintains things, the phone
+ * talks both ways). Those get a compiled choice panel keyed by the
+ * object's target, so world.json needs no new vocabulary and a
+ * bindings.conf override still lands on the fixture's own default row —
+ * the row whose target matches the object's compiled one. */
+
+typedef enum choice_action {
+    CHOICE_CLOSE = 0,
+    CHOICE_LAUNCH = 1,  /* hand the target to launcher.c */
+    CHOICE_CONFIRM = 2, /* raise a YES/NO panel first */
+    CHOICE_STATUS = 3   /* the in-process notice board */
+} choice_action;
+
+typedef struct choice_row {
+    const char *label;
+    uint8_t action;
+    uint8_t target;  /* CHOICE_LAUNCH */
+    uint8_t confirm; /* CHOICE_CONFIRM */
+    /* Rows that only make sense in a particular house state. The lock
+     * note appears solely while the login password is still the shipped
+     * default, exactly like kilix-95's nag. */
+    bool default_password_only;
+} choice_row;
+
+typedef struct choice_menu_def {
+    const char *title;
+    int count;
+    choice_row rows[DESK_CHOICE_MAX_ROWS];
+} choice_menu_def;
+
+static const choice_menu_def choice_menus[] = {
+    [DESK_CHOICE_BED] = { "TURNING IN", 5, {
+        { "REST (LEAVE DESKTOP)", CHOICE_CONFIRM, 0, DESK_CONFIRM_QUIT,
+          false },
+        { "SLEEP (LOG OUT)", CHOICE_CONFIRM, 0, DESK_CONFIRM_LOGOUT,
+          false },
+        { "WAKE ANEW (RESTART)", CHOICE_CONFIRM, 0, DESK_CONFIRM_REBOOT,
+          false },
+        { "POWER DOWN THE HOUSE", CHOICE_CONFIRM, 0,
+          DESK_CONFIRM_POWEROFF, false },
+        { "STAY UP", CHOICE_CLOSE, 0, 0, false } } },
+    [DESK_CHOICE_SHED] = { "THE SHED", 4, {
+        { "TUNE THE APPLIANCES", CHOICE_LAUNCH, DESK_TARGET_MAINTENANCE,
+          0, false },
+        { "READ THE FUSE BOX", CHOICE_LAUNCH, DESK_TARGET_SETTINGS, 0,
+          false },
+        { "SERVICE THE HOUSE", CHOICE_LAUNCH, DESK_TARGET_UPDATE, 0,
+          false },
+        { "SHUT THE SHED", CHOICE_CLOSE, 0, 0, false } } },
+    [DESK_CHOICE_PHONE] = { "THE PHONE", 4, {
+        { "LISTEN (READ ALOUD)", CHOICE_LAUNCH, DESK_TARGET_VOICE, 0,
+          false },
+        { "SPEAK (DICTATION)", CHOICE_LAUNCH, DESK_TARGET_DICTATION, 0,
+          false },
+        { "ASK THE OPERATOR", CHOICE_LAUNCH, DESK_TARGET_VOICE_HELP, 0,
+          false },
+        { "HANG UP", CHOICE_CLOSE, 0, 0, false } } },
+    [DESK_CHOICE_DEV_RIG] = { "THE DEV RIG", 5, {
+        { "WAKE THE CODING AGENTS", CHOICE_LAUNCH,
+          DESK_TARGET_CODING_AGENTS, 0, false },
+        { "PERSISTENT SESSIONS", CHOICE_LAUNCH, DESK_TARGET_PTY, 0,
+          false },
+        { "TMUX MANAGER", CHOICE_LAUNCH, DESK_TARGET_TMUX, 0, false },
+        { "SHARE THIS SESSION", CHOICE_LAUNCH, DESK_TARGET_MUX, 0,
+          false },
+        { "LEAVE IT RUNNING", CHOICE_CLOSE, 0, 0, false } } },
+    [DESK_CHOICE_BOOKSHELF] = { "THE BOOKSHELF", 4, {
+        { "THE SYSTEM MANUAL", CHOICE_LAUNCH, DESK_TARGET_MANUAL, 0,
+          false },
+        { "THE RECOVERY GUIDE", CHOICE_LAUNCH, DESK_TARGET_RECOVERY, 0,
+          false },
+        { "MAN PAGES", CHOICE_LAUNCH, DESK_TARGET_MANUALS, 0, false },
+        { "PUT IT BACK", CHOICE_CLOSE, 0, 0, false } } },
+    [DESK_CHOICE_MONITOR] = { "THE SCREEN", 3, {
+        { "READ THE SCREEN", CHOICE_LAUNCH, DESK_TARGET_BROWSER, 0,
+          false },
+        { "OPEN THE WEB", CHOICE_LAUNCH, DESK_TARGET_WEB, 0, false },
+        { "SWITCH IT OFF", CHOICE_CLOSE, 0, 0, false } } },
+    [DESK_CHOICE_COMPUTER] = { "THE COMPUTER", 4, {
+        { "OPEN A TERMINAL", CHOICE_LAUNCH, DESK_TARGET_TERMINAL, 0,
+          false },
+        { "BROWSE THE PROGRAMS", CHOICE_LAUNCH, DESK_TARGET_CATALOG, 0,
+          false },
+        { "DESKTOP SETTINGS", CHOICE_LAUNCH, DESK_TARGET_SETTINGS, 0,
+          false },
+        { "STEP AWAY", CHOICE_CLOSE, 0, 0, false } } },
+    [DESK_CHOICE_NOTICE_BOARD] = { "THE NOTICE BOARD", 4, {
+        { "READ THE BOARD", CHOICE_STATUS, 0, 0, false },
+        { "HOUSE TEMPERATURE", CHOICE_LAUNCH, DESK_TARGET_TEMPS, 0,
+          false },
+        { "CHANGE THE LOCKS", CHOICE_LAUNCH, DESK_TARGET_PASSWORD, 0,
+          true },
+        { "WALK AWAY", CHOICE_CLOSE, 0, 0, false } } }
+};
+
+static const choice_menu_def *choice_menu_def_for(desk_choice_menu menu)
+{
+    size_t index = (size_t)menu;
+    if (menu <= DESK_CHOICE_NONE ||
+        index >= sizeof choice_menus / sizeof choice_menus[0])
+        return NULL;
+    return choice_menus[index].count > 0 ? &choice_menus[index] : NULL;
+}
+
+/* Fixtures whose activation opens a panel instead of launching straight
+ * away. The mapping is compiled, not authored: an object keeps the target
+ * it always had, and its panel's first row is that same target. */
+static desk_choice_menu choice_menu_for_target(desk_target target)
+{
+    switch (target) {
+    case DESK_TARGET_BED:
+        return DESK_CHOICE_BED;
+    case DESK_TARGET_MAINTENANCE:
+        return DESK_CHOICE_SHED;
+    case DESK_TARGET_VOICE:
+        return DESK_CHOICE_PHONE;
+    case DESK_TARGET_CODING_AGENTS:
+        return DESK_CHOICE_DEV_RIG;
+    case DESK_TARGET_MANUALS:
+        return DESK_CHOICE_BOOKSHELF;
+    case DESK_TARGET_BROWSER:
+        return DESK_CHOICE_MONITOR;
+    case DESK_TARGET_TERMINAL:
+        return DESK_CHOICE_COMPUTER;
+    case DESK_TARGET_STATUS_BOARD:
+        return DESK_CHOICE_NOTICE_BOARD;
+    default:
+        return DESK_CHOICE_NONE;
+    }
+}
+
+static const choice_row *choice_row_at(const desk_state *state, int index)
+{
+    const choice_menu_def *def = choice_menu_def_for(state->choice);
+    if (!def || index < 0 || index >= state->choice_count) return NULL;
+    return &def->rows[state->choice_rows[index]];
+}
+
+int desk_choice_count(const desk_state *state)
+{
+    return state ? state->choice_count : 0;
+}
+
+const char *desk_choice_item(const desk_state *state, int index)
+{
+    const choice_row *row;
+    if (!state) return "";
+    row = choice_row_at(state, index);
+    return row ? row->label : "";
+}
+
+const char *desk_choice_title(const desk_state *state)
+{
+    const choice_menu_def *def;
+    if (!state) return "";
+    def = choice_menu_def_for(state->choice);
+    return def ? def->title : "";
+}
+
+static bool open_choice_menu(desk_state *state, desk_choice_menu menu,
+                             const char *object_id)
+{
+    const choice_menu_def *def = choice_menu_def_for(menu);
+    int index;
+
+    if (!def) return false;
+    state->choice = menu;
+    state->choice_count = 0;
+    (void)memset(state->choice_rows, 0, sizeof state->choice_rows);
+    for (index = 0; index < def->count &&
+                    state->choice_count < DESK_CHOICE_MAX_ROWS; ++index) {
+        if (def->rows[index].default_password_only &&
+            !state->default_password)
+            continue;
+        state->choice_rows[state->choice_count++] = (uint8_t)index;
+    }
+    state->choice_cursor = 0;
+    (void)snprintf(state->choice_object, sizeof state->choice_object, "%s",
+                   object_id ? object_id : "");
+    state->mode = DESK_MODE_CHOICE;
+    state->player_moving = false;
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    return true;
+}
+
+/* The object's own default row keeps its bindings.conf override; the rows
+ * the panel adds are the desktop's, and a per-object binding must not
+ * silently re-point them. */
+static void choice_launch(desk_state *state, const desk_world *world,
+                          const choice_row *row)
+{
+    const desk_room *room = current_room(state, world);
+    const char *object_id = "";
+
+    if (room && state->choice_object[0] != '\0') {
+        int index;
+        for (index = 0; index < room->object_count; ++index) {
+            if (strcmp(room->objects[index].id, state->choice_object) != 0)
+                continue;
+            if ((desk_target)row->target == room->objects[index].target)
+                object_id = state->choice_object;
+            break;
+        }
+    }
+    state->pending_launch = (desk_target)row->target;
+    (void)snprintf(state->pending_launch_object,
+                   sizeof state->pending_launch_object, "%s", object_id);
+}
+
+static void close_choice_menu(desk_state *state, const desk_world *world)
+{
+    state->choice = DESK_CHOICE_NONE;
+    state->choice_count = 0;
+    state->choice_cursor = 0;
+    (void)memset(state->choice_object, 0, sizeof state->choice_object);
+    state->mode = DESK_MODE_ROOM;
+    update_nearest(state, world);
+}
+
+static bool interact_choice(desk_state *state, const desk_world *world)
+{
+    const choice_row *row = choice_row_at(state, state->choice_cursor);
+
+    if (!row) {
+        close_choice_menu(state, world);
+        return false;
+    }
+    switch ((choice_action)row->action) {
+    case CHOICE_LAUNCH:
+        choice_launch(state, world, row);
+        close_choice_menu(state, world);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    case CHOICE_CONFIRM:
+        state->confirm = (desk_confirm)row->confirm;
+        state->confirm_cursor = 1;
+        state->mode = DESK_MODE_CONFIRM;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    case CHOICE_STATUS:
+        state->choice = DESK_CHOICE_NONE;
+        state->choice_count = 0;
+        open_status_board(state, world);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    case CHOICE_CLOSE:
+        break;
+    }
+    close_choice_menu(state, world);
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+    return true;
+}
+
+static bool interact_room(desk_state *state, const desk_room *room)
 {
     const desk_object *object;
     if (!room) return false;
@@ -2107,20 +2541,16 @@ static bool interact_room(desk_state *state, const desk_world *world,
     if (object->receiver[0] != '\0' &&
         interact_collect(state, room, object))
         return true;
+    /* Fixtures that own a family of intents raise their panel; the rest
+     * act immediately, as they always have. */
+    {
+        desk_choice_menu menu = choice_menu_for_target(object->target);
+        if (menu != DESK_CHOICE_NONE)
+            return open_choice_menu(state, menu, object->id);
+    }
     switch (object->target) {
     case DESK_TARGET_WARDROBE:
         open_wizard_from_profile(state);
-        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
-        return true;
-    case DESK_TARGET_BED:
-        state->mode = DESK_MODE_CONFIRM;
-        state->confirm = DESK_CONFIRM_QUIT;
-        state->confirm_cursor = 1;
-        state->player_moving = false;
-        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
-        return true;
-    case DESK_TARGET_STATUS_BOARD:
-        open_status_board(state, world);
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return true;
     case DESK_TARGET_GATE_LOCKED:
@@ -2277,14 +2707,19 @@ int desk_pause_item_count(const desk_state *state)
 {
     if (!state) return 0;
     if (state->pause_debug) return 2;
-    return state->debug_menu ? 4 : 3;
+    return state->debug_menu ? 5 : 4;
 }
 
 const char *desk_pause_item(const desk_state *state, int index)
 {
-    static const char *const base[3] = { "RESUME", "CHARACTER", "QUIT" };
-    static const char *const with_debug[4] = {
-        "RESUME", "CHARACTER", "DEBUG", "QUIT"
+    /* SETTINGS is here as well as on the shed and the computer: the
+     * shared settings TUI is the one thing a desktop must always be able
+     * to reach, whichever room you happen to be standing in. */
+    static const char *const base[4] = {
+        "RESUME", "CHARACTER", "SETTINGS", "QUIT"
+    };
+    static const char *const with_debug[5] = {
+        "RESUME", "CHARACTER", "SETTINGS", "DEBUG", "QUIT"
     };
     static const char *const debug_items[2] = { "WALK EDITOR", "BACK" };
     if (!state || index < 0 || index >= desk_pause_item_count(state))
@@ -2305,6 +2740,15 @@ static bool interact_pause(desk_state *state, const desk_world *world)
     if (strcmp(item, "CHARACTER") == 0) {
         open_wizard_from_profile(state);
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    }
+    if (strcmp(item, "SETTINGS") == 0) {
+        state->pending_launch = DESK_TARGET_SETTINGS;
+        (void)memset(state->pending_launch_object, 0,
+                     sizeof state->pending_launch_object);
+        state->mode = DESK_MODE_ROOM;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        update_nearest(state, world);
         return true;
     }
     if (strcmp(item, "DEBUG") == 0) {
@@ -2336,30 +2780,444 @@ static bool interact_pause(desk_state *state, const desk_world *world)
     return true;
 }
 
+/* ---- the laptop screen ----
+ *
+ * HOME is the machine you use: profiles, then the three house rows. The
+ * configuration pages sit behind CONFIGURE PROFILES so that authoring a
+ * session never stands in front of opening one. Every page is a plain row
+ * list, so the whole screen is one cursor and one Enter. */
+
+/* Rows are collected before they are drawn, so each index owns its own
+ * slot rather than sharing one scratch buffer. */
+static char laptop_row_text[DESK_LAPTOP_ROWS_MAX][40];
+static char laptop_row_value_text[DESK_LAPTOP_ROWS_MAX][52];
+
+static bool laptop_is_desktop_profile(const desk_state *state)
+{
+    return state->laptop.working.desktop[0] != '\0';
+}
+
+static int laptop_pane_rows(const desk_state *state)
+{
+    int panes = state->laptop.working.pane_count;
+    if (panes < 0) panes = 0;
+    if (panes > DESK_LAPTOP_PANES_MAX) panes = DESK_LAPTOP_PANES_MAX;
+    return panes;
+}
+
+/* Where the EDIT page's action rows begin. A session profile carries one
+ * more field row (panes) than a desktop profile, and the labels and the
+ * activation switch must agree about that in one place only. */
+static int laptop_edit_tail(const desk_state *state)
+{
+    return laptop_is_desktop_profile(state) ? 3 : 4;
+}
+
 int desk_laptop_menu_count(const desk_state *state)
 {
+    int profiles;
     if (!state) return 0;
-    return state->laptop_menu_count + 2; /* + PICK UP LAPTOP + CLOSE */
+    profiles = state->laptop_menu_count;
+    switch (state->laptop.page) {
+    case DESK_LAPTOP_PAGE_HOME:
+        /* profiles + CONFIGURE + PICK UP + CLOSE */
+        return profiles + 3;
+    case DESK_LAPTOP_PAGE_PROFILES:
+        return profiles + 2; /* + NEW PROFILE + BACK */
+    case DESK_LAPTOP_PAGE_EDIT:
+        /* name, opens, (layout + panes | desktop), save, delete, back */
+        return laptop_is_desktop_profile(state) ? 6 : 7;
+    case DESK_LAPTOP_PAGE_PANES:
+        return laptop_pane_rows(state) +
+               (laptop_pane_rows(state) < DESK_LAPTOP_PANES_MAX ? 2 : 1);
+    case DESK_LAPTOP_PAGE_PANE:
+        return 6;
+    case DESK_LAPTOP_PAGE_PROVIDER:
+        return (int)desk_laptop_provider_count() + 1;
+    case DESK_LAPTOP_PAGE_DELETE:
+        return 2;
+    }
+    return 0;
+}
+
+const char *desk_laptop_page_title(const desk_state *state)
+{
+    if (!state) return "";
+    switch (state->laptop.page) {
+    case DESK_LAPTOP_PAGE_HOME:
+        return "LAPTOP";
+    case DESK_LAPTOP_PAGE_PROFILES:
+        return "LAPTOP / PROFILES";
+    case DESK_LAPTOP_PAGE_EDIT:
+        return "LAPTOP / PROFILE";
+    case DESK_LAPTOP_PAGE_PANES:
+        return "LAPTOP / PANES";
+    case DESK_LAPTOP_PAGE_PANE:
+        return "LAPTOP / PANE";
+    case DESK_LAPTOP_PAGE_PROVIDER:
+        return "LAPTOP / OPENS";
+    case DESK_LAPTOP_PAGE_DELETE:
+        return "LAPTOP / DELETE";
+    }
+    return "LAPTOP";
+}
+
+const char *desk_laptop_hint(const desk_state *state)
+{
+    if (!state) return "";
+    if (state->laptop.editing)
+        return "TYPE  ENTER KEEP  ESC UNDO";
+    switch (state->laptop.page) {
+    case DESK_LAPTOP_PAGE_HOME:
+        return state->laptop_menu_count == 0
+                   ? "NO PROFILES YET - CONFIGURE TO ADD ONE"
+                   : "ENTER OPEN  ESC CLOSE THE LID";
+    case DESK_LAPTOP_PAGE_DELETE:
+        return "ENTER CHOOSE  ESC KEEP";
+    default:
+        break;
+    }
+    return "ENTER CHOOSE  ESC BACK";
+}
+
+const char *desk_laptop_message(const desk_state *state)
+{
+    return state ? state->laptop.message : "";
+}
+
+static void laptop_set_message(desk_state *state, const char *message)
+{
+    (void)snprintf(state->laptop.message, sizeof state->laptop.message,
+                   "%s", message ? message : "");
 }
 
 const char *desk_laptop_menu_item(const desk_state *state, int index)
 {
-    if (!state || index < 0 || index >= desk_laptop_menu_count(state))
+    if (!state || index < 0 || index >= desk_laptop_menu_count(state) ||
+        index >= DESK_LAPTOP_ROWS_MAX)
         return "";
-    if (index < state->laptop_menu_count)
-        return state->laptop_menu_ids[index];
-    return index == state->laptop_menu_count ? "PICK UP LAPTOP" : "CLOSE";
+    switch (state->laptop.page) {
+    case DESK_LAPTOP_PAGE_HOME:
+        if (index < state->laptop_menu_count)
+            return state->laptop_menu_ids[index];
+        if (index == state->laptop_menu_count) return "CONFIGURE PROFILES";
+        if (index == state->laptop_menu_count + 1) return "PICK UP LAPTOP";
+        return "CLOSE THE LID";
+    case DESK_LAPTOP_PAGE_PROFILES:
+        if (index < state->laptop_menu_count)
+            return state->laptop_menu_ids[index];
+        return index == state->laptop_menu_count ? "NEW PROFILE" : "BACK";
+    case DESK_LAPTOP_PAGE_EDIT:
+        switch (index) {
+        case 0:
+            return "NAME";
+        case 1:
+            return "OPENS";
+        case 2:
+            return laptop_is_desktop_profile(state) ? "DESKTOP" : "LAYOUT";
+        default:
+            break;
+        }
+        if (!laptop_is_desktop_profile(state) && index == 3) return "PANES";
+        if (index == laptop_edit_tail(state)) return "SAVE";
+        if (index == laptop_edit_tail(state) + 1)
+            return state->laptop.creating ? "DISCARD" : "DELETE";
+        return "BACK";
+    case DESK_LAPTOP_PAGE_PANES:
+        if (index < laptop_pane_rows(state)) {
+            (void)snprintf(laptop_row_text[index],
+                           sizeof laptop_row_text[index], "PANE %d",
+                           index + 1);
+            return laptop_row_text[index];
+        }
+        if (laptop_pane_rows(state) < DESK_LAPTOP_PANES_MAX &&
+            index == laptop_pane_rows(state))
+            return "ADD A PANE";
+        return "BACK";
+    case DESK_LAPTOP_PAGE_PANE:
+        switch (index) {
+        case 0:
+            return "TITLE";
+        case 1:
+            return "DIRECTORY";
+        case 2:
+            return "SSH HOST";
+        case 3:
+            return "COMMAND";
+        case 4:
+            return "REMOVE THIS PANE";
+        default:
+            return "BACK";
+        }
+    case DESK_LAPTOP_PAGE_PROVIDER:
+        if (index < (int)desk_laptop_provider_count()) {
+            const char *provider = desk_laptop_provider((size_t)index);
+            (void)snprintf(laptop_row_text[index],
+                           sizeof laptop_row_text[index], "KILIX %s",
+                           provider);
+            return laptop_row_text[index];
+        }
+        return "BACK";
+    case DESK_LAPTOP_PAGE_DELETE:
+        if (index == 0)
+            return state->laptop.creating ? "DISCARD IT" : "DELETE IT";
+        return "KEEP IT";
+    }
+    return "";
 }
 
-static bool interact_laptop(desk_state *state, const desk_world *world)
+/* The value column: what a row currently holds. Rows that are actions
+ * rather than fields have none. */
+const char *desk_laptop_row_value(const desk_state *state, int index)
 {
-    int cursor = state->laptop_menu_cursor;
-    if (cursor < 0 || cursor >= desk_laptop_menu_count(state)) {
-        state->mode = DESK_MODE_ROOM;
-        update_nearest(state, world);
-        return false;
+    const desk_laptop_profile *profile;
+    const desk_laptop_pane *pane;
+    if (!state || index < 0 || index >= desk_laptop_menu_count(state) ||
+        index >= DESK_LAPTOP_ROWS_MAX)
+        return "";
+    if (state->laptop.editing && state->laptop.edit_row == index)
+        return state->laptop.edit_buffer;
+    profile = &state->laptop.working;
+    switch (state->laptop.page) {
+    case DESK_LAPTOP_PAGE_EDIT:
+        if (index == 0) return profile->name;
+        if (index == 1)
+            return laptop_is_desktop_profile(state) ? "A DESKTOP"
+                                                    : "A SESSION";
+        if (index == 2) {
+            if (laptop_is_desktop_profile(state)) return profile->desktop;
+            return profile->tabs ? "TABS" : "SPLITS";
+        }
+        if (!laptop_is_desktop_profile(state) && index == 3) {
+            (void)snprintf(laptop_row_value_text[index],
+                           sizeof laptop_row_value_text[index],
+                           profile->pane_count == 1 ? "%d PANE" : "%d PANES",
+                           profile->pane_count);
+            return laptop_row_value_text[index];
+        }
+        return "";
+    case DESK_LAPTOP_PAGE_PANES:
+        if (index >= laptop_pane_rows(state)) return "";
+        pane = &profile->panes[index];
+        (void)snprintf(laptop_row_value_text[index],
+                       sizeof laptop_row_value_text[index], "%s%s%s",
+                       pane->ssh[0] != '\0' ? pane->ssh : "local",
+                       pane->cmd[0] != '\0' ? " - " : "",
+                       pane->cmd[0] != '\0' ? pane->cmd : "");
+        return laptop_row_value_text[index];
+    case DESK_LAPTOP_PAGE_PANE:
+        if (state->laptop.pane_index < 0 ||
+            state->laptop.pane_index >= DESK_LAPTOP_PANES_MAX)
+            return "";
+        pane = &profile->panes[state->laptop.pane_index];
+        switch (index) {
+        case 0:
+            return pane->title[0] != '\0' ? pane->title : "DEFAULT";
+        case 1:
+            return pane->cwd[0] != '\0' ? pane->cwd : "DEFAULT";
+        case 2:
+            return pane->ssh[0] != '\0' ? pane->ssh : "THIS MACHINE";
+        case 3:
+            return pane->cmd[0] != '\0' ? pane->cmd : "A SHELL";
+        default:
+            return "";
+        }
+    case DESK_LAPTOP_PAGE_PROVIDER:
+        if (index < (int)desk_laptop_provider_count() &&
+            strcmp(desk_laptop_provider((size_t)index),
+                   profile->desktop) == 0)
+            return "CURRENT";
+        return "";
+    case DESK_LAPTOP_PAGE_HOME:
+    case DESK_LAPTOP_PAGE_PROFILES:
+    case DESK_LAPTOP_PAGE_DELETE:
+        break;
     }
-    if (cursor < state->laptop_menu_count) {
+    return "";
+}
+
+bool desk_text_entry_active(const desk_state *state)
+{
+    if (!state) return false;
+    if (state->mode == DESK_MODE_WIZARD &&
+        state->wizard_step == DESK_WIZARD_NAME)
+        return true;
+    return state->mode == DESK_MODE_LAPTOP && state->laptop.editing;
+}
+
+static void laptop_open_page(desk_state *state, desk_laptop_page page,
+                             int cursor)
+{
+    state->laptop.page = page;
+    state->laptop.cursor = cursor;
+    state->laptop.editing = false;
+    state->laptop.edit_row = 0;
+    state->laptop.edit_length = 0;
+    (void)memset(state->laptop.edit_buffer, 0,
+                 sizeof state->laptop.edit_buffer);
+    if (state->laptop.cursor < 0) state->laptop.cursor = 0;
+    if (state->laptop.cursor >= desk_laptop_menu_count(state))
+        state->laptop.cursor = desk_laptop_menu_count(state) - 1;
+    if (state->laptop.cursor < 0) state->laptop.cursor = 0;
+}
+
+static void laptop_begin_edit(desk_state *state, int row, const char *value)
+{
+    state->laptop.editing = true;
+    state->laptop.edit_row = row;
+    (void)snprintf(state->laptop.edit_buffer,
+                   sizeof state->laptop.edit_buffer, "%s",
+                   value ? value : "");
+    state->laptop.edit_length = (int)strlen(state->laptop.edit_buffer);
+    laptop_set_message(state, "");
+}
+
+/* One typed field lands in the working profile. Nothing reaches the disk
+ * until SAVE, so a rejected value costs only the keystroke. */
+static bool laptop_commit_edit(desk_state *state)
+{
+    desk_laptop_profile *profile = &state->laptop.working;
+    const char *value = state->laptop.edit_buffer;
+    desk_laptop_pane *pane = NULL;
+
+    if (state->laptop.pane_index >= 0 &&
+        state->laptop.pane_index < DESK_LAPTOP_PANES_MAX)
+        pane = &profile->panes[state->laptop.pane_index];
+    if (!desk_laptop_text_ok(value)) {
+        laptop_set_message(state,
+                           "No quotes or control characters, please.");
+        return true;
+    }
+    if (state->laptop.page == DESK_LAPTOP_PAGE_EDIT) {
+        if (value[0] == '\0' || strlen(value) >= sizeof profile->name) {
+            laptop_set_message(state, "That name will not fit.");
+            return true;
+        }
+        (void)snprintf(profile->name, sizeof profile->name, "%s", value);
+    } else if (state->laptop.page == DESK_LAPTOP_PAGE_PANE && pane) {
+        switch (state->laptop.edit_row) {
+        case 0:
+            if (strlen(value) >= sizeof pane->title) {
+                laptop_set_message(state, "That title is too long.");
+                return true;
+            }
+            (void)snprintf(pane->title, sizeof pane->title, "%s", value);
+            break;
+        case 1:
+            if (strlen(value) >= sizeof pane->cwd) {
+                laptop_set_message(state, "That directory is too long.");
+                return true;
+            }
+            (void)snprintf(pane->cwd, sizeof pane->cwd, "%s", value);
+            break;
+        case 2:
+            if (value[0] != '\0' && !desk_laptop_host_ok(value)) {
+                laptop_set_message(state,
+                                   "Hosts are [user@]host only.");
+                return true;
+            }
+            (void)snprintf(pane->ssh, sizeof pane->ssh, "%s", value);
+            break;
+        default:
+            if (strlen(value) >= sizeof pane->cmd) {
+                laptop_set_message(state, "That command is too long.");
+                return true;
+            }
+            (void)snprintf(pane->cmd, sizeof pane->cmd, "%s", value);
+            break;
+        }
+    }
+    state->laptop.editing = false;
+    state->laptop.working_dirty = true;
+    laptop_set_message(state, "");
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    return true;
+}
+
+static void laptop_load_working(desk_state *state, const char *id)
+{
+    char error[DESK_LAPTOP_ERROR_CAPACITY];
+    (void)memset(&state->laptop.working, 0, sizeof state->laptop.working);
+    state->laptop.creating = false;
+    state->laptop.working_dirty = false;
+    state->laptop.pane_index = 0;
+    state->laptop.working_loaded =
+        desk_laptop_load(id, &state->laptop.working, error, sizeof error);
+    if (!state->laptop.working_loaded) {
+        /* An unreadable profile still opens for repair rather than
+         * stranding the row: the id survives, the fields start empty. */
+        (void)snprintf(state->laptop.working.id,
+                       sizeof state->laptop.working.id, "%s", id);
+        (void)snprintf(state->laptop.working.name,
+                       sizeof state->laptop.working.name, "%s", id);
+        state->laptop.working.pane_count = 1;
+        laptop_set_message(state, error);
+    } else {
+        laptop_set_message(state, "");
+    }
+}
+
+static void laptop_new_working(desk_state *state)
+{
+    (void)memset(&state->laptop.working, 0, sizeof state->laptop.working);
+    (void)snprintf(state->laptop.working.name,
+                   sizeof state->laptop.working.name, "New session");
+    state->laptop.working.pane_count = 1;
+    state->laptop.working_loaded = true;
+    state->laptop.working_dirty = true;
+    state->laptop.creating = true;
+    state->laptop.pane_index = 0;
+    laptop_set_message(state, "");
+}
+
+static void laptop_save_working(desk_state *state)
+{
+    char error[DESK_LAPTOP_ERROR_CAPACITY];
+    desk_laptop_profile *profile = &state->laptop.working;
+
+    if (profile->id[0] == '\0' &&
+        !desk_laptop_make_id(profile->name, profile->id,
+                             sizeof profile->id)) {
+        laptop_set_message(state, "That name has no usable file name.");
+        return;
+    }
+    if (!desk_laptop_save(profile, error, sizeof error)) {
+        laptop_set_message(state, error);
+        return;
+    }
+    state->laptop.creating = false;
+    state->laptop.working_dirty = false;
+    laptop_rescan(state);
+    laptop_set_message(state, "Saved.");
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+}
+
+static void laptop_delete_working(desk_state *state)
+{
+    char error[DESK_LAPTOP_ERROR_CAPACITY];
+    if (!state->laptop.creating &&
+        !desk_laptop_delete(state->laptop.working.id, error,
+                            sizeof error)) {
+        laptop_set_message(state, error);
+        laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 0);
+        return;
+    }
+    laptop_rescan(state);
+    laptop_open_page(state, DESK_LAPTOP_PAGE_PROFILES, 0);
+    laptop_set_message(state, state->laptop.creating ? "Discarded."
+                                                     : "Deleted.");
+    (void)memset(&state->laptop.working, 0, sizeof state->laptop.working);
+    state->laptop.creating = false;
+    state->laptop.working_dirty = false;
+    queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+}
+
+static bool interact_laptop_home(desk_state *state, const desk_world *world)
+{
+    int cursor = state->laptop.cursor;
+    int profiles = state->laptop_menu_count;
+
+    if (cursor < profiles) {
         (void)snprintf(state->pending_laptop,
                        sizeof state->pending_laptop, "%s",
                        state->laptop_menu_ids[cursor]);
@@ -2369,10 +3227,16 @@ static bool interact_laptop(desk_state *state, const desk_world *world)
         update_nearest(state, world);
         return true;
     }
-    if (cursor == state->laptop_menu_count) {
+    if (cursor == profiles) {
+        state->laptop.home_cursor = cursor;
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PROFILES, 0);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
+    if (cursor == profiles + 1) {
         /* PICK UP LAPTOP: the ordinary pickup path, aimed back at the
-         * item this menu was opened on; the index is still valid because
-         * the menu is modal. */
+         * item this screen was opened on; the index is still valid
+         * because the screen is modal. */
         state->mode = DESK_MODE_ROOM;
         if (state->laptop_menu_item >= 0 &&
             state->laptop_menu_item < state->items.item_count) {
@@ -2386,6 +3250,253 @@ static bool interact_laptop(desk_state *state, const desk_world *world)
     queue_audio(state, DESK_AUDIO_UI_MOVE);
     update_nearest(state, world);
     return true;
+}
+
+static bool interact_laptop_edit(desk_state *state)
+{
+    int cursor = state->laptop.cursor;
+    desk_laptop_profile *profile = &state->laptop.working;
+    int tail = laptop_edit_tail(state);
+
+    if (cursor == 0) {
+        laptop_begin_edit(state, 0, profile->name);
+        return true;
+    }
+    if (cursor == 1) {
+        /* A profile is a desktop or panes, never both — the toggle owns
+         * clearing whichever half it leaves behind. */
+        if (laptop_is_desktop_profile(state)) {
+            (void)memset(profile->desktop, 0, sizeof profile->desktop);
+            if (profile->pane_count < 1) profile->pane_count = 1;
+        } else {
+            (void)memset(profile->panes, 0, sizeof profile->panes);
+            profile->pane_count = 0;
+            profile->tabs = false;
+            (void)snprintf(profile->desktop, sizeof profile->desktop, "%s",
+                           desk_laptop_provider(0));
+        }
+        state->laptop.working_dirty = true;
+        laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 1);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    }
+    if (cursor == 2) {
+        if (laptop_is_desktop_profile(state)) {
+            laptop_open_page(state, DESK_LAPTOP_PAGE_PROVIDER, 0);
+        } else {
+            profile->tabs = !profile->tabs;
+            state->laptop.working_dirty = true;
+        }
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    }
+    if (!laptop_is_desktop_profile(state) && cursor == 3) {
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PANES, 0);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
+    if (cursor == tail) {
+        laptop_save_working(state);
+        return true;
+    }
+    if (cursor == tail + 1) {
+        laptop_open_page(state, DESK_LAPTOP_PAGE_DELETE, 1);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
+    laptop_open_page(state, DESK_LAPTOP_PAGE_PROFILES, 0);
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+    return true;
+}
+
+static bool interact_laptop_panes(desk_state *state)
+{
+    int cursor = state->laptop.cursor;
+    int panes = laptop_pane_rows(state);
+    desk_laptop_profile *profile = &state->laptop.working;
+
+    if (cursor < panes) {
+        state->laptop.pane_index = cursor;
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PANE, 0);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
+    if (panes < DESK_LAPTOP_PANES_MAX && cursor == panes) {
+        (void)memset(&profile->panes[panes], 0,
+                     sizeof profile->panes[panes]);
+        profile->pane_count = panes + 1;
+        state->laptop.working_dirty = true;
+        state->laptop.pane_index = panes;
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PANE, 0);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    }
+    laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 3);
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+    return true;
+}
+
+static bool interact_laptop_pane(desk_state *state)
+{
+    int cursor = state->laptop.cursor;
+    desk_laptop_profile *profile = &state->laptop.working;
+    int index = state->laptop.pane_index;
+    desk_laptop_pane *pane;
+
+    if (index < 0 || index >= DESK_LAPTOP_PANES_MAX) {
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PANES, 0);
+        return true;
+    }
+    pane = &profile->panes[index];
+    switch (cursor) {
+    case 0:
+        laptop_begin_edit(state, 0, pane->title);
+        return true;
+    case 1:
+        laptop_begin_edit(state, 1, pane->cwd);
+        return true;
+    case 2:
+        laptop_begin_edit(state, 2, pane->ssh);
+        return true;
+    case 3:
+        laptop_begin_edit(state, 3, pane->cmd);
+        return true;
+    case 4:
+        /* Panes have to stay contiguous, so removing one closes the gap
+         * rather than leaving a hole the parser would reject. */
+        if (profile->pane_count <= 1) {
+            laptop_set_message(state, "A session needs one pane.");
+            return true;
+        }
+        for (; index < profile->pane_count - 1; ++index)
+            profile->panes[index] = profile->panes[index + 1];
+        (void)memset(&profile->panes[profile->pane_count - 1], 0,
+                     sizeof profile->panes[0]);
+        profile->pane_count--;
+        state->laptop.working_dirty = true;
+        state->laptop.pane_index = 0;
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PANES, 0);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+        return true;
+    default:
+        break;
+    }
+    laptop_open_page(state, DESK_LAPTOP_PAGE_PANES,
+                     state->laptop.pane_index);
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+    return true;
+}
+
+static bool interact_laptop_provider(desk_state *state)
+{
+    int cursor = state->laptop.cursor;
+    if (cursor >= 0 && cursor < (int)desk_laptop_provider_count()) {
+        (void)snprintf(state->laptop.working.desktop,
+                       sizeof state->laptop.working.desktop, "%s",
+                       desk_laptop_provider((size_t)cursor));
+        state->laptop.working_dirty = true;
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+    } else {
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+    }
+    laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 2);
+    return true;
+}
+
+static bool interact_laptop(desk_state *state, const desk_world *world)
+{
+    if (state->laptop.cursor < 0 ||
+        state->laptop.cursor >= desk_laptop_menu_count(state)) {
+        state->mode = DESK_MODE_ROOM;
+        update_nearest(state, world);
+        return false;
+    }
+    if (state->laptop.editing) return laptop_commit_edit(state);
+    switch (state->laptop.page) {
+    case DESK_LAPTOP_PAGE_HOME:
+        return interact_laptop_home(state, world);
+    case DESK_LAPTOP_PAGE_PROFILES:
+        if (state->laptop.cursor < state->laptop_menu_count) {
+            laptop_load_working(state,
+                                state->laptop_menu_ids[state->laptop.cursor]);
+            laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 0);
+            queue_audio(state, DESK_AUDIO_UI_MOVE);
+            return true;
+        }
+        if (state->laptop.cursor == state->laptop_menu_count) {
+            laptop_new_working(state);
+            laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 0);
+            queue_audio(state, DESK_AUDIO_UI_CONFIRM);
+            return true;
+        }
+        laptop_open_page(state, DESK_LAPTOP_PAGE_HOME,
+                         state->laptop.home_cursor);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    case DESK_LAPTOP_PAGE_EDIT:
+        return interact_laptop_edit(state);
+    case DESK_LAPTOP_PAGE_PANES:
+        return interact_laptop_panes(state);
+    case DESK_LAPTOP_PAGE_PANE:
+        return interact_laptop_pane(state);
+    case DESK_LAPTOP_PAGE_PROVIDER:
+        return interact_laptop_provider(state);
+    case DESK_LAPTOP_PAGE_DELETE:
+        if (state->laptop.cursor == 0) {
+            laptop_delete_working(state);
+            return true;
+        }
+        laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 0);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return true;
+    }
+    return false;
+}
+
+/* Escape walks one page back up; the lid only closes from HOME. */
+static void cancel_laptop(desk_state *state, const desk_world *world)
+{
+    if (state->laptop.editing) {
+        state->laptop.editing = false;
+        state->laptop.edit_length = 0;
+        (void)memset(state->laptop.edit_buffer, 0,
+                     sizeof state->laptop.edit_buffer);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return;
+    }
+    switch (state->laptop.page) {
+    case DESK_LAPTOP_PAGE_PROFILES:
+        laptop_open_page(state, DESK_LAPTOP_PAGE_HOME,
+                         state->laptop.home_cursor);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return;
+    case DESK_LAPTOP_PAGE_EDIT:
+    case DESK_LAPTOP_PAGE_DELETE:
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PROFILES, 0);
+        if (state->laptop.working_dirty)
+            laptop_set_message(state, "Left unsaved.");
+        state->laptop.working_dirty = false;
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return;
+    case DESK_LAPTOP_PAGE_PANES:
+        laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 3);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return;
+    case DESK_LAPTOP_PAGE_PANE:
+        laptop_open_page(state, DESK_LAPTOP_PAGE_PANES,
+                         state->laptop.pane_index);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return;
+    case DESK_LAPTOP_PAGE_PROVIDER:
+        laptop_open_page(state, DESK_LAPTOP_PAGE_EDIT, 2);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return;
+    case DESK_LAPTOP_PAGE_HOME:
+        break;
+    }
+    state->mode = DESK_MODE_ROOM;
+    queue_audio(state, DESK_AUDIO_UI_MOVE);
+    update_nearest(state, world);
 }
 
 bool desk_take_laptop_request(desk_state *state,
@@ -2408,9 +3519,8 @@ static bool interact_confirm(desk_state *state, const desk_world *world)
             state->quit_requested = true;
         }
         state->confirm = DESK_CONFIRM_NONE;
-        state->mode = DESK_MODE_ROOM;
+        close_choice_menu(state, world);
         queue_audio(state, DESK_AUDIO_UI_CONFIRM);
-        update_nearest(state, world);
         return true;
     }
     if (state->confirm == DESK_CONFIRM_CAST_CHANGE) {
@@ -2421,6 +3531,27 @@ static bool interact_confirm(desk_state *state, const desk_world *world)
             state->mode = DESK_MODE_WIZARD;
             queue_audio(state, DESK_AUDIO_UI_MOVE);
         }
+        return true;
+    }
+    if (state->confirm == DESK_CONFIRM_LOGOUT ||
+        state->confirm == DESK_CONFIRM_REBOOT ||
+        state->confirm == DESK_CONFIRM_POWEROFF) {
+        desk_confirm answered = state->confirm;
+        if (state->confirm_cursor == 0) {
+            /* The house is about to end: write the profile where it
+             * stands first, then let launcher.c run the argv. */
+            sync_profile_position(state, world);
+            state->profile_dirty = true;
+            state->pending_launch =
+                answered == DESK_CONFIRM_LOGOUT ? DESK_TARGET_POWER_LOGOUT :
+                answered == DESK_CONFIRM_REBOOT ? DESK_TARGET_POWER_REBOOT :
+                                                  DESK_TARGET_POWER_POWEROFF;
+            (void)memset(state->pending_launch_object, 0,
+                         sizeof state->pending_launch_object);
+        }
+        state->confirm = DESK_CONFIRM_NONE;
+        close_choice_menu(state, world);
+        queue_audio(state, DESK_AUDIO_UI_CONFIRM);
         return true;
     }
     return false;
@@ -2467,7 +3598,7 @@ bool desk_interact(desk_state *state, const desk_world *world)
     if (!state || !world) return false;
     switch (state->mode) {
     case DESK_MODE_ROOM:
-        return interact_room(state, world, current_room(state, world));
+        return interact_room(state, current_room(state, world));
     case DESK_MODE_DIALOGUE:
         return interact_dialogue(state);
     case DESK_MODE_WIZARD:
@@ -2485,6 +3616,8 @@ bool desk_interact(desk_state *state, const desk_world *world)
         return interact_inventory(state);
     case DESK_MODE_LAPTOP:
         return interact_laptop(state, world);
+    case DESK_MODE_CHOICE:
+        return interact_choice(state, world);
     }
     return false;
 }
@@ -2538,9 +3671,7 @@ void desk_cancel(desk_state *state, const desk_world *world)
         update_nearest(state, world);
         return;
     case DESK_MODE_LAPTOP:
-        state->mode = DESK_MODE_ROOM;
-        queue_audio(state, DESK_AUDIO_UI_MOVE);
-        update_nearest(state, world);
+        cancel_laptop(state, world);
         return;
     case DESK_MODE_INVENTORY:
         if (state->inventory_mark >= 0) {
@@ -2552,10 +3683,19 @@ void desk_cancel(desk_state *state, const desk_world *world)
         queue_audio(state, DESK_AUDIO_UI_MOVE);
         update_nearest(state, world);
         return;
+    case DESK_MODE_CHOICE:
+        close_choice_menu(state, world);
+        queue_audio(state, DESK_AUDIO_UI_MOVE);
+        return;
     case DESK_MODE_CONFIRM:
         if (state->confirm == DESK_CONFIRM_CAST_CHANGE) {
             state->confirm = DESK_CONFIRM_NONE;
             state->mode = DESK_MODE_WIZARD;
+        } else if (state->choice != DESK_CHOICE_NONE) {
+            /* Backing out of a power question returns to the fixture
+             * that asked it, not straight to the floor. */
+            state->confirm = DESK_CONFIRM_NONE;
+            state->mode = DESK_MODE_CHOICE;
         } else {
             state->confirm = DESK_CONFIRM_NONE;
             state->mode = DESK_MODE_ROOM;
@@ -2595,7 +3735,20 @@ void desk_cancel(desk_state *state, const desk_world *world)
 
 bool desk_text_input(desk_state *state, uint32_t codepoint)
 {
-    if (!state || state->mode != DESK_MODE_WIZARD ||
+    if (!state) return false;
+    if (state->mode == DESK_MODE_LAPTOP && state->laptop.editing) {
+        if (codepoint < 32u || codepoint > 126u) return false;
+        if (state->laptop.edit_length < 0 ||
+            state->laptop.edit_length >=
+                (int)sizeof state->laptop.edit_buffer - 1)
+            return false;
+        state->laptop.edit_buffer[state->laptop.edit_length] =
+            (char)codepoint;
+        state->laptop.edit_length++;
+        state->laptop.edit_buffer[state->laptop.edit_length] = '\0';
+        return true;
+    }
+    if (state->mode != DESK_MODE_WIZARD ||
         state->wizard_step != DESK_WIZARD_NAME)
         return false;
     if (codepoint < 32u || codepoint > 126u) return false;
@@ -2610,7 +3763,14 @@ bool desk_text_input(desk_state *state, uint32_t codepoint)
 
 bool desk_text_backspace(desk_state *state)
 {
-    if (!state || state->mode != DESK_MODE_WIZARD ||
+    if (!state) return false;
+    if (state->mode == DESK_MODE_LAPTOP && state->laptop.editing) {
+        if (state->laptop.edit_length <= 0) return false;
+        state->laptop.edit_length--;
+        state->laptop.edit_buffer[state->laptop.edit_length] = '\0';
+        return true;
+    }
+    if (state->mode != DESK_MODE_WIZARD ||
         state->wizard_step != DESK_WIZARD_NAME ||
         state->wizard_name_len <= 0)
         return false;
@@ -2670,7 +3830,7 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         state->player_y > room->walk.y + room->walk.h)
         return validate_fail(error, error_size, "player outside walk rect");
     if ((int)state->mode < (int)DESK_MODE_WIZARD ||
-        (int)state->mode > (int)DESK_MODE_LAPTOP)
+        (int)state->mode > (int)DESK_MODE_LAST)
         return validate_fail(error, error_size, "mode out of range");
     if (state->status_line_count < 0 ||
         state->status_line_count > DESK_STATUS_LINE_COUNT)
@@ -2706,16 +3866,47 @@ bool desk_validate(const desk_state *state, const desk_world *world,
         state->wizard_confirm_cursor > 1)
         return validate_fail(error, error_size,
                              "wizard confirm cursor out of range");
-    if (state->pause_cursor < 0 || state->pause_cursor > 3)
+    if (state->pause_cursor < 0 || state->pause_cursor > 4)
         return validate_fail(error, error_size, "pause cursor out of range");
     if (state->laptop_menu_count < 0 ||
         state->laptop_menu_count > DESK_LAPTOP_MENU_PROFILES)
         return validate_fail(error, error_size,
                              "laptop menu count out of range");
-    if (state->laptop_menu_cursor < 0 ||
-        state->laptop_menu_cursor >= state->laptop_menu_count + 2)
+    if ((int)state->laptop.page < (int)DESK_LAPTOP_PAGE_HOME ||
+        (int)state->laptop.page > (int)DESK_LAPTOP_PAGE_LAST)
+        return validate_fail(error, error_size, "laptop page out of range");
+    if (state->laptop.cursor < 0 ||
+        state->laptop.cursor >= desk_laptop_menu_count(state))
         return validate_fail(error, error_size,
-                             "laptop menu cursor out of range");
+                             "laptop cursor out of range");
+    if (state->laptop.pane_index < 0 ||
+        state->laptop.pane_index >= DESK_LAPTOP_PANES_MAX)
+        return validate_fail(error, error_size,
+                             "laptop pane index out of range");
+    if (state->laptop.edit_length < 0 ||
+        state->laptop.edit_length >= (int)sizeof state->laptop.edit_buffer ||
+        state->laptop.edit_buffer[state->laptop.edit_length] != '\0' ||
+        (int)strlen(state->laptop.edit_buffer) !=
+            state->laptop.edit_length)
+        return validate_fail(error, error_size, "laptop edit malformed");
+    if (state->laptop.working.pane_count < 0 ||
+        state->laptop.working.pane_count > DESK_LAPTOP_PANES_MAX)
+        return validate_fail(error, error_size,
+                             "laptop pane count out of range");
+    if ((int)state->choice < (int)DESK_CHOICE_NONE ||
+        (int)state->choice > (int)DESK_CHOICE_NOTICE_BOARD)
+        return validate_fail(error, error_size, "choice menu out of range");
+    if (state->choice_count < 0 ||
+        state->choice_count > DESK_CHOICE_MAX_ROWS)
+        return validate_fail(error, error_size,
+                             "choice row count out of range");
+    if (state->choice_cursor < 0 ||
+        (state->choice_count > 0 &&
+         state->choice_cursor >= state->choice_count))
+        return validate_fail(error, error_size, "choice cursor out of range");
+    if (state->mode == DESK_MODE_CHOICE && state->choice_count < 1)
+        return validate_fail(error, error_size,
+                             "choice mode without rows");
     if (state->inventory_cursor < 0 ||
         state->inventory_cursor >= DESK_INVENTORY_SLOTS)
         return validate_fail(error, error_size,
@@ -2731,7 +3922,7 @@ bool desk_validate(const desk_state *state, const desk_world *world,
     if (state->confirm_cursor < 0 || state->confirm_cursor > 1)
         return validate_fail(error, error_size, "confirm cursor out of range");
     if ((int)state->confirm < (int)DESK_CONFIRM_NONE ||
-        (int)state->confirm > (int)DESK_CONFIRM_CAST_CHANGE)
+        (int)state->confirm > (int)DESK_CONFIRM_POWEROFF)
         return validate_fail(error, error_size, "confirm kind out of range");
     if (state->mode == DESK_MODE_CONFIRM &&
         state->confirm == DESK_CONFIRM_NONE)

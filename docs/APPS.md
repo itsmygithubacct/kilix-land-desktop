@@ -37,11 +37,96 @@ data can never introduce a new argv. This file documents that registry.
 | `trash` | trash can (kitchen) | file manager candidate table on `~/.local/share/Trash/files`, tab |
 | `mailbox` | mailbox (yard) | `kilix-memory` → `kilix memory`; tab |
 | `maintenance` | shed (yard) | tab: `tools/land_config.py` — the binding configuration TUI |
+| `browser` | screen (study) | `kilix chawan`; tab |
 
 The file-manager candidate table (used by `files`, `trash`, and folder
 bindings): **`kilix-file`** (the kilix-tui-utils file manager) first, then
 `mc`, `ranger`, `nnn`, `lf` — first found on PATH wins. All run in a tab
 with the start directory as the positional argument.
+
+### Rows reached from a fixture's panel
+
+These are not authored on objects. A fixture that owns a family of
+intents opens a **choice panel** (below) whose rows name them.
+
+| Target | Reached from | Resolution |
+|---|---|---|
+| `settings` | shed, computer, pause menu | `kilix-settings` → `kilix settings`; tab |
+| `update` | shed | `plebian-os` (the stack control TUI) → `kilix update`; tab |
+| `catalog` | computer | `kilix-launcher` → `python3 tools/land_catalog.py`; tab |
+| `dictation` | phone | `kilix-stt` → `kilix stt`; tab |
+| `voice-help` | phone | `kilix voice status`; tab |
+| `sessions` | dev rig | `kilix-pty` → `kilix pty`; tab |
+| `tmux` | dev rig | `tmux-tui` → `kilix tmux`; tab |
+| `mux` | dev rig | `kilix mux`; tab |
+| `temps` | notice board | `kilix-temps` → `kilix temps`; tab |
+| `password` | notice board (only while the login password is the default) | `passwd`; tab |
+| `manual` | bookshelf | first readable of `$KILIX_HOME/README.md`, `$GPU_TERMINAL_SOURCE_HOME/kilix/README.md`, `/usr/local/share/doc/kilix/README.md`, this desktop's own README, in `less` |
+| `recovery` | bookshelf | first readable of `$PLEB_RECOVERY_DOC_DST`, `/usr/local/share/doc/pleb/RECOVERY.md`, `$GPU_TERMINAL_SOURCE_HOME/pleb/docs/RECOVERY.md`, in `less` |
+| `web` | screen | `kilix open-url` — a real browser when the machine has one, an in-pane render when it does not; tab |
+| `power-logout` | bed | `loginctl terminate-session $XDG_SESSION_ID` |
+| `power-reboot` | bed | `systemctl reboot` |
+| `power-poweroff` | bed | `systemctl poweroff` |
+
+**Power runs detached, not in a tab**, and skips the remote-control gate:
+the machine is on its way down, a tab would close before anyone could
+read a refusal, and a desktop that has lost remote control must still be
+able to shut the machine off. The three argv vectors are the fleet's one
+list — `kilix-tui-utils/src/kilix_tui/privileged.py` names exactly these —
+mirrored rather than imported because a C desktop cannot import Python.
+A host that grows `kilix power logout|reboot|poweroff` runs the same three
+vectors, so the desktop needs no probe to agree with it. Each action is
+confirmed first by the bed's own YES/NO panel.
+
+**Programs** prefers a host-owned catalog (`kilix-launcher`, installed
+alongside the shared catalog TUI) and falls back to
+`tools/land_catalog.py`, which discovers XDG `.desktop` applications, the
+user's own desktop-folder launchers, the stack's installed programs, and
+offers a run-a-command row. There is deliberately **no `kilix launcher`
+rung** between them: a host that does not know the subcommand forwards it
+to the terminal instead of refusing, so the ladder would spawn a broken
+tab rather than fall through. Presence of the installed command is the
+honest test.
+
+**Games** hands the chosen id to `kilix games play GAME` when this
+machine's `kilix` has that verb, and otherwise execs a local Kilix 95
+checkout's `games.py` as before. `tools/land_games.py` probes by running
+`kilix games play` with no id — every version refuses, and the refusal
+names the verb only where it exists — so nothing launches to find out.
+
+## Fixture choice panels
+
+Most fixtures do one thing. A few own a family of intents, and those open
+a small panel instead of launching straight away. The menus are compiled
+tables in `src/desk.c` keyed by the object's target, so `world.json` gains
+no new vocabulary, and **a `bindings.conf` override still applies to the
+fixture's own default row** — the row whose target matches the object's
+compiled one — never to the rows the panel adds.
+
+| Fixture | Rows |
+|---|---|
+| bed (bedroom) | rest (leave the desktop) · sleep (log out) · wake anew (restart) · power down the house · stay up |
+| shed (yard) | tune the appliances (bindings) · read the fuse box (settings) · service the house (update) · shut the shed |
+| phone (living) | listen (read aloud) · speak (dictation) · ask the operator (voice status) · hang up |
+| dev rig (study) | coding agents · persistent sessions · tmux manager · share this session · leave it running |
+| bookshelf (study) | the system manual · the recovery guide · man pages · put it back |
+| screen (study) | read the screen (text browser) · open the web · switch it off |
+| computer (study) | open a terminal · browse the programs · desktop settings · step away |
+| notice board (kitchen) | read the board · house temperature · change the locks¹ · walk away |
+
+¹ Only while the Plebian-OS helper confirms the login password is still
+the shipped default; the same check adds a note to the board itself. Any
+uncertainty — no helper, no sudo rule, a timeout — reads as "not
+default", so the nag never appears spuriously.
+
+The **notice board** reads files only, and now reports: who and which
+house, the hall clock (`KILIX_CHROME_CLOCK_FORMAT` picks 12- or 24-hour),
+the version and room count, host, uptime, load, free memory, battery,
+network carrier, and the CPU package temperature. Lines that this machine
+cannot answer are simply absent.
+
+The **pause menu** (Esc) also carries SETTINGS: whichever room you are
+standing in, the shared settings TUI is one keystroke away.
 
 ## Per-object bindings
 
@@ -67,8 +152,8 @@ open in the file-manager candidate table at that path. Deleting the line
 | Target | Object (room) | Behavior |
 |---|---|---|
 | `wardrobe` | wardrobe (bedroom) | reopen the character wizard seeded with the profile |
-| `bed` | bed (bedroom) | confirm → save profile → clean exit |
-| `status-board` | notice board (kitchen) | in-process status panel (reads files only) |
+| `bed` | bed (bedroom) | the power panel; resting saves the profile and exits cleanly |
+| `status-board` | notice board (kitchen) | the board panel; reading it is in-process (files only) |
 | `gate-locked` | gate (yard) | toast — the street extension point |
 | `kettle` | kettle (kitchen) | receiver fixture; empty interaction shows a patient hum toast |
 
@@ -77,15 +162,20 @@ Dialogue with housemate NPCs is proximity + interact, also fully in-process.
 ## The laptop
 
 The study spawns a **laptop** (`core:tool/laptop`) — the one item whose
-Enter does not pocket it. A set-up laptop opens a session menu instead;
-picking it up is the menu's explicit **PICK UP LAPTOP** row. Carried, it is
+Enter does not pocket it. A set-up laptop **opens its screen** instead;
+picking it up is the screen's explicit **PICK UP LAPTOP** row. Carried, it is
 an ordinary placeable: **Space** sets it up again wherever you stand — any
 desk or clear surface in any room — and the placement persists in
 `world.state` like every other world item.
 
-The menu lists **laptop profiles**, one convention shared by every kilix
-desktop that ships a laptop (kilix-cap's Study laptop reads the same
-directory):
+Opening the lid hands over **the whole canvas**: no room behind it, no
+hotbar over it, a bezel and a title bar instead. You are looking at a
+machine, not at a room with a machine in it. Escape closes the lid (or
+steps back one page); the room is exactly as you left it.
+
+The screen's home page lists **laptop profiles**, one convention shared by
+every kilix desktop that ships a laptop (kilix-cap's Study laptop reads the
+same directory):
 
 ```
 ~/.local/gpu_terminal/laptop/<id>.profile
@@ -95,7 +185,9 @@ directory):
 tests use this.) A profile is a plain `KEY=value` file; `#` comments. The
 first time the directory has to be created it is seeded with the bundled
 examples from `assets/laptop/`; an existing directory is never reseeded.
-The menu shows the first 8 profiles, re-scanned every time it opens.
+The home page shows the first 8 profiles, re-scanned every time it opens,
+and **Enter on a profile opens that session** — the fast path stays one
+keystroke deep.
 
 | Key            | Meaning |
 |---|---|
@@ -122,13 +214,46 @@ pane.2.cmd=tail -f syslog
 ```
 
 Choosing a **pane profile** writes a generated kitty `--session` file
-under the config home and runs `kilix --detach --session <file>` — the
-laptop gets its own kilix window. Choosing a **desktop profile** runs
-`kilix <provider>` (`95` maps to `kilix desktop 95`). Both are fixed argv
-vectors through `posix_spawnp` under the same session gate, kill switch,
-and toast reporting as every row above. `./kilix-land-desktop
---laptop-test` covers profile parsing, the menu state machine, pickup and
-set-up, and world.state persistence.
+under the config home and runs `kilix --detach --session <file>
+--start-as=fullscreen` — the laptop gets its own kilix window, opened full
+screen, because the laptop opens a machine rather than a window. (`kilix`
+forwards anything it does not recognise straight to kitty.) Choosing a
+**desktop profile** runs `kilix <provider>` (`95` maps to `kilix desktop
+95`) with no such flag: a provider owns its own presentation.  Both are
+fixed argv vectors through `posix_spawnp` under the same session gate,
+kill switch, and toast reporting as every row above.
+
+### Configuring profiles from inside the house
+
+**CONFIGURE PROFILES** on the home page opens the authoring pages, so a
+profile can be written without leaving the desktop or knowing the file
+format:
+
+| Page | Rows |
+|---|---|
+| profiles | every profile, **NEW PROFILE**, back |
+| profile | **name**, **opens** (a session / a desktop), **layout** (splits / tabs) or **desktop** (which provider), **panes**, **save**, **delete**, back |
+| panes | every pane with a one-line summary, **add a pane**, back |
+| pane | **title**, **directory**, **ssh host**, **command**, **remove this pane**, back |
+
+Field rows edit in place: Enter opens the field, typing edits it, Enter
+keeps it, Escape puts it back. Toggle rows (opens, layout) flip on Enter
+and clear whichever half they leave behind, so a profile can never end up
+as a desktop *and* panes. Removing a pane closes the gap, because the
+loader rejects gaps.
+
+**Nothing reaches the disk until SAVE**, and saving runs the same rules
+the loader enforces — a value the reader would reject is refused at the
+field, with the reason on the footer line, so a profile the pages produce
+is always one the loader accepts. A new profile's file id is derived from
+its name (`Test Bench` → `test-bench.profile`, `-2`, `-3` … when taken).
+Deleting asks first.
+
+`./kilix-land-desktop --laptop-test` covers profile parsing, the screen's
+page machine, the whole configuration round trip (create, rename, toggle
+kind, pick a provider, add and edit a pane, a refused ssh destination,
+save, reload from disk, delete), pickup and set-up, and world.state
+persistence.
 
 ## Debug menu
 

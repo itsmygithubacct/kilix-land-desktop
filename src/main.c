@@ -1805,13 +1805,16 @@ static int selftest_body(void)
     /* No desktop.conf in the temp config home, so the Debug entry is
      * present: walk into the submenu and back out, then reach QUIT by
      * label rather than by a hard-coded index. */
-    if (desk_pause_item_count(&state) != 4 ||
-        strcmp(desk_pause_item(&state, 2), "DEBUG") != 0) {
+    if (desk_pause_item_count(&state) != 5 ||
+        strcmp(desk_pause_item(&state, 2), "SETTINGS") != 0 ||
+        strcmp(desk_pause_item(&state, 3), "DEBUG") != 0) {
         (void)fprintf(stderr, "FAIL selftest pause debug entry missing\n");
         return EXIT_FAILURE;
     }
-    desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
-    desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+    while (state.pause_cursor < desk_pause_item_count(&state) - 1 &&
+           strcmp(desk_pause_item(&state, state.pause_cursor),
+                  "DEBUG") != 0)
+        desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
     if (!desk_interact(&state, &world) || !state.pause_debug ||
         desk_pause_item_count(&state) != 2 ||
         strcmp(desk_pause_item(&state, 0), "WALK EDITOR") != 0 ||
@@ -3450,6 +3453,10 @@ static int run_interactive(void)
         return EXIT_FAILURE;
     }
     desk_init(&state, &world, &catalog);
+    /* Asked once, before the terminal is live: the notice board grows a
+     * "change the locks" note only while the login password is still the
+     * one the image shipped with. */
+    state.default_password = desk_launcher_password_is_default();
     if (!desk_graphics_init(&graphics, asset_root())) {
         (void)fprintf(stderr,
             "kilix-land-desktop: could not load graphics under %s "
@@ -3524,8 +3531,9 @@ static int run_interactive(void)
         now = kilix_game_monotonic_ns();
         frame = kilix_game_clock_advance(&clock, now);
         for (step = 0u; step < frame.steps; ++step) {
-            bool name_entry = state.mode == DESK_MODE_WIZARD &&
-                              state.wizard_step == DESK_WIZARD_NAME;
+            /* The wizard's name step and the laptop's open field are the
+             * two places typing means text rather than a shortcut. */
+            bool name_entry = desk_text_entry_active(&state);
             if (name_entry) {
                 int text_index;
                 for (text_index = 0;
@@ -3706,6 +3714,185 @@ static int laptop_world_item_index(const desk_state *state, int definition)
     return -1;
 }
 
+/* Walk the laptop cursor to a row. The screen steps one row per update,
+ * exactly as a keypress does. */
+static bool laptop_move_to(desk_state *state, const desk_world *world,
+                           int row)
+{
+    int guard;
+    for (guard = 0; guard < DESK_LAPTOP_ROWS_MAX * 2; ++guard) {
+        if (state->laptop.cursor == row) return true;
+        desk_update(state, world, 0, 1, DESK_TICK_SECONDS);
+    }
+    return false;
+}
+
+/* Replace whatever the open field holds. */
+static bool laptop_type(desk_state *state, const char *text)
+{
+    size_t index;
+    if (!state->laptop.editing) return false;
+    while (state->laptop.edit_length > 0)
+        if (!desk_text_backspace(state)) return false;
+    for (index = 0u; text[index] != '\0'; ++index)
+        if (!desk_text_input(state, (uint32_t)(unsigned char)text[index]))
+            return false;
+    return true;
+}
+
+/* The configuration pages: create a profile, edit its fields, refuse a
+ * value the loader would refuse, save it to disk, and delete it again —
+ * the whole round trip a person makes without leaving the house. */
+static int laptop_configuration_test(desk_state *state,
+                                     const desk_world *world)
+{
+    desk_laptop_profile written;
+    char error[DESK_LAPTOP_ERROR_CAPACITY];
+
+    if (!desk_interact(state, world) ||
+        state->mode != DESK_MODE_LAPTOP) {
+        (void)fprintf(stderr, "FAIL laptop config open\n");
+        return EXIT_FAILURE;
+    }
+    /* HOME -> CONFIGURE PROFILES */
+    if (!laptop_move_to(state, world, 2) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_PROFILES ||
+        desk_laptop_menu_count(state) != 4 ||
+        strcmp(desk_laptop_menu_item(state, 2), "NEW PROFILE") != 0) {
+        (void)fprintf(stderr, "FAIL laptop config list\n");
+        return EXIT_FAILURE;
+    }
+    /* NEW PROFILE -> EDIT, a one-pane session by default. */
+    if (!laptop_move_to(state, world, 2) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_EDIT ||
+        !state->laptop.creating ||
+        state->laptop.working.pane_count != 1 ||
+        desk_laptop_menu_count(state) != 7) {
+        (void)fprintf(stderr, "FAIL laptop new profile\n");
+        return EXIT_FAILURE;
+    }
+    /* NAME */
+    if (!laptop_move_to(state, world, 0) || !desk_interact(state, world) ||
+        !state->laptop.editing || !laptop_type(state, "Test Bench") ||
+        !desk_interact(state, world) || state->laptop.editing ||
+        strcmp(state->laptop.working.name, "Test Bench") != 0) {
+        (void)fprintf(stderr, "FAIL laptop name field\n");
+        return EXIT_FAILURE;
+    }
+    /* OPENS toggles to a desktop profile and the provider page picks
+     * which one; toggling back restores a session with a pane. */
+    if (!laptop_move_to(state, world, 1) || !desk_interact(state, world) ||
+        state->laptop.working.desktop[0] == '\0' ||
+        state->laptop.working.pane_count != 0 ||
+        desk_laptop_menu_count(state) != 6) {
+        (void)fprintf(stderr, "FAIL laptop kind toggle\n");
+        return EXIT_FAILURE;
+    }
+    if (!laptop_move_to(state, world, 2) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_PROVIDER ||
+        !laptop_move_to(state, world, 3) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_EDIT ||
+        strcmp(state->laptop.working.desktop, "cap") != 0) {
+        (void)fprintf(stderr, "FAIL laptop provider page\n");
+        return EXIT_FAILURE;
+    }
+    if (!laptop_move_to(state, world, 1) || !desk_interact(state, world) ||
+        state->laptop.working.desktop[0] != '\0' ||
+        state->laptop.working.pane_count != 1) {
+        (void)fprintf(stderr, "FAIL laptop kind toggle back\n");
+        return EXIT_FAILURE;
+    }
+    /* LAYOUT toggles splits/tabs in place. */
+    if (!laptop_move_to(state, world, 2) || !desk_interact(state, world) ||
+        !state->laptop.working.tabs) {
+        (void)fprintf(stderr, "FAIL laptop layout toggle\n");
+        return EXIT_FAILURE;
+    }
+    /* PANES -> add a second pane, then edit it. */
+    if (!laptop_move_to(state, world, 3) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_PANES ||
+        desk_laptop_menu_count(state) != 3) {
+        (void)fprintf(stderr, "FAIL laptop panes page\n");
+        return EXIT_FAILURE;
+    }
+    if (!laptop_move_to(state, world, 1) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_PANE ||
+        state->laptop.working.pane_count != 2 ||
+        state->laptop.pane_index != 1) {
+        (void)fprintf(stderr, "FAIL laptop add pane\n");
+        return EXIT_FAILURE;
+    }
+    /* A destination the loader would refuse is refused here too, and the
+     * field stays open rather than keeping a value nothing can run. */
+    if (!laptop_move_to(state, world, 2) || !desk_interact(state, world) ||
+        !laptop_type(state, "host; rm -rf /") ||
+        !desk_interact(state, world) || !state->laptop.editing ||
+        state->laptop.working.panes[1].ssh[0] != '\0' ||
+        desk_laptop_message(state)[0] == '\0') {
+        (void)fprintf(stderr, "FAIL laptop ssh refusal\n");
+        return EXIT_FAILURE;
+    }
+    if (!laptop_type(state, "admin@example-host") ||
+        !desk_interact(state, world) || state->laptop.editing ||
+        strcmp(state->laptop.working.panes[1].ssh,
+               "admin@example-host") != 0) {
+        (void)fprintf(stderr, "FAIL laptop ssh accept\n");
+        return EXIT_FAILURE;
+    }
+    if (!laptop_move_to(state, world, 3) || !desk_interact(state, world) ||
+        !laptop_type(state, "tail -f syslog") ||
+        !desk_interact(state, world) ||
+        strcmp(state->laptop.working.panes[1].cmd, "tail -f syslog") != 0) {
+        (void)fprintf(stderr, "FAIL laptop command field\n");
+        return EXIT_FAILURE;
+    }
+    /* Back out to EDIT and save. */
+    desk_cancel(state, world);
+    if (state->laptop.page != DESK_LAPTOP_PAGE_PANES) {
+        (void)fprintf(stderr, "FAIL laptop pane escape\n");
+        return EXIT_FAILURE;
+    }
+    desk_cancel(state, world);
+    if (state->laptop.page != DESK_LAPTOP_PAGE_EDIT ||
+        !laptop_move_to(state, world, 4) || !desk_interact(state, world) ||
+        state->laptop.creating || state->laptop.working_dirty ||
+        state->laptop_menu_count != 3) {
+        (void)fprintf(stderr, "FAIL laptop save\n");
+        return EXIT_FAILURE;
+    }
+    /* What landed on disk is what the loader reads back. */
+    if (!desk_laptop_load("test-bench", &written, error, sizeof error) ||
+        strcmp(written.name, "Test Bench") != 0 || !written.tabs ||
+        written.pane_count != 2 ||
+        strcmp(written.panes[1].ssh, "admin@example-host") != 0 ||
+        strcmp(written.panes[1].cmd, "tail -f syslog") != 0) {
+        (void)fprintf(stderr, "FAIL laptop saved profile reload: %s\n",
+                      error);
+        return EXIT_FAILURE;
+    }
+    /* DELETE asks first, then removes the file and the row. */
+    if (!laptop_move_to(state, world, 5) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_DELETE ||
+        !laptop_move_to(state, world, 0) || !desk_interact(state, world) ||
+        state->laptop.page != DESK_LAPTOP_PAGE_PROFILES ||
+        state->laptop_menu_count != 2 ||
+        desk_laptop_load("test-bench", &written, error, sizeof error)) {
+        (void)fprintf(stderr, "FAIL laptop delete\n");
+        return EXIT_FAILURE;
+    }
+    desk_cancel(state, world);
+    if (state->laptop.page != DESK_LAPTOP_PAGE_HOME) {
+        (void)fprintf(stderr, "FAIL laptop config back to home\n");
+        return EXIT_FAILURE;
+    }
+    desk_cancel(state, world);
+    if (state->mode != DESK_MODE_ROOM) {
+        (void)fprintf(stderr, "FAIL laptop config close\n");
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
 /* The set-up laptop's whole loop: menu on Enter, profile choice raised as
  * one take-and-clear request, PICK UP back into the hand, Space to set it
  * up again, and the placed laptop persisting through a world.state
@@ -3778,18 +3965,23 @@ static int laptop_test_body(const char *config_dir)
     }
     if (!desk_interact(&state, &world) ||
         state.mode != DESK_MODE_LAPTOP ||
+        state.laptop.page != DESK_LAPTOP_PAGE_HOME ||
         state.laptop_menu_count != 2 ||
+        desk_laptop_menu_count(&state) != 5 ||
         strcmp(desk_laptop_menu_item(&state, 0), "bench") != 0 ||
         strcmp(desk_laptop_menu_item(&state, 1), "ops") != 0 ||
-        strcmp(desk_laptop_menu_item(&state, 2), "PICK UP LAPTOP") != 0 ||
-        strcmp(desk_laptop_menu_item(&state, 3), "CLOSE") != 0) {
+        strcmp(desk_laptop_menu_item(&state, 2),
+               "CONFIGURE PROFILES") != 0 ||
+        strcmp(desk_laptop_menu_item(&state, 3), "PICK UP LAPTOP") != 0 ||
+        strcmp(desk_laptop_menu_item(&state, 4), "CLOSE THE LID") != 0) {
         (void)fprintf(stderr, "FAIL laptop menu open\n");
         return EXIT_FAILURE;
     }
 
-    /* Cursor to the second profile and choose it. */
+    /* Cursor to the second profile and choose it: HOME keeps the fast
+     * path, one Enter from the list to the session. */
     desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
-    if (state.laptop_menu_cursor != 1 || !desk_interact(&state, &world) ||
+    if (state.laptop.cursor != 1 || !desk_interact(&state, &world) ||
         state.mode != DESK_MODE_ROOM ||
         !desk_take_laptop_request(&state, taken) ||
         strcmp(taken, "ops") != 0 ||
@@ -3809,13 +4001,17 @@ static int laptop_test_body(const char *config_dir)
         return EXIT_FAILURE;
     }
 
+    if (laptop_configuration_test(&state, &world) != EXIT_SUCCESS)
+        return EXIT_FAILURE;
+
     /* PICK UP LAPTOP pockets it through the ordinary pickup path. */
     if (!desk_interact(&state, &world) ||
         state.mode != DESK_MODE_LAPTOP)
         return EXIT_FAILURE;
     desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
     desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
-    if (state.laptop_menu_cursor != 2 || !desk_interact(&state, &world) ||
+    desk_update(&state, &world, 0, 1, DESK_TICK_SECONDS);
+    if (state.laptop.cursor != 3 || !desk_interact(&state, &world) ||
         state.mode != DESK_MODE_ROOM ||
         laptop_world_item_index(&state, laptop_def) >= 0 ||
         (slot = laptop_inventory_slot(&state, laptop_def)) < 0) {
@@ -3876,8 +4072,9 @@ static int laptop_test_body(const char *config_dir)
         if (!desk_interact(&state, &world) ||
             state.mode != DESK_MODE_LAPTOP ||
             state.laptop_menu_count != 0 ||
+            desk_laptop_menu_count(&state) != 3 ||
             strcmp(desk_laptop_menu_item(&state, 0),
-                   "PICK UP LAPTOP") != 0) {
+                   "CONFIGURE PROFILES") != 0) {
             (void)fprintf(stderr, "FAIL laptop empty menu\n");
             return EXIT_FAILURE;
         }
@@ -3901,6 +4098,7 @@ static int laptop_test_body(const char *config_dir)
 
     (void)printf(
         "PASS laptop profiles=2 menu=open/choose/escape/pickup "
+        "config=new/name/kind/provider/layout/panes/refusal/save/delete "
         "setup=placed persistence=world.state empty=usable\n");
     return EXIT_SUCCESS;
 }
@@ -3923,8 +4121,70 @@ static int laptop_test(void)
 
 /* Review workflow (IMPLEMENTATION.md section 13): render one frame of an
  * arbitrary room in an arbitrary style to PATH as a P6 PPM. */
+/* Panels a screenshot can open, so a UI change can be looked at rather
+ * than only asserted about. Each names the fixture whose activation
+ * raises it; "board" activates the notice board twice to get past its
+ * panel to the board itself. */
+typedef struct panel_shot {
+    const char *name;
+    const char *room;
+    const char *object;
+    int activations;
+} panel_shot;
+
+static const panel_shot PANEL_SHOTS[] = {
+    { "bed", "bedroom", "bed", 1 },
+    { "shed", "yard", "shed", 1 },
+    { "phone", "living", "phone", 1 },
+    { "dev-rig", "study", "dev-rig", 1 },
+    { "bookshelf", "study", "bookshelf", 1 },
+    { "monitor", "study", "monitor", 1 },
+    { "computer", "study", "computer", 1 },
+    { "notice-board", "kitchen", "notice-board", 1 },
+    { "board", "kitchen", "notice-board", 2 },
+    { "power", "bedroom", "bed", 2 },
+    { "laptop", "study", NULL, 1 },
+    { "laptop-profiles", "study", NULL, 2 },
+    { "laptop-edit", "study", NULL, 3 }
+};
+
+static const panel_shot *find_panel_shot(const char *name)
+{
+    size_t index;
+    for (index = 0u; index < sizeof PANEL_SHOTS / sizeof PANEL_SHOTS[0];
+         ++index)
+        if (strcmp(PANEL_SHOTS[index].name, name) == 0)
+            return &PANEL_SHOTS[index];
+    return NULL;
+}
+
+/* Stand where the fixture is reachable: just below it, clamped into the
+ * room's walkable rect, which is how a player reaches it too. */
+static bool stand_by_object(desk_state *state, const desk_room *room,
+                            const char *object_id)
+{
+    int index;
+    for (index = 0; index < room->object_count; ++index) {
+        const desk_object *object = &room->objects[index];
+        float x;
+        float y;
+        if (strcmp(object->id, object_id) != 0) continue;
+        x = object->rect.x + object->rect.w * 0.5f;
+        y = object->rect.y + object->rect.h + 16.0f;
+        if (x < room->walk.x) x = room->walk.x;
+        if (x > room->walk.x + room->walk.w) x = room->walk.x + room->walk.w;
+        if (y < room->walk.y) y = room->walk.y;
+        if (y > room->walk.y + room->walk.h) y = room->walk.y + room->walk.h;
+        state->player_x = x;
+        state->player_y = y;
+        state->facing = DESK_FACING_UP;
+        return true;
+    }
+    return false;
+}
+
 static int screenshot(const char *path, const char *room_id,
-                      const char *style_name)
+                      const char *style_name, const char *panel_name)
 {
     char config_dir[1024];
     render_fixture fixture;
@@ -3960,12 +4220,62 @@ static int screenshot(const char *path, const char *room_id,
         }
         if (success) state.room = room;
     }
+    if (success && panel_name) {
+        const panel_shot *shot = find_panel_shot(panel_name);
+        if (!shot) {
+            (void)fprintf(stderr, "FAIL screenshot unknown panel '%s'\n",
+                          panel_name);
+            success = false;
+        } else {
+            room = desk_world_room_index(&fixture.world, shot->room);
+            if (room < 0) success = false;
+            else state.room = room;
+        }
+    }
     if (success) {
         const desk_room *scene = &fixture.world.rooms[state.room];
+        const panel_shot *shot = panel_name ? find_panel_shot(panel_name)
+                                            : NULL;
         state.player_x = scene->walk.x + scene->walk.w * 0.5f;
         state.player_y = scene->walk.y + scene->walk.h * 0.5f;
         state.facing = DESK_FACING_DOWN;
         state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        if (shot) {
+            int activation;
+            if (shot->object) {
+                if (!stand_by_object(&state, scene, shot->object)) {
+                    (void)fprintf(stderr,
+                                  "FAIL screenshot no object '%s'\n",
+                                  shot->object);
+                    success = false;
+                }
+            } else {
+                /* The laptop: the study's authored spawn is the target. */
+                state.player_x = 300.0f;
+                state.player_y = 244.0f;
+                state.facing = DESK_FACING_DOWN;
+            }
+            desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
+            for (activation = 0; success && activation < shot->activations;
+                 ++activation) {
+                if (!desk_interact(&state, &fixture.world)) {
+                    (void)fprintf(stderr,
+                                  "FAIL screenshot panel '%s' step %d\n",
+                                  shot->name, activation + 1);
+                    success = false;
+                }
+                /* The laptop's deeper pages sit under CONFIGURE
+                 * PROFILES, which is the row after the profile list. */
+                if (success && !shot->object &&
+                    state.mode == DESK_MODE_LAPTOP &&
+                    activation + 1 < shot->activations) {
+                    while (state.laptop.cursor <
+                           state.laptop_menu_count)
+                        desk_update(&state, &fixture.world, 0, 1,
+                                    DESK_TICK_SECONDS);
+                }
+            }
+        }
         desk_update(&state, &fixture.world, 0, 0, DESK_TICK_SECONDS);
         state.toast_ticks = 0;
         success = sync_graphics(&fixture.graphics, &fixture.world, &state,
@@ -3974,9 +4284,11 @@ static int screenshot(const char *path, const char *room_id,
                               &fixture.graphics) &&
                   sr_write_ppm(ki_td_soft_canvas(&fixture.renderer), path);
         if (success)
-            (void)printf("PASS screenshot room=%s style=%s file=%s\n",
+            (void)printf("PASS screenshot room=%s style=%s panel=%s "
+                         "file=%s\n",
                          fixture.world.rooms[state.room].id,
-                         style_name ? style_name : "legend", path);
+                         style_name ? style_name : "legend",
+                         panel_name ? panel_name : "none", path);
     }
     fixture_close(&fixture);
     if (!remove_tree(config_dir) && success) {
@@ -3995,7 +4307,8 @@ static void usage(const char *program)
         "--wizard-render-test DIR | "
         "--room-render-test DIR | --outfit-render-test DIR | "
         "--walk-render-test DIR | --items-render-test DIR | "
-        "--screenshot PATH [--room ID] [--style STYLE] | --version]\n",
+        "--screenshot PATH [--room ID] [--style STYLE] [--panel NAME] | "
+        "--version]\n",
         program);
 }
 
@@ -4030,17 +4343,21 @@ int main(int argc, char **argv)
     if (argc >= 3 && strcmp(argv[1], "--screenshot") == 0) {
         const char *room = NULL;
         const char *style = NULL;
+        const char *panel = NULL;
         int argument = 3;
         while (argument + 1 < argc) {
             if (strcmp(argv[argument], "--room") == 0)
                 room = argv[argument + 1];
             else if (strcmp(argv[argument], "--style") == 0)
                 style = argv[argument + 1];
+            else if (strcmp(argv[argument], "--panel") == 0)
+                panel = argv[argument + 1];
             else
                 break;
             argument += 2;
         }
-        if (argument == argc) return screenshot(argv[2], room, style);
+        if (argument == argc)
+            return screenshot(argv[2], room, style, panel);
     }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         (void)printf("kilix-land-desktop 0.1.0\n");
