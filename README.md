@@ -9,6 +9,17 @@ yard; interacting with objects (desk computer, filing cabinet, TV, stereo,
 mailbox, bed…) engages OS and desktop functions the way kilix-cap's rooms do,
 but through a walkable avatar.
 
+## Watch the episode
+
+https://github.com/user-attachments/assets/66a1619d-0b16-4d7f-b4c9-8f860546f263
+
+**[Desktop Four: Kilix Land](https://github.com/itsmygithubacct/kilix-land-desktop/releases/download/media-v1/08-kilix-land.mp4)**
+— part eight of *Kilix, Pleb, and Plebian-OS: A Desktop Built Inside a Terminal*, the ten-part
+stack series (1920×1080, 2m37s, 9 MB; published as a
+[media release](https://github.com/itsmygithubacct/kilix-land-desktop/releases/tag/media-v1) so a
+clone stays small). The [full series](https://github.com/itsmygithubacct/plebian-os#watch-the-series) (31m22s)
+lives on `plebian-os` and plays at [plebian-os.com](https://plebian-os.com/#watch).
+
 ## Items
 
 The house also holds portable items with per-style art drawn from the four
