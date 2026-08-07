@@ -3097,6 +3097,10 @@ typedef struct solid_probe {
 } solid_probe;
 
 static const solid_probe SOLID_PROBES[] = {
+    /* The reported hole: the TV cabinet stands on the floor in every
+     * style, so its footprint has to stop the player short of the wall. */
+    {"living", "tv cabinet left", 150.0f, 250.0f, 0, -1, 194.0f},
+    {"living", "tv cabinet right", 185.0f, 250.0f, 0, -1, 194.0f},
     {"living", "stereo cabinet", 340.0f, 250.0f, 0, -1, 194.0f},
     {"bedroom", "bed", 200.0f, 250.0f, 0, -1, 236.0f},
     {"study", "desk wall", 200.0f, 250.0f, 0, -1, 200.0f},
