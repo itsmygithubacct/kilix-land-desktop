@@ -103,6 +103,7 @@ test: parity-check $(BIN)
 	./$(BIN) --json-test
 	./$(BIN) --items-test
 	./$(BIN) --world-test
+	./$(BIN) --doors-test
 	./$(BIN) --profile-test
 	./$(BIN) --laptop-test
 	./$(BIN) --wizard-render-test build/wizard-preview

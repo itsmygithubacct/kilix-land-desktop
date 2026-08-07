@@ -3045,6 +3045,243 @@ static bool complete_wizard(desk_state *state, const desk_world *world)
            state->mode == DESK_MODE_ROOM;
 }
 
+/* --doors-test: prove every door is a WALK, not a teleport.
+ *
+ * The selftest crosses one door by placing the player inside its rect,
+ * which proves the trigger fires but says nothing about whether the
+ * painted world lets anybody stand there. These routes start on the spawn
+ * a player really arrives at and hold real directions, tick by tick, so a
+ * room the obstacle map has sealed off fails here instead of shipping.
+ * The probes then walk into scenery and prove the feet box stops at the
+ * floor line rather than sliding into the wall behind it. */
+typedef struct walk_leg {
+    int dx;
+    int dy;
+    int ticks;   /* upper bound; the route stops the moment a door fires */
+} walk_leg;
+
+typedef struct door_route {
+    const char *room;    /* room the walk happens in */
+    const char *from;    /* room whose door spawned the player here */
+    const char *to;      /* destination the route must reach */
+    walk_leg legs[3];
+} door_route;
+
+static const door_route DOOR_ROUTES[] = {
+    /* Out of the bedroom: straight at the doorway beside the wardrobe. */
+    {"bedroom", "living", "living", {{1, 0, 40}, {0, 0, 0}, {0, 0, 0}}},
+    /* Living room, entering from the yard. The coffee table sits in front
+     * of the kitchen archway, so the way through is the floor lane along
+     * the back wall: step clear of the table, walk up to the wall, then
+     * along it into the arch. */
+    {"living", "yard", "kitchen",
+     {{1, 0, 16}, {0, -1, 40}, {-1, 0, 40}}},
+    {"living", "yard", "yard", {{0, 1, 40}, {0, 0, 0}, {0, 0, 0}}},
+    {"living", "yard", "bedroom", {{-1, 0, 140}, {0, 0, 0}, {0, 0, 0}}},
+    /* One step down clears housemate 2, who stands in the lane. */
+    {"living", "yard", "study", {{0, 1, 1}, {1, 0, 140}, {0, 0, 0}}},
+    /* The study's doorway is reached along the bottom of the room. */
+    {"study", "living", "living", {{0, 1, 16}, {-1, 0, 40}, {0, 0, 0}}},
+    {"kitchen", "living", "living", {{0, 1, 40}, {0, 0, 0}, {0, 0, 0}}},
+    {"yard", "living", "living", {{0, -1, 40}, {0, 0, 0}, {0, 0, 0}}}
+};
+
+typedef struct solid_probe {
+    const char *room;
+    const char *what;
+    float x;
+    float y;
+    int dx;
+    int dy;
+    float floor_y;  /* walking up must never lift the feet above this */
+} solid_probe;
+
+static const solid_probe SOLID_PROBES[] = {
+    {"living", "stereo cabinet", 340.0f, 250.0f, 0, -1, 194.0f},
+    {"bedroom", "bed", 200.0f, 250.0f, 0, -1, 236.0f},
+    {"study", "desk wall", 200.0f, 250.0f, 0, -1, 200.0f},
+    {"kitchen", "counter", 60.0f, 250.0f, 0, -1, 218.0f},
+    {"yard", "shed", 380.0f, 250.0f, 0, -1, 200.0f}
+};
+
+static const desk_door *find_door(const desk_room *room, const char *to)
+{
+    int index;
+    for (index = 0; index < room->door_count; ++index)
+        if (strcmp(room->doors[index].to_id, to) == 0)
+            return &room->doors[index];
+    return NULL;
+}
+
+static int doors_test_body(void)
+{
+    desk_world world;
+    desk_item_catalog catalog;
+    desk_state state;
+    char path[1024];
+    char error[DESK_ERROR_CAPACITY];
+    size_t index;
+    int crossings = 0;
+
+    if (!world_path(path, sizeof path) ||
+        !desk_world_load(&world, path, error, sizeof error) ||
+        !desk_world_validate(&world, error, sizeof error)) {
+        (void)fprintf(stderr, "FAIL doors world: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    if (!items_path(path, sizeof path) ||
+        !desk_items_load(&catalog, path, error, sizeof error)) {
+        (void)fprintf(stderr, "FAIL doors items: %s\n", error);
+        return EXIT_FAILURE;
+    }
+
+    for (index = 0; index < sizeof DOOR_ROUTES / sizeof DOOR_ROUTES[0];
+         ++index) {
+        const door_route *route = &DOOR_ROUTES[index];
+        int here = desk_world_room_index(&world, route->room);
+        int from = desk_world_room_index(&world, route->from);
+        int want = desk_world_room_index(&world, route->to);
+        const desk_door *arrival;
+        const desk_door *exit_door;
+        size_t leg;
+        int idle;
+
+        if (here < 0 || from < 0 || want < 0) {
+            (void)fprintf(stderr, "FAIL doors route %zu: unknown room\n",
+                          index);
+            return EXIT_FAILURE;
+        }
+        arrival = find_door(&world.rooms[from], route->room);
+        exit_door = find_door(&world.rooms[here], route->to);
+        if (!arrival || !exit_door) {
+            (void)fprintf(stderr,
+                          "FAIL doors route %zu: no door %s->%s or %s->%s\n",
+                          index, route->from, route->room, route->room,
+                          route->to);
+            return EXIT_FAILURE;
+        }
+        desk_init(&state, &world, &catalog);
+        if (!complete_wizard(&state, &world)) {
+            (void)fprintf(stderr, "FAIL doors wizard\n");
+            return EXIT_FAILURE;
+        }
+        state.room = here;
+        state.player_x = arrival->spawn_x;
+        state.player_y = arrival->spawn_y;
+        state.door_cooldown_ticks = 0;
+
+        /* Arriving is stable: standing still on the spawn past the whole
+         * cooldown must never bounce the player back through a door. */
+        for (idle = 0; idle < DESK_DOOR_COOLDOWN_TICKS * 2; ++idle)
+            desk_update(&state, &world, 0, 0, DESK_TICK_SECONDS);
+        if (state.room != here) {
+            (void)fprintf(stderr,
+                          "FAIL doors %s: the spawn from %s stands inside a "
+                          "door and bounces to %s\n", route->room,
+                          route->from, world.rooms[state.room].id);
+            return EXIT_FAILURE;
+        }
+
+        for (leg = 0; leg < sizeof route->legs / sizeof route->legs[0] &&
+                      state.room == here; ++leg) {
+            int tick;
+            for (tick = 0;
+                 tick < route->legs[leg].ticks && state.room == here; ++tick)
+                desk_update(&state, &world, route->legs[leg].dx,
+                            route->legs[leg].dy, DESK_TICK_SECONDS);
+        }
+        if (state.room != want) {
+            (void)fprintf(stderr,
+                          "FAIL doors %s->%s: walking from the %s spawn "
+                          "(%g,%g) ended in '%s' at (%g,%g)\n", route->room,
+                          route->to, route->from, (double)arrival->spawn_x,
+                          (double)arrival->spawn_y,
+                          world.rooms[state.room].id,
+                          (double)state.player_x, (double)state.player_y);
+            return EXIT_FAILURE;
+        }
+        if (state.player_x != exit_door->spawn_x ||
+            state.player_y != exit_door->spawn_y ||
+            strcmp(state.profile.last_room, route->to) != 0 ||
+            state.door_cooldown_ticks <= 0 || !state.profile_dirty ||
+            !desk_validate(&state, &world, error, sizeof error)) {
+            (void)fprintf(stderr,
+                          "FAIL doors %s->%s arrival (%g,%g) want (%g,%g) "
+                          "last_room=%s: %s\n", route->room, route->to,
+                          (double)state.player_x, (double)state.player_y,
+                          (double)exit_door->spawn_x,
+                          (double)exit_door->spawn_y,
+                          state.profile.last_room, error);
+            return EXIT_FAILURE;
+        }
+        ++crossings;
+    }
+
+    for (index = 0; index < sizeof SOLID_PROBES / sizeof SOLID_PROBES[0];
+         ++index) {
+        const solid_probe *probe = &SOLID_PROBES[index];
+        int room_index = desk_world_room_index(&world, probe->room);
+        float start_y;
+        int tick;
+
+        if (room_index < 0) {
+            (void)fprintf(stderr, "FAIL doors probe %zu: unknown room\n",
+                          index);
+            return EXIT_FAILURE;
+        }
+        desk_init(&state, &world, &catalog);
+        if (!complete_wizard(&state, &world)) {
+            (void)fprintf(stderr, "FAIL doors probe wizard\n");
+            return EXIT_FAILURE;
+        }
+        state.room = room_index;
+        state.player_x = probe->x;
+        state.player_y = probe->y;
+        state.door_cooldown_ticks = DESK_DOOR_COOLDOWN_TICKS;
+        start_y = state.player_y;
+        for (tick = 0; tick < 90; ++tick) {
+            desk_update(&state, &world, probe->dx, probe->dy,
+                        DESK_TICK_SECONDS);
+            if (state.player_y < probe->floor_y) {
+                (void)fprintf(stderr,
+                              "FAIL doors probe %s/%s: walked to y=%g, "
+                              "inside scenery whose floor line is %g\n",
+                              probe->room, probe->what,
+                              (double)state.player_y,
+                              (double)probe->floor_y);
+                return EXIT_FAILURE;
+            }
+        }
+        if (state.player_y >= start_y) {
+            (void)fprintf(stderr,
+                          "FAIL doors probe %s/%s: never moved off %g\n",
+                          probe->room, probe->what, (double)start_y);
+            return EXIT_FAILURE;
+        }
+    }
+
+    (void)printf("PASS doors crossings=%d walked=spawn-to-door "
+                 "arrivals=stable solid-probes=%zu\n", crossings,
+                 sizeof SOLID_PROBES / sizeof SOLID_PROBES[0]);
+    return EXIT_SUCCESS;
+}
+
+static int doors_test(void)
+{
+    char config_dir[1024];
+    int result;
+    if (!make_temp_config(config_dir, sizeof config_dir)) {
+        (void)fprintf(stderr, "FAIL doors temp config\n");
+        return EXIT_FAILURE;
+    }
+    result = doors_test_body();
+    if (!remove_tree(config_dir) && result == EXIT_SUCCESS) {
+        (void)fprintf(stderr, "FAIL doors temp cleanup\n");
+        result = EXIT_FAILURE;
+    }
+    return result;
+}
+
 static int wizard_render_test(const char *directory)
 {
     render_fixture fixture;
@@ -4404,6 +4641,8 @@ int main(int argc, char **argv)
         return items_test();
     if (argc == 2 && strcmp(argv[1], "--world-test") == 0)
         return world_test();
+    if (argc == 2 && strcmp(argv[1], "--doors-test") == 0)
+        return doors_test();
     if (argc == 2 && strcmp(argv[1], "--profile-test") == 0)
         return profile_test();
     if (argc == 2 && strcmp(argv[1], "--laptop-test") == 0)

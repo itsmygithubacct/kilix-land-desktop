@@ -739,6 +739,24 @@ static bool point_in_rect(float x, float y, const desk_rect *rect)
            y <= rect->y + rect->h;
 }
 
+/* check_doors() fires on the position point, but the point can only ever
+ * sit inside the walk rect inset by the feet box. A trigger rect laid
+ * along an edge of the walk rect therefore keeps a band the player cannot
+ * stand in -- a rect flush with the top edge keeps only the single line
+ * y = walk.y + feet height. Bands thinner than one walking step are doors
+ * nobody can open, so refuse them here rather than shipping a sealed room.
+ * tools/validate_world.py proves the stronger property (the band is
+ * reachable) by walking the movement model itself. */
+static float door_band_extent(float rect_low, float rect_size,
+                              float legal_low, float legal_high)
+{
+    float low = rect_low > legal_low ? rect_low : legal_low;
+    float high = rect_low + rect_size;
+
+    if (high > legal_high) high = legal_high;
+    return high - low;
+}
+
 /* Mirror of desk.c's runtime solidity: door spawns teleport, and the
  * movement model never corrects a penetrating box, so every spawn's
  * feet box must already be clear of walls, obstacles, and housemates. */
@@ -840,12 +858,28 @@ bool desk_world_validate(const desk_world *world, char *error,
             const desk_door *door = &room->doors[i];
             const desk_room *destination;
             int destination_index;
+            float band_w;
+            float band_h;
             int j;
 
             (void)snprintf(label, sizeof label, "%s.doors[%d].rect",
                            room->id, i);
             if (!check_rect(&door->rect, label, error, error_size))
                 return false;
+            band_w = door_band_extent(door->rect.x, door->rect.w,
+                                      room->walk.x +
+                                          DESK_FEET_BOX_HALF_WIDTH,
+                                      room->walk.x + room->walk.w -
+                                          DESK_FEET_BOX_HALF_WIDTH);
+            band_h = door_band_extent(door->rect.y, door->rect.h,
+                                      room->walk.y + DESK_FEET_BOX_HEIGHT,
+                                      room->walk.y + room->walk.h);
+            if (band_w < DESK_WALK_STEP || band_h < DESK_WALK_STEP)
+                return vfail(error, error_size,
+                             "%s.doors[%d]: trigger band %gx%g is thinner "
+                             "than one %g px step", room->id, i,
+                             (double)band_w, (double)band_h,
+                             (double)DESK_WALK_STEP);
             destination_index = desk_world_room_index(world, door->to_id);
             if (destination_index < 0)
                 return vfail(error, error_size,

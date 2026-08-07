@@ -56,6 +56,10 @@
  * through the same box. */
 #define DESK_FEET_BOX_HALF_WIDTH 8.0f
 #define DESK_FEET_BOX_HEIGHT 8.0f
+/* One tick of held input. Positions are only ever this far apart (or half
+ * that, from move_player's short step), so a trigger band thinner than one
+ * step is a place the player can never be standing. */
+#define DESK_WALK_STEP (DESK_PARITY_LEGEND_PLAYER_SPEED * DESK_TICK_SECONDS)
 
 #define DESK_INTERACT_RADIUS 72.0f
 /* A gift needs an arm's-length handoff, not the full interact radius,
