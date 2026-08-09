@@ -31,7 +31,7 @@ import land_mask
 import land_regions as lr
 
 
-def run_editor(mask_path, plate, cap=None):
+def run_editor(mask_path, plate, cap=None, marks_path=None):
     """Hand the mask to kilix-mask and wait.  Returns False when the
     editor could not run at all, which is different from the operator
     quitting without saving."""
@@ -43,8 +43,18 @@ def run_editor(mask_path, plate, cap=None):
     command = [land_mask.COMMAND, "--image", plate]
     if cap:
         command += ["--cap", str(cap)]
+    if marks_path:
+        command += ["--marks", marks_path]
     command.append(mask_path)
     return subprocess.call(command) == 0
+
+
+def write_marks(work, world, room):
+    """The room's context, for the editor to draw around."""
+    path = os.path.join(work, "marks.txt")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(lr.marks_for_room(world, room))
+    return path
 
 
 def validate():
@@ -66,9 +76,11 @@ def edit_walk(room_id, style, dry_run=False):
 
     with tempfile.TemporaryDirectory() as work:
         path = os.path.join(work, f"{room_id}-walk.mask.png")
+        marks = write_marks(work, world, room)
         with lr.walk_mask_from_room(room) as mask:
             mask.save(path)
-        if not dry_run and not run_editor(path, plate, lr.MAX_OBSTACLES):
+        if not dry_run and not run_editor(path, plate, lr.MAX_OBSTACLES,
+                                          marks):
             return 1
         with lr.Mask.load(path) as mask:
             result, error = lr.room_from_walk_mask(mask)
@@ -107,10 +119,11 @@ def edit_behind(room_id, style, dry_run=False):
 
     with tempfile.TemporaryDirectory() as work:
         path = os.path.join(work, f"{room_id}-behind.mask.png")
+        marks = write_marks(work, world, room)
         with lr.behind_mask_from_disk(style, plate_name,
                                       room["walkbehinds"]) as mask:
             mask.save(path)
-        if not dry_run and not run_editor(path, plate):
+        if not dry_run and not run_editor(path, plate, None, marks):
             return 1
         with lr.Mask.load(path) as mask:
             values = mask.expand()
@@ -233,9 +246,57 @@ def selftest():
     return 1 if failures else 0
 
 
+def choose_and_edit(style, dry_run=False):
+    """Pick a room, edit it, come back.
+
+    The old editor switched rooms with a keypress because it owned the
+    whole session.  The painting is now a separate program, so the choice
+    moves to the seam between sessions: quit the editor and you are back
+    here, not back at a shell.
+    """
+    world = lr.load_world()
+    rooms = [room["id"] for room in world["rooms"]]
+
+    while True:
+        print()
+        for index, room_id in enumerate(rooms, start=1):
+            room = lr.room_by_id(world, room_id)
+            behinds = len(room.get("walkbehinds", []))
+            print(f"  {index}. {room_id:9s} "
+                  f"{len(room.get('obstacles', []))} obstacles, "
+                  f"{behinds} walk-behind{'' if behinds == 1 else 's'}")
+        print(f"  style: {style}   (b<n> edits the walk-behind mask, "
+              f"s switches style, q quits)")
+        try:
+            answer = input("room> ").strip().lower()
+        except EOFError:
+            return 0
+        if answer in ("q", "quit", ""):
+            return 0
+        if answer == "s":
+            order = list(lr.STYLES)
+            style = order[(order.index(style) + 1) % len(order)]
+            continue
+        behind = answer.startswith("b")
+        if behind:
+            answer = answer[1:].strip()
+        if not answer.isdigit() or not 1 <= int(answer) <= len(rooms):
+            print("pick a number from the list")
+            continue
+        room_id = rooms[int(answer) - 1]
+        if behind:
+            edit_behind(room_id, style, dry_run)
+        else:
+            edit_walk(room_id, style, dry_run)
+        world = lr.load_world()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--room", default="bedroom")
+    parser.add_argument("--room", default=None,
+                        help="edit this room directly; without it, pick "
+                             "from a list and return to it after each "
+                             "session")
     parser.add_argument("--style", default="chumrunner", choices=lr.STYLES)
     parser.add_argument("--behind", action="store_true",
                         help="edit the walk-behind mask instead of the "
@@ -249,6 +310,8 @@ def main():
     if options.selftest:
         return selftest()
     try:
+        if options.room is None:
+            return choose_and_edit(options.style, options.dry_run)
         if options.behind:
             return edit_behind(options.room, options.style, options.dry_run)
         return edit_walk(options.room, options.style, options.dry_run)

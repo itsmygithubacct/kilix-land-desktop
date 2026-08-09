@@ -1267,7 +1267,7 @@ bool desk_launcher_service(desk_launcher *launcher, desk_state *state,
         static const char *const style_directories[DESK_CAST_COUNT] = {
             "legend", "chumrunner", "fantasy", "pleb-bound"
         };
-        if (resolve_own_tool("walk_editor.py", resolved,
+        if (resolve_own_tool("region_editor.py", resolved,
                              sizeof resolved)) {
             command[command_count++] = "python3";
             command[command_count++] = resolved;

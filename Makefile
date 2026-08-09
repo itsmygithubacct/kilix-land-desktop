@@ -111,8 +111,6 @@ test: parity-check $(BIN)
 	$(PYTHON) tools/validate_visual.py
 	$(PYTHON) tools/validate_audio.py --plan
 	$(PYTHON) tools/land_config.py --check
-	$(PYTHON) tools/walk_editor.py --selftest
-	$(PYTHON) tools/test_walk_editor.py --quick
 	$(MAKE) --no-print-directory region-editor-check
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 	./$(BIN) --selftest

@@ -286,12 +286,20 @@ and a cleared registry closes the lid again).
 ## Debug menu
 
 The pause menu (Esc) grows a **DEBUG** entry whose submenu holds the
-walkable-space editor: `tools/walk_editor.py` opens in a tab showing the
-current style's plate on a 6px grid, walkable cells tinted translucent
-white, doors/objects/NPCs/spawns marked. Left mouse paints walkable, right
-paints blocked; `s` decomposes the paint into the world.json model (walk
-bounding rect + up to 24 exact-cover obstacle rects), rewrites the file,
-and runs the validator immediately.
+walkable-space editor: `tools/region_editor.py` opens in a tab and asks
+which room. Painting is done by `kilix-mask` (pinned in `third_party/`),
+which shows the current style's plate on the 6-unit grid with walkable
+cells tinted and doors, objects, NPC anchors, spawns and item drops drawn
+around them. Drag paints, right-drag erases, `?` lists the keys. On save
+the paint is decomposed into the world.json model — a walk bounding rect
+plus up to 64 exact-cover obstacle rects, with the running count shown
+against that cap while you work — the file is rewritten and the validator
+runs immediately.
+
+`b<n>` from the room list edits that room's walk-behind mask instead, per
+pixel, with `B` setting the selected region's baseline from the cursor.
+The mask stays the plate-sized 8-bit greyscale PNG the engine decodes;
+only the painting changed.
 
 The entry is controlled by `<config-home>/desktop.conf`
 (`~/.local/gpu_terminal/kilix-land-desktop/desktop.conf`):
