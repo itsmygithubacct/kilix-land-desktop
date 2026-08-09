@@ -88,6 +88,23 @@ audio-record:
 audio:
 	$(PYTHON) $(AUDIO_TOOL) build
 
+MASK_DIR := third_party/kilix-mask
+MASK_LIB := $(MASK_DIR)/build/libkilix-mask.so
+
+$(MASK_LIB):
+	@test -f $(MASK_DIR)/Makefile || { \
+		printf 'submodules missing; run: git submodule update --init --recursive\n' >&2; \
+		exit 1; }
+	$(MAKE) -C $(MASK_DIR)
+
+# Converting a room out to kilix-mask and back must reproduce world.json
+# and every behind mask exactly.  Checked against the real assets, not a
+# synthetic room: only those prove the conversion agrees with what the
+# engine already loads.
+.PHONY: region-editor-check
+region-editor-check: $(MASK_LIB)
+	$(PYTHON) tools/region_editor.py --selftest
+
 test: parity-check $(BIN)
 	$(PYTHON) tools/validate_world.py assets/world/world.json
 	$(PYTHON) tools/validate_items.py assets/world/items.json
@@ -96,6 +113,7 @@ test: parity-check $(BIN)
 	$(PYTHON) tools/land_config.py --check
 	$(PYTHON) tools/walk_editor.py --selftest
 	$(PYTHON) tools/test_walk_editor.py --quick
+	$(MAKE) --no-print-directory region-editor-check
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 	./$(BIN) --selftest
 	./$(BIN) --audio-test
