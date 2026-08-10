@@ -333,9 +333,9 @@
           "id": "phone",
           "prompt": "Pick up the phone",
           "rect": {
-            "x": 396,
+            "x": 454,
             "y": 158,
-            "w": 26,
+            "w": 22,
             "h": 34
           },
           "target": "voice"
@@ -362,14 +362,6 @@
         {
           "id": 1,
           "baseline": 216
-        },
-        {
-          "id": 2,
-          "baseline": 192
-        },
-        {
-          "id": 3,
-          "baseline": 192
         }
       ],
       "item_spawns": [
@@ -501,9 +493,9 @@
           "id": "filing-cabinet",
           "prompt": "Open the filing cabinet",
           "rect": {
-            "x": 52,
+            "x": 78,
             "y": 152,
-            "w": 40,
+            "w": 30,
             "h": 46
           },
           "target": "files"

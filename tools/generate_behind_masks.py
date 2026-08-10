@@ -289,16 +289,8 @@ def rect_region(rid, bbox, base_y, tolerance=44, step=20, inset=8,
 # (see BOUNDARIES-CLIPPING-RESEARCH): per (room, style) because each
 # plate paints the furniture in its own spot — plate-space bbox measured
 # by ruler, plate base row, region id. world.json declares the matching
-# walkbehind baselines (study 1@198, living 2/3@192, yard 3@204).
+# walkbehind baselines (study 1@198, yard 3@204).
 _EXPOSED_FIXTURES = {
-    ("living", "legend"): [((388, 380, 570, 520), 512, 2),
-                           ((1046, 408, 1134, 520), 512, 3)],
-    ("living", "chumrunner"): [((388, 380, 570, 520), 512, 2),
-                               ((1046, 408, 1134, 520), 512, 3)],
-    ("living", "fantasy"): [((388, 380, 570, 520), 512, 2),
-                            ((1046, 408, 1134, 520), 512, 3)],
-    ("living", "pleb-bound"): [((388, 380, 570, 520), 512, 2),
-                               ((1046, 408, 1134, 520), 512, 3)],
     ("study", "legend"): [((352, 296, 452, 516), 512, 1, 48, 16)],
     ("study", "chumrunner"): [((232, 322, 306, 522), 518, 1)],
     ("study", "fantasy"): [((250, 316, 334, 512), 505, 1, 48, 8),
