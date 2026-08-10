@@ -32,6 +32,7 @@ XDG_FIELD_CODES = ("%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i",
 # Each row is (label, argv). Rows whose first word is missing are dropped.
 STACK_PROGRAMS = (
     ("Terminal", ["bash", "-l"]),
+    ("PDF Conversion", ["@kilix", "app", "run", "kilix-pdf-conversion"]),
     ("Settings", ["kilix-settings"]),
     ("Files", ["kilix-file"]),
     ("System monitor", ["kilix-system"]),
@@ -222,11 +223,33 @@ def discover_user_launchers():
     return rows
 
 
+def kilix_command():
+    """Resolve the host launcher without trusting the child tab's PATH."""
+    home = os.environ.get("KILIX_HOME")
+    if home:
+        candidate = os.path.join(home, "kilix")
+        if os.access(candidate, os.X_OK):
+            return candidate
+    source = os.environ.get("GPU_TERMINAL_SOURCE_HOME")
+    if source:
+        candidate = os.path.join(source, "kilix", "kilix")
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("kilix")
+
+
 def discover_stack():
     rows = []
     for label, argv in STACK_PROGRAMS:
-        if shutil.which(argv[0]):
-            rows.append(("The stack", label, list(argv)))
+        command = list(argv)
+        if command[0] == "@kilix":
+            resolved = kilix_command()
+            if not resolved:
+                continue
+            command[0] = resolved
+        elif not shutil.which(command[0]):
+            continue
+        rows.append(("The stack", label, command))
     return rows
 
 
