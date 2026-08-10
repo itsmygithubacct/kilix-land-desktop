@@ -396,6 +396,13 @@ GRID_ROWS = LOGICAL_HEIGHT // CELL
 FEET_HALF_WIDTH = 8.0
 FEET_HEIGHT = 8.0
 
+# One tick of walking: the parity walk speed (src/source_parity.h) over
+# DESK_TICK_SECONDS. desk.c's move_player also tries a half step, so the
+# lattice a player can stand on is spaced by STEP and STEP/2 — never
+# arbitrarily fine, which is why a trigger band thinner than a step is a
+# door nobody can open.
+STEP = 128.0 / 60.0
+
 
 def feet_box_clear(room, x, y):
     walk = room["walk"]
@@ -431,6 +438,109 @@ def walkable_cells(room):
     return cells
 
 
+def move_player(room, x, y, dx, dy):
+    """Mirror of desk.c move_player(): full step, half step, then the
+    corner nudge. Returns the position after one tick of held input."""
+    step = STEP
+    nx, ny = x + dx * step, y + dy * step
+    if feet_box_clear(room, nx, ny):
+        return nx, ny
+    nx, ny = x + dx * step * 0.5, y + dy * step * 0.5
+    if feet_box_clear(room, nx, ny):
+        return nx, ny
+    if dx != 0.0:
+        lead_x = x + dx * step
+        top_blocked = not feet_box_clear(
+            room, lead_x, y - FEET_HEIGHT * 0.75 + FEET_HEIGHT)
+        bottom_blocked = not feet_box_clear(
+            room, lead_x, y + FEET_HEIGHT * 0.75)
+        if top_blocked and not bottom_blocked \
+                and feet_box_clear(room, x, y + step):
+            return x, y + step
+        if bottom_blocked and not top_blocked \
+                and feet_box_clear(room, x, y - step):
+            return x, y - step
+    elif dy != 0.0:
+        lead_y = y + dy * step
+        left_blocked = not feet_box_clear(
+            room, x - FEET_HALF_WIDTH * 0.75, lead_y)
+        right_blocked = not feet_box_clear(
+            room, x + FEET_HALF_WIDTH * 0.75, lead_y)
+        if left_blocked and not right_blocked \
+                and feet_box_clear(room, x + step, y):
+            return x + step, y
+        if right_blocked and not left_blocked \
+                and feet_box_clear(room, x - step, y):
+            return x - step, y
+    return x, y
+
+
+def crossable_doors(room, start, budget=400000):
+    """-> set of door indices a player who appears at `start` can walk
+    into. Explores every position one held direction at a time, exactly
+    as desk_update() moves the player, so a door is only counted when the
+    real movement lattice can put the position point inside its rect."""
+    doors = room.get("doors", [])
+    if not feet_box_clear(room, *start):
+        return None
+    found = set()
+    seen = {(round(start[0] * 64), round(start[1] * 64))}
+    frontier = [start]
+    while frontier and len(seen) < budget:
+        nxt = []
+        for x, y in frontier:
+            for i, door in enumerate(doors):
+                if i not in found and point_in_rect(x, y, door["rect"]):
+                    found.add(i)
+            if len(found) == len(doors):
+                return found
+            for dx, dy in ((-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)):
+                px, py = move_player(room, x, y, dx, dy)
+                key = (round(px * 64), round(py * 64))
+                if key not in seen:
+                    seen.add(key)
+                    nxt.append((px, py))
+        frontier = nxt
+    return found
+
+
+def wizard_drop(room):
+    """Mirror of desk.c room_safe_spawn(): the first position a player
+    occupies in the start room before any door has ever been used."""
+    walk = room["walk"]
+    center = (walk["x"] + walk["w"] / 2.0, walk["y"] + walk["h"] / 2.0)
+    if feet_box_clear(room, *center):
+        return center
+    best, best_distance = center, None
+    y = walk["y"] + 3.0
+    while y <= walk["y"] + walk["h"]:
+        x = walk["x"] + 3.0
+        while x <= walk["x"] + walk["w"]:
+            if feet_box_clear(room, x, y) and not any(
+                    point_in_rect(x, y, d["rect"])
+                    for d in room.get("doors", [])):
+                distance = (x - center[0]) ** 2 + (y - center[1]) ** 2
+                if best_distance is None or distance < best_distance:
+                    best, best_distance = (x, y), distance
+            x += 6.0
+        y += 6.0
+    return best
+
+
+def trigger_band(room, rect):
+    """-> (x0, x1, y0, y1) of the positions that both fire this door and
+    are legal standing positions. check_doors() tests the position point,
+    but the point is confined to the walk rect inset by the feet box, so a
+    rect laid along the walk rect's top edge keeps only the single line
+    y = walk.y + FEET_HEIGHT — a band no walking player ever lands on."""
+    walk = room["walk"]
+    return (max(rect["x"], walk["x"] + FEET_HALF_WIDTH),
+            min(rect["x"] + rect["w"],
+                walk["x"] + walk["w"] - FEET_HALF_WIDTH),
+            max(rect["y"], walk["y"] + FEET_HEIGHT),
+            min(rect["y"] + rect["h"], walk["y"] + walk["h"]))
+
+
 def check_connectivity(room, rooms, ids, start):
     """Every door of a room must be reachable by walking from where the
     player can appear in it (incoming door spawns; for the start room also
@@ -440,52 +550,40 @@ def check_connectivity(room, rooms, ids, start):
     cells = walkable_cells(room)
     if not cells:
         fail(f"{rid}: no walkable cells at all")
-    seeds = set()
+
+    for i, door in enumerate(room.get("doors", [])):
+        x0, x1, y0, y1 = trigger_band(room, door["rect"])
+        if x1 - x0 < STEP or y1 - y0 < STEP:
+            fail(f"{rid}.doors[{i}] (to '{door['to']}'): trigger band "
+                 f"{x1 - x0:g}x{y1 - y0:g} is thinner than one {STEP:.4g}px "
+                 "step — grow the rect into the walkable floor so a walking "
+                 "player can land inside it")
+
+    seeds = {}
     for other in rooms:
         for door in other.get("doors", []):
             if door.get("to") == rid:
                 spawn = door["spawn"]
-                seeds.add((int(spawn["x"] // CELL),
-                           int(spawn["y"] // CELL)))
+                seeds[(float(spawn["x"]), float(spawn["y"]))] = \
+                    f"the spawn arriving from '{other['id']}'"
     if rid == start:
-        walk = room["walk"]
-        center = (walk["x"] + walk["w"] / 2, walk["y"] + walk["h"] / 2)
-        seeds.add(min(cells, key=lambda c: (
-            (c[0] * CELL + 3 - center[0]) ** 2 +
-            (c[1] * CELL + 3 - center[1]) ** 2)))
-    seeds &= cells
+        seeds.setdefault(wizard_drop(room), "the first-run drop")
     if not seeds:
-        fail(f"{rid}: no spawn lands on a walkable cell")
-    frontier = list(seeds)
-    reached = set(seeds)
-    while frontier:
-        cx, cy = frontier.pop()
-        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1),
-                       (cx, cy - 1)):
-            if (nx, ny) in cells and (nx, ny) not in reached:
-                reached.add((nx, ny))
-                frontier.append((nx, ny))
-    walk = room["walk"]
-    legal_x0 = walk["x"] + FEET_HALF_WIDTH
-    legal_x1 = walk["x"] + walk["w"] - FEET_HALF_WIDTH
-    legal_y0 = walk["y"] + FEET_HEIGHT
-    legal_y1 = walk["y"] + walk["h"]
-    for i, door in enumerate(room.get("doors", [])):
-        rect = door["rect"]
-        # Door triggers fire on the position point, whose legal band is
-        # the walk rect inset by the feet box; a top-edge door is reached
-        # exactly at that band's boundary row, which cell centers miss.
-        dx0 = max(rect["x"], legal_x0)
-        dx1 = min(rect["x"] + rect["w"], legal_x1)
-        dy0 = max(rect["y"], legal_y0)
-        dy1 = min(rect["y"] + rect["h"], legal_y1)
-        reachable = dx0 <= dx1 and dy0 <= dy1 and any(
-            dx0 <= (cx + 1) * CELL and dx1 >= cx * CELL
-            and dy0 <= (cy + 1) * CELL and dy1 >= cy * CELL
-            for cx, cy in reached)
-        if not reachable:
-            fail(f"{rid}.doors[{i}] (to '{door['to']}'): unreachable — "
-                 "walkable space does not connect the spawns to this door")
+        fail(f"{rid}: no way in — no door spawns here")
+    # Walk it for real: from every position the player can appear at, hold
+    # each direction a tick at a time and prove the movement model can put
+    # the position point inside every door rect. The cell grid alone is too
+    # generous — it approves lanes the 2.13px step lattice never lands on.
+    for (sx, sy), origin in sorted(seeds.items()):
+        crossed = crossable_doors(room, (sx, sy))
+        if crossed is None:
+            fail(f"{rid}: {origin} at ({sx:g},{sy:g}) is not a legal "
+                 "standing position")
+        for i, door in enumerate(room.get("doors", [])):
+            if i not in crossed:
+                fail(f"{rid}.doors[{i}] (to '{door['to']}'): unreachable — "
+                     f"a player walking from {origin} at ({sx:g},{sy:g}) "
+                     "can never stand inside this door rect")
 
 
 if __name__ == "__main__":
