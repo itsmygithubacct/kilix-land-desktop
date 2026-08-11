@@ -20,9 +20,11 @@ with the chosen program (`execvp`), so the tab becomes the program and
 closing the tab closes it.
 """
 
+import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 
 XDG_FIELD_CODES = ("%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i",
@@ -253,13 +255,57 @@ def discover_stack():
     return rows
 
 
+def discover_catalog_apps():
+    """Application rows from the host's catalog, never a Land-owned ID list."""
+    kilix = kilix_command()
+    if not kilix:
+        return []
+    try:
+        result = subprocess.run(
+            [kilix, "install", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        payload = json.loads(result.stdout) if result.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    rows = []
+    for record in payload:
+        if not isinstance(record, dict) or record.get("kind") != "app":
+            continue
+        content_id = record.get("id")
+        label = record.get("label")
+        if not isinstance(content_id, str) or not content_id:
+            continue
+        if not isinstance(label, str) or not label or any(
+                ord(character) < 32 for character in label):
+            continue
+        rows.append((
+            "Kilix applications",
+            label,
+            [kilix, "app", "run", content_id],
+        ))
+    return rows
+
+
 def build_catalog():
     """All rows, grouped, with the group order fixed so the menu does not
     reshuffle itself between runs."""
-    rows = discover_stack() + discover_user_launchers() + \
-        discover_applications()
-    order = ["The stack", "Your launchers"] + \
-        [label for _key, label in CATEGORY_ORDER] + ["Other"]
+    rows = (
+        discover_stack()
+        + discover_catalog_apps()
+        + discover_user_launchers()
+        + discover_applications()
+    )
+    order = (
+        ["The stack", "Kilix applications", "Your launchers"]
+        + [label for _key, label in CATEGORY_ORDER]
+        + ["Other"]
+    )
     groups = []
     for bucket in order:
         members = sorted((label, argv) for group, label, argv in rows

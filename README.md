@@ -69,10 +69,11 @@ kilix-ui at their established `third_party/` paths.
   style's own game by `tools/sync_item_art.py` (`make items-art`).
 - `tools/` — parity sync, world/items validators, helpers launched in tabs.
 
-The study's **Programs** object opens the shared `kilix-launcher`; its direct
-PDF Conversion row therefore becomes a Land tab/pane. The stdlib-only local
-catalog fallback exposes the same `kilix app run kilix-pdf-conversion` command
-when the shared launcher package is not installed.
+The study's **Programs** object opens the shared `kilix-launcher`. When that
+package is unavailable, the stdlib-only local catalog asks the host for every
+shared application and exposes each one as `kilix app run APP_ID`, so File
+Manager, System Center, Settings Center, Software Center, Voice Studio, and
+later catalog additions all become Land tabs without a provider-owned ID list.
 
 ## Provider
 

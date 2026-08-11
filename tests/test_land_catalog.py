@@ -40,6 +40,26 @@ class StackProgramsTests(unittest.TestCase):
              mock.patch.object(land_catalog.os, "access", return_value=True):
             self.assertEqual(land_catalog.kilix_command(), "/opt/kilix/kilix")
 
+    def test_every_host_catalog_app_becomes_a_current_tab_launch(self):
+        response = mock.Mock(
+            returncode=0,
+            stdout='[{"id":"kilix-file","label":"File Manager","kind":"app"},'
+                   '{"id":"doom","label":"Doom","kind":"game"}]',
+        )
+        with mock.patch.object(land_catalog, "kilix_command",
+                               return_value="/opt/kilix/kilix"), \
+             mock.patch.object(land_catalog.subprocess, "run",
+                               return_value=response) as run:
+            rows = land_catalog.discover_catalog_apps()
+        run.assert_called_once_with(
+            ["/opt/kilix/kilix", "install", "--json"],
+            capture_output=True, text=True, timeout=30, check=False)
+        self.assertEqual(rows, [(
+            "Kilix applications",
+            "File Manager",
+            ["/opt/kilix/kilix", "app", "run", "kilix-file"],
+        )])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -81,8 +81,10 @@ confirmed first by the bed's own YES/NO panel.
 **Programs** prefers a host-owned catalog (`kilix-launcher`, installed
 alongside the shared catalog TUI) and falls back to
 `tools/land_catalog.py`, which discovers XDG `.desktop` applications, the
-user's own desktop-folder launchers, the stack's installed programs, and
-offers a run-a-command row. There is deliberately **no `kilix launcher`
+user's own desktop-folder launchers, the stack's installed programs, and every
+host catalog application reported by `kilix install --json`; catalog apps run
+in the current tab through `kilix app run APP_ID`. It also offers a
+run-a-command row. There is deliberately **no `kilix launcher`
 rung** between them: a host that does not know the subcommand forwards it
 to the terminal instead of refusing, so the ladder would spawn a broken
 tab rather than fall through. Presence of the installed command is the
