@@ -845,10 +845,17 @@ static void draw_room_scene(ki_td_soft_renderer *renderer,
     int door;
     int object;
     if (desk_graphics_plate(graphics, room_index, &plate)) {
-        /* Baked art: objects live inside the plate, no slabs on top. */
-        ki_td_soft_rgba_resized(renderer, view, 0.0f, 0.0f, &plate,
-                                DESK_LOGICAL_WIDTH, DESK_LOGICAL_HEIGHT,
-                                1.0f);
+        /* Baked art: objects live inside the plate, no slabs on top.
+         *
+         * The backdrop blit, not the resized one. ki_td_soft_rgba_resized
+         * samples once per LOGICAL cell, so a full-canvas plate delivered
+         * exactly DESK_LOGICAL_WIDTH x DESK_LOGICAL_HEIGHT distinct samples
+         * however large the plate and however large the framebuffer -- our
+         * 1280x720 plates were losing about 63% of their columns on the way
+         * to the screen, which is the opposite of what IMPLEMENTATION.md §3
+         * claimed. ki_td_soft_rgba_backdrop samples per framebuffer pixel, so
+         * the plates arrive at full detail and map 1:1 at scale 8/3. */
+        ki_td_soft_rgba_backdrop(renderer, view, &plate, 1.0f);
         return;
     }
     ki_td_soft_fill_rect(renderer, view, 0.0f, 0.0f,
