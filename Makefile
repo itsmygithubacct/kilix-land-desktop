@@ -143,7 +143,10 @@ sanitize:
 	$(MAKE) clean
 	$(MAKE) all
 
-release-check: parity-check-strict test sanitize
+release-check:
+	$(MAKE) parity-check-strict
+	$(MAKE) test
+	$(MAKE) sanitize
 
 clean:
 	$(RM) -r build $(BIN)
