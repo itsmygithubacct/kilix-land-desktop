@@ -1,13 +1,13 @@
 # kilix-land-desktop
 
-A full Kilix desktop provider, alongside Kilix 95, Kilix Cap, and Kilix TUI,
-that plays like kilix-land. On first login you create a character — pick a cast
-member from the four-game crossover roster (Legend of Kilix, Chumrunner, Kilix
-Fantasy, Pleb Bound), name them, choose an outfit color — and they wake up in a
-house rendered in their source game's art style. Walk between rooms and the
-yard; interacting with objects (desk computer, filing cabinet, TV, stereo,
-mailbox, bed…) engages OS and desktop functions the way kilix-cap's rooms do,
-but through a walkable avatar.
+A full Kilix desktop provider, alongside Kilix 95, Kilix Cap, Kilix TUI, and
+Kilix IceWM, that plays like kilix-land. On first login you create a character
+— pick a cast member from the four-game crossover roster (Legend of Kilix,
+Chumrunner, Kilix Fantasy, Pleb Bound), name them, choose an outfit color — and
+they wake up in a house rendered in their source game's art style. Walk between
+rooms and the yard; interacting with objects (desk computer, filing cabinet,
+TV, stereo, mailbox, bed…) engages OS and desktop functions the way kilix-cap's
+rooms do, but through a walkable avatar.
 
 ## Watch the episode
 
