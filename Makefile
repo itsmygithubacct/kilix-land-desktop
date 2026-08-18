@@ -1,5 +1,6 @@
 CC ?= cc
 PYTHON ?= python3
+SANITIZE_CC ?= $(CC)
 .DEFAULT_GOAL := all
 
 KILIX_GAME_KIT_DIR ?= third_party/kilix-game-kit
@@ -21,7 +22,8 @@ override CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L \
 WARNINGS := -Wall -Wextra -Wpedantic -Wconversion -Wshadow \
 	-Wstrict-prototypes -Wmissing-prototypes -Wformat=2
 SANITIZE_CFLAGS := -O1 -g -std=c11 -pthread $(WARNINGS) \
-	-fsanitize=address,undefined -fno-omit-frame-pointer
+	-fsanitize=address,undefined -fno-sanitize-recover=undefined \
+	-fno-omit-frame-pointer
 CFLAGS ?= -O2 -g
 override CFLAGS += -std=c11 -pthread $(WARNINGS) -MMD -MP
 LDLIBS := $(KILIX_ASSETS_LDLIBS) $(KILIX_GAME_KIT_LDLIBS)
@@ -137,13 +139,17 @@ sanitize:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 	UBSAN_OPTIONS=halt_on_error=1 \
-		$(MAKE) test CC=clang CFLAGS="$(SANITIZE_CFLAGS)"
+		$(MAKE) test CC="$(SANITIZE_CC)" CFLAGS="$(SANITIZE_CFLAGS)"
+	$(MAKE) clean
+	$(MAKE) all
+
+release-check: parity-check-strict test sanitize
 
 clean:
 	$(RM) -r build $(BIN)
 
 .PHONY: all actions-art audio audio-plan audio-record audio-requests clean \
 	parity-check-strict \
-	items-art parity-check parity-sync test test-deps sanitize
+	items-art parity-check parity-sync release-check test test-deps sanitize
 
 -include $(DEPENDENCIES)
