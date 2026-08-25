@@ -1,4 +1,5 @@
 #include "kilix_land_desktop.h"
+#include "provider_protocol.h"
 #include "state_store.h"
 
 #include <float.h>
@@ -2720,6 +2721,13 @@ static bool debug_menu_enabled(void)
     FILE *handle;
     int written;
     bool enabled = true;
+    if (kilix_provider_v1_storage_available()) {
+        if (kilix_provider_v1_storage_value(
+                "kilix-land-desktop", "debug_menu", line,
+                sizeof line))
+            return strcmp(line, "false") != 0 && strcmp(line, "0") != 0;
+        return true;
+    }
     if (override_dir && override_dir[0] == '/')
         written = snprintf(path, sizeof path, "%s/desktop.conf",
                            override_dir);

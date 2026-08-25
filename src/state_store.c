@@ -4,6 +4,8 @@
 
 #include "state_store.h"
 
+#include "provider_protocol.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -24,6 +26,16 @@ bool desk_state_store_open(kilixstate_store *store, const char *filename,
     options.app_id = DESK_STATE_APP_ID;
     options.filename = filename;
     options.max_payload = max_payload;
+    if (kilix_provider_v1_storage_available()) {
+        if (!kilix_provider_v1_storage_path(
+                DESK_STATE_APP_ID, "state", base, sizeof base))
+            return false;
+        written = snprintf(absolute, sizeof absolute, "%s/%s", base,
+                           filename);
+        if (written < 0 || (size_t)written >= sizeof absolute) return false;
+        options.absolute_path = absolute;
+        return kilixstate_store_init(store, &options) == KILIXSTATE_OK;
+    }
     override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
     if (override_dir && override_dir[0] != '\0') {
         /* kilixstate rejects relative absolute_paths anyway; surface the

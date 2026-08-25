@@ -4677,7 +4677,14 @@ int main(int argc, char **argv)
         .provider_id = "kilix-land-desktop",
         .provider_version = KILIX_LAND_DESKTOP_VERSION,
         .display_modes_json = "[\"kitty-graphics\"]",
-        .capabilities_json =
+        .capabilities_json = kilix_provider_v1_storage_available() ?
+            "{\"audio\":true,\"headless_screenshot\":true,\"keyboard\":true,"
+            "\"launcher\":true,\"mouse\":{\"available\":false,"
+            "\"detail\":\"Kilix Land currently accepts keyboard input only.\","
+            "\"reason\":\"not-implemented\"},\"reduced_motion\":{"
+            "\"available\":false,\"detail\":\"Kilix Land does not expose a "
+            "reduced-motion renderer.\",\"reason\":\"not-implemented\"},"
+            "\"settings\":true}" :
             "{\"audio\":true,\"headless_screenshot\":true,\"keyboard\":true,"
             "\"launcher\":true,\"mouse\":{\"available\":false,"
             "\"detail\":\"Kilix Land currently accepts keyboard input only.\","
@@ -4702,6 +4709,13 @@ int main(int argc, char **argv)
         return screenshot_command(argc, argv, 3, true);
     if (provider_result != KILIX_PROVIDER_NOT_HANDLED)
         return provider_result;
+    if (kilix_provider_v1_storage_required() &&
+        !kilix_provider_v1_storage_available() &&
+        !(argc == 2 && strcmp(argv[1], "--version") == 0)) {
+        (void)fprintf(stderr,
+                      "kilix-land-desktop: authoritative persistence resolver is unavailable\n");
+        return 4;
+    }
 
     if (argc == 1) return run_interactive();
     if (argc == 2 && strcmp(argv[1], "--selftest") == 0) return selftest();

@@ -25,6 +25,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,7 +60,95 @@ class BindingFileError(ValueError):
     """A binding store failed the user-owned configuration contract."""
 
 
+def _contract_command():
+    candidate = os.environ.get("KILIX_DESKTOP_CONTRACT_COMMAND")
+    if not candidate:
+        prefix = os.environ.get("KILIX_DESKTOP_SDK_PREFIX")
+        if prefix:
+            if not os.path.isabs(prefix):
+                raise BindingFileError("desktop SDK prefix must be absolute")
+            candidate = os.path.join(prefix, "bin", "kilix-desktop-contract")
+    if not candidate:
+        return None
+    if not os.path.isabs(candidate):
+        raise BindingFileError("desktop-contract command must be absolute")
+    try:
+        current = os.path.sep
+        for part in os.path.abspath(candidate).split(os.path.sep)[1:]:
+            current = os.path.join(current, part)
+            status = os.lstat(current)
+            if stat.S_ISLNK(status.st_mode):
+                raise BindingFileError(
+                    "desktop-contract command path contains a symlink"
+                )
+    except OSError as error:
+        raise BindingFileError(
+            f"desktop-contract command is unavailable: {error}"
+        ) from error
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_uid not in {0, os.geteuid()}
+        or status.st_mode & 0o022
+        or not os.access(candidate, os.X_OK)
+    ):
+        raise BindingFileError("desktop-contract command is not a safe executable")
+    return os.path.abspath(candidate)
+
+
+def _contract_config_home():
+    command = _contract_command()
+    if command is None:
+        home = os.environ.get("HOME")
+        state = os.environ.get("XDG_STATE_HOME")
+        if state and not os.path.isabs(state):
+            raise BindingFileError(
+                "cannot determine the authoritative desktop configuration store"
+            )
+        if not state:
+            if not home or not os.path.isabs(home):
+                return None
+            state = os.path.join(home, ".local/state")
+        record = os.path.join(state, "kilix/desktops/migration-v1.json")
+        if os.path.lexists(record):
+            raise BindingFileError(
+                "cannot determine the authoritative desktop configuration store"
+            )
+        return None
+    try:
+        result = subprocess.run(
+            [
+                command,
+                "storage",
+                "path",
+                "kilix-land-desktop",
+                "config",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
+        raise BindingFileError(f"desktop-contract path lookup failed: {error}") from error
+    value = result.stdout[:-1] if result.stdout.endswith("\n") else ""
+    if (
+        result.returncode != 0
+        or result.stderr
+        or not value
+        or "\n" in value
+        or not os.path.isabs(value)
+    ):
+        detail = result.stderr.strip() or "invalid path response"
+        raise BindingFileError(f"desktop-contract path lookup refused: {detail}")
+    return os.path.abspath(value)
+
+
 def config_home():
+    contracted = _contract_config_home()
+    if contracted is not None:
+        return contracted
     override = os.environ.get("KILIX_LAND_DESKTOP_CONFIG_HOME")
     # Match the C launcher: relative overrides are ignored, so the editor and
     # runtime can never silently read different binding files.

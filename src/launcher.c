@@ -1,4 +1,5 @@
 #include "kilix_land_desktop.h"
+#include "provider_protocol.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -308,7 +309,13 @@ static int open_bindings_file(void)
     int file_fd;
     int written;
 
-    if (override_dir && override_dir[0] == '/') {
+    if (kilix_provider_v1_storage_available()) {
+        if (!kilix_provider_v1_storage_path(
+                "kilix-land-desktop", "config", directory,
+                sizeof directory))
+            return -1;
+        written = (int)strlen(directory);
+    } else if (override_dir && override_dir[0] == '/') {
         if (strcmp(override_dir, "/") == 0) return -1;
         written = snprintf(directory, sizeof directory, "%s", override_dir);
     } else if (home && home[0] == '/') {
@@ -672,7 +679,12 @@ static bool laptop_session_home(char *path, size_t size)
     const char *override_dir = getenv("KILIX_LAND_DESKTOP_CONFIG_HOME");
     const char *home = getenv("HOME");
     int written;
-    if (override_dir && override_dir[0] == '/')
+    if (kilix_provider_v1_storage_available()) {
+        if (!kilix_provider_v1_storage_path(
+                "kilix-land-desktop", "session", path, size))
+            return false;
+        written = (int)strlen(path);
+    } else if (override_dir && override_dir[0] == '/')
         written = snprintf(path, size, "%s", override_dir);
     else if (home && home[0] == '/')
         written = snprintf(path, size,
