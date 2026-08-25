@@ -1,6 +1,7 @@
 #include "kilix_land_desktop.h"
 #include "json_reader.h"
 #include "items.h"
+#include "provider_protocol.h"
 #include "world_state.h"
 
 #include <dirent.h>
@@ -17,6 +18,7 @@
 #include <limits.h>
 
 #define DESK_TEXT_QUEUE_CAPACITY 8
+#define KILIX_LAND_DESKTOP_VERSION "0.1.0"
 
 typedef struct desk_key_input {
     int move_x;
@@ -4503,7 +4505,8 @@ static bool stand_by_object(desk_state *state, const desk_room *room,
 }
 
 static int screenshot(const char *path, const char *room_id,
-                      const char *style_name, const char *panel_name)
+                      const char *style_name, const char *panel_name,
+                      bool quiet)
 {
     char config_dir[1024];
     render_fixture fixture;
@@ -4602,7 +4605,7 @@ static int screenshot(const char *path, const char *room_id,
                   desk_render(&fixture.renderer, &state, &fixture.world,
                               &fixture.graphics) &&
                   sr_write_ppm(ki_td_soft_canvas(&fixture.renderer), path);
-        if (success)
+        if (success && !quiet)
             (void)printf("PASS screenshot room=%s style=%s panel=%s "
                          "file=%s\n",
                          fixture.world.rooms[state.room].id,
@@ -4615,6 +4618,43 @@ static int screenshot(const char *path, const char *room_id,
         success = false;
     }
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+static int screenshot_command(int argc, char **argv, int path_index,
+                              bool quiet)
+{
+    const char *room = NULL;
+    const char *style = NULL;
+    const char *panel = NULL;
+    int argument = path_index + 1;
+    while (argument + 1 < argc) {
+        if (strcmp(argv[argument], "--room") == 0)
+            room = argv[argument + 1];
+        else if (strcmp(argv[argument], "--style") == 0)
+            style = argv[argument + 1];
+        else if (strcmp(argv[argument], "--panel") == 0)
+            panel = argv[argument + 1];
+        else
+            break;
+        argument += 2;
+    }
+    if (argument == argc)
+        return screenshot(argv[path_index], room, style, panel, quiet);
+    return 2;
+}
+
+static bool provider_assets_ready(void)
+{
+    char world[1024];
+    char graphics[1024];
+    int world_length = snprintf(world, sizeof world,
+                                "%s/assets/world/world.json", asset_root());
+    int graphics_length = snprintf(graphics, sizeof graphics,
+                                   "%s/assets/graphics/manifest.json",
+                                   asset_root());
+    return world_length >= 0 && (size_t)world_length < sizeof world &&
+           graphics_length >= 0 && (size_t)graphics_length < sizeof graphics &&
+           access(world, R_OK) == 0 && access(graphics, R_OK) == 0;
 }
 
 static void usage(const char *program)
@@ -4633,6 +4673,36 @@ static void usage(const char *program)
 
 int main(int argc, char **argv)
 {
+    struct kilix_provider_v1 provider = {
+        .provider_id = "kilix-land-desktop",
+        .provider_version = KILIX_LAND_DESKTOP_VERSION,
+        .display_modes_json = "[\"kitty-graphics\"]",
+        .capabilities_json =
+            "{\"audio\":true,\"headless_screenshot\":true,\"keyboard\":true,"
+            "\"launcher\":true,\"mouse\":{\"available\":false,"
+            "\"detail\":\"Kilix Land currently accepts keyboard input only.\","
+            "\"reason\":\"not-implemented\"},\"reduced_motion\":{"
+            "\"available\":false,\"detail\":\"Kilix Land does not expose a "
+            "reduced-motion renderer.\",\"reason\":\"not-implemented\"},"
+            "\"settings\":{\"available\":false,\"detail\":\"Protocol configuration "
+            "writes are not available in this adapter.\",\"reason\":\"not-implemented\"}}",
+        .required_capabilities_json = "[\"keyboard\"]",
+        .check_id = "provider-assets",
+        .ready_summary = "Kilix Land is ready.",
+        .unavailable_summary = "Kilix Land assets are unavailable.",
+        .check_pass_summary = "Required world and graphics assets are readable.",
+        .check_unavailable_summary = "Required world or graphics assets are missing.",
+        .check_ready = provider_assets_ready(),
+        .screenshot_available = true
+    };
+    int provider_result = kilix_provider_v1_dispatch(argc, argv, &provider);
+    if (provider_result == KILIX_PROVIDER_LAUNCH)
+        return run_interactive();
+    if (provider_result == KILIX_PROVIDER_SCREENSHOT)
+        return screenshot_command(argc, argv, 3, true);
+    if (provider_result != KILIX_PROVIDER_NOT_HANDLED)
+        return provider_result;
+
     if (argc == 1) return run_interactive();
     if (argc == 2 && strcmp(argv[1], "--selftest") == 0) return selftest();
     if (argc == 2 && strcmp(argv[1], "--audio-test") == 0)
@@ -4661,27 +4731,10 @@ int main(int argc, char **argv)
         return walk_render_test(argv[2]);
     if (argc == 3 && strcmp(argv[1], "--items-render-test") == 0)
         return items_render_test(argv[2]);
-    if (argc >= 3 && strcmp(argv[1], "--screenshot") == 0) {
-        const char *room = NULL;
-        const char *style = NULL;
-        const char *panel = NULL;
-        int argument = 3;
-        while (argument + 1 < argc) {
-            if (strcmp(argv[argument], "--room") == 0)
-                room = argv[argument + 1];
-            else if (strcmp(argv[argument], "--style") == 0)
-                style = argv[argument + 1];
-            else if (strcmp(argv[argument], "--panel") == 0)
-                panel = argv[argument + 1];
-            else
-                break;
-            argument += 2;
-        }
-        if (argument == argc)
-            return screenshot(argv[2], room, style, panel);
-    }
+    if (argc >= 3 && strcmp(argv[1], "--screenshot") == 0)
+        return screenshot_command(argc, argv, 2, false);
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
-        (void)printf("kilix-land-desktop 0.1.0\n");
+        (void)printf("kilix-land-desktop " KILIX_LAND_DESKTOP_VERSION "\n");
         return EXIT_SUCCESS;
     }
     usage(argv[0]);

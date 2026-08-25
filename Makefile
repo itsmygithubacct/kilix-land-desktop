@@ -31,7 +31,7 @@ LDLIBS := $(KILIX_ASSETS_LDLIBS) $(KILIX_GAME_KIT_LDLIBS)
 BIN := kilix-land-desktop
 SRC := src/main.c src/desk.c src/rooms.c src/json_reader.c src/items.c \
 	src/world_state.c src/state_store.c src/launcher.c src/laptop.c \
-	src/graphics.c src/render.c src/audio.c
+	src/graphics.c src/render.c src/audio.c src/provider_protocol.c
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 DEPENDENCIES := $(OBJ:.o=.d)
 GRAPHICS_MANIFEST := assets/graphics/manifest.json
