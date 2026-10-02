@@ -231,6 +231,13 @@ toast reporting as every row above.
 
 ### Running sessions, the lid, and closing
 
+Registry records remain ASCII decimal PIDs with a trailing newline (readers
+also accept EOF immediately after the digits). Land rejects extra bytes,
+conversion overflow, and values outside positive `pid_t` range or at most 1
+before any process check or signal. There is no record-version or ownership
+change: all providers still share the same files and stale-record cleanup.
+This validation does not add process-identity protection against PID reuse.
+
 The registry — `run/<id>.pid` beside the profiles, one pid per file,
 written at spawn, and never believed without a real `kill(pid, 0)` check
 (a stale or garbled file is deleted by whichever reader notices) — is one

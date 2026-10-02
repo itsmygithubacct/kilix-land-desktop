@@ -469,23 +469,20 @@ static void reap_pending_children(void)
     for (index = 0u; index < LAUNCH_PENDING_MAX; ++index) {
         pid_t pid = pending_children[index];
         if (pid <= 0) continue;
-        if (waitpid(pid, NULL, WNOHANG) != 0)
+        pid_t reaped = waitpid(pid, NULL, WNOHANG);
+        if (reaped == pid || (reaped < 0 && errno == ECHILD))
             pending_children[index] = 0;
     }
 }
 
-static void track_pending_child(pid_t pid)
+/* Launches are serialized on the desktop thread. Reserve capacity before
+ * spawning; a live child must never force a blocking wait or be forgotten. */
+static int available_child_slot(void)
 {
-    size_t index;
-    for (index = 0u; index < LAUNCH_PENDING_MAX; ++index) {
-        if (pending_children[index] <= 0) {
-            pending_children[index] = pid;
-            return;
-        }
-    }
-    /* Full table: block briefly on the oldest slot rather than leak it. */
-    (void)waitpid(pending_children[0], NULL, 0);
-    pending_children[0] = pid;
+    reap_pending_children();
+    for (int index = 0; index < LAUNCH_PENDING_MAX; ++index)
+        if (pending_children[index] == 0) return index;
+    return -1;
 }
 
 static bool tab_session_ready(void);
@@ -510,6 +507,8 @@ static bool spawn_detached(const char *const *command, size_t command_count)
     for (index = 0u; index < command_count; ++index)
         argv[index] = (char *)command[index];
     argv[command_count] = NULL;
+    int child_slot = available_child_slot();
+    if (child_slot < 0) return false;
     if (posix_spawn_file_actions_init(&actions) != 0) return false;
     if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
                                          "/dev/null", O_RDONLY, 0) != 0 ||
@@ -528,13 +527,14 @@ static bool spawn_detached(const char *const *command, size_t command_count)
         pid_t reaped = waitpid(pid, &status, WNOHANG);
         if (reaped == pid)
             return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        if (reaped < 0) return true;
+        if (reaped < 0 && errno == ECHILD) return true;
+        if (reaped < 0) break;
         {
             struct timespec delay = { 0, 10L * 1000L * 1000L };
             (void)nanosleep(&delay, NULL);
         }
     }
-    track_pending_child(pid);
+    pending_children[child_slot] = pid;
     return true;
 }
 
@@ -558,6 +558,8 @@ static bool spawn_tracked(const char *const *command, size_t command_count,
     for (index = 0u; index < command_count; ++index)
         argv[index] = (char *)command[index];
     argv[command_count] = NULL;
+    int child_slot = available_child_slot();
+    if (child_slot < 0) return false;
     if (posix_spawn_file_actions_init(&actions) != 0) return false;
     if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
                                          "/dev/null", O_RDONLY, 0) != 0 ||
@@ -575,13 +577,14 @@ static bool spawn_tracked(const char *const *command, size_t command_count,
         int status = 0;
         pid_t reaped = waitpid(pid, &status, WNOHANG);
         if (reaped == pid) return false; /* the window never came up */
+        if (reaped < 0 && errno == ECHILD) return false;
         if (reaped < 0) break;
         {
             struct timespec delay = { 0, 10L * 1000L * 1000L };
             (void)nanosleep(&delay, NULL);
         }
     }
-    track_pending_child(pid);
+    pending_children[child_slot] = pid;
     *out_pid = pid;
     return true;
 }
@@ -927,6 +930,8 @@ bool desk_launcher_password_is_default(void)
     argv[2] = (char *)helper;
     argv[3] = (char *)"check";
     argv[4] = NULL;
+    int child_slot = available_child_slot();
+    if (child_slot < 0) return false;
     if (posix_spawn_file_actions_init(&actions) != 0) return false;
     if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
                                          "/dev/null", O_RDONLY, 0) != 0 ||
@@ -949,10 +954,11 @@ bool desk_launcher_password_is_default(void)
         struct timespec delay = { 0, 10L * 1000L * 1000L };
         if (reaped == pid)
             return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        if (reaped < 0) return false;
+        if (reaped < 0 && errno == ECHILD) return false;
+        if (reaped < 0) break;
         (void)nanosleep(&delay, NULL);
     }
-    track_pending_child(pid);
+    pending_children[child_slot] = pid;
     return false;
 }
 
@@ -1000,6 +1006,8 @@ static bool spawn_tab(const char *label, const char *cwd,
         argv[argc++] = (char *)command[index];
     argv[argc] = NULL;
 
+    int child_slot = available_child_slot();
+    if (child_slot < 0) return false;
     if (posix_spawn_file_actions_init(&actions) != 0) return false;
     if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
                                          "/dev/null", O_RDONLY, 0) != 0 ||
@@ -1022,11 +1030,12 @@ static bool spawn_tab(const char *label, const char *cwd,
         pid_t reaped = waitpid(pid, &status, WNOHANG);
         if (reaped == pid)
             return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        if (reaped < 0) return true;
+        if (reaped < 0 && errno == ECHILD) return true;
+        if (reaped < 0) break;
         struct timespec delay = { 0, 10L * 1000L * 1000L };
         (void)nanosleep(&delay, NULL);
     }
-    track_pending_child(pid);
+    pending_children[child_slot] = pid;
     return true;
 }
 

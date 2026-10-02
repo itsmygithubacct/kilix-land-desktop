@@ -874,6 +874,32 @@ static bool read_proc_stat(const char *path, char *buffer, size_t size)
     return used > 0;
 }
 
+/* pid_t is a signed integer type on supported POSIX targets. Check its
+ * actual type's limit before any narrowing conversion. */
+static bool run_pid_valid(long pid)
+{
+    return pid > 1 && pid <= _Generic((pid_t)0,
+        signed char: SCHAR_MAX, short: SHRT_MAX, int: INT_MAX,
+        long: LONG_MAX, long long: LLONG_MAX);
+}
+
+static bool parse_run_pid(const char *text, size_t length, long *pid)
+{
+    char *end;
+    long value;
+    size_t digits = length;
+    if (digits > 0 && text[digits - 1] == '\n') --digits;
+    if (digits == 0) return false;
+    for (size_t i = 0; i < digits; ++i)
+        if (text[i] < '0' || text[i] > '9') return false;
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || end != text + digits || !run_pid_valid(value))
+        return false;
+    *pid = value;
+    return true;
+}
+
 /* kill(pid, 0) is the contract's liveness check: EPERM still means the
  * process exists; a /proc zombie does not count — its window is already
  * gone, and only an unreaped parent keeps the pid answering. */
@@ -881,7 +907,7 @@ static bool run_pid_alive(long pid)
 {
     char stat_path[64];
     char stat_text[512];
-    if (pid <= 1) return false;
+    if (!run_pid_valid(pid)) return false;
     if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return false;
     if (snprintf(stat_path, sizeof stat_path, "/proc/%ld/stat", pid) > 0 &&
         read_proc_stat(stat_path, stat_text, sizeof stat_text)) {
@@ -897,7 +923,7 @@ bool desk_laptop_run_record(const char *id, long pid)
     char path[PATH_MAX];
     char text[32];
     int written;
-    if (pid <= 1 || !run_pid_path(id, path, sizeof path)) return false;
+    if (!run_pid_valid(pid) || !run_pid_path(id, path, sizeof path)) return false;
     {
         char directory[PATH_MAX];
         if (!desk_laptop_run_directory(directory, sizeof directory) ||
@@ -914,14 +940,11 @@ int desk_laptop_run_status(const char *id, long *pid)
     char path[PATH_MAX];
     char text[64];
     size_t length = 0;
-    char *end = NULL;
     long value;
     if (pid != NULL) *pid = 0;
     if (!run_pid_path(id, path, sizeof path)) return -1;
     if (!read_small_file(path, text, sizeof text, &length)) return 0;
-    value = strtol(text, &end, 10);
-    if (end != NULL && end != text && (*end == '\n' || *end == '\0') &&
-        run_pid_alive(value)) {
+    if (parse_run_pid(text, length, &value) && run_pid_alive(value)) {
         if (pid != NULL) *pid = value;
         return 1;
     }
