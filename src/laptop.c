@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -849,6 +850,30 @@ static bool run_pid_path(const char *id, char *path, size_t size)
     return format_text(path, size, "%s/%s.pid", directory, id);
 }
 
+/* procfs reports st_size=0; read its bounded text until EOF instead. */
+static bool read_proc_stat(const char *path, char *buffer, size_t size)
+{
+    size_t used = 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 || size == 0) {
+        if (fd >= 0) close(fd);
+        return false;
+    }
+    while (used < size - 1) {
+        ssize_t got = read(fd, buffer + used, size - 1 - used);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) {
+            close(fd);
+            return false;
+        }
+        if (got == 0) break;
+        used += (size_t)got;
+    }
+    close(fd);
+    buffer[used] = '\0';
+    return used > 0;
+}
+
 /* kill(pid, 0) is the contract's liveness check: EPERM still means the
  * process exists; a /proc zombie does not count — its window is already
  * gone, and only an unreaped parent keeps the pid answering. */
@@ -856,12 +881,10 @@ static bool run_pid_alive(long pid)
 {
     char stat_path[64];
     char stat_text[512];
-    size_t stat_length = 0;
     if (pid <= 1) return false;
     if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return false;
     if (snprintf(stat_path, sizeof stat_path, "/proc/%ld/stat", pid) > 0 &&
-        read_small_file(stat_path, stat_text, sizeof stat_text,
-                        &stat_length)) {
+        read_proc_stat(stat_path, stat_text, sizeof stat_text)) {
         const char *closing = strrchr(stat_text, ')');
         if (closing != NULL && closing[1] == ' ' && closing[2] == 'Z')
             return false;
@@ -1166,6 +1189,21 @@ bool desk_laptop_selftest(void)
                          desk_laptop_run_status("ops", NULL) == 0 &&
                          access(stale_path, F_OK) != 0,
                      "pid 1 and below never count as a session");
+        {
+            pid_t child = fork();
+            if (child == 0) _exit(0);
+            ok &= expect(child > 0, "private zombie fixture starts");
+            if (child > 0) {
+                siginfo_t info;
+                ok &= expect(waitid(P_PID, (id_t)child, &info,
+                                    WEXITED | WNOWAIT) == 0,
+                             "private child exits without being reaped");
+                ok &= expect(desk_laptop_run_record("zombie", (long)child) &&
+                             desk_laptop_run_status("zombie", NULL) == 0,
+                             "an externally tracked zombie is cleared");
+                (void)waitpid(child, NULL, 0);
+            }
+        }
         ok &= expect(desk_laptop_run_status("../escape", NULL) == -1,
                      "registry ids follow the profile id rules");
     }

@@ -3724,20 +3724,21 @@ static int run_interactive(void)
     terminal_options.framebuffer.min_height = DESK_FRAMEBUFFER_MIN_HEIGHT;
     terminal_options.framebuffer.max_width = DESK_FRAMEBUFFER_MAX_WIDTH;
     terminal_options.framebuffer.max_height = DESK_FRAMEBUFFER_MAX_HEIGHT;
+    if (!kilix_game_signals_install(&signals)) {
+        desk_audio_shutdown(&audio);
+        desk_graphics_shutdown(&graphics);
+        (void)fprintf(stderr, "kilix-land-desktop: signal scope failed\n");
+        return EXIT_FAILURE;
+    }
     if (kittyts_start(&terminal_session, STDIN_FILENO, STDOUT_FILENO,
                       &terminal_options) != 0) {
         (void)fprintf(stderr,
                       "kilix-land-desktop: terminal start failed: %s\n",
                       strerror(errno));
-        desk_audio_shutdown(&audio);
-        desk_graphics_shutdown(&graphics);
-        return EXIT_FAILURE;
-    }
-    if (!kilix_game_signals_install(&signals)) {
         kittyts_stop(&terminal_session);
+        kilix_game_signals_restore(&signals);
         desk_audio_shutdown(&audio);
         desk_graphics_shutdown(&graphics);
-        (void)fprintf(stderr, "kilix-land-desktop: signal scope failed\n");
         return EXIT_FAILURE;
     }
     last_movement_key = KITTYKB_KEY_NONE;
