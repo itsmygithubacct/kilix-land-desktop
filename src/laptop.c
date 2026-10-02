@@ -20,6 +20,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -829,8 +830,8 @@ bool desk_laptop_write_session(const desk_laptop_profile *profile, const char *p
 /* ---- run registry ----
  *
  * The shared contract (see laptop.h): run/<id>.pid beside the profiles,
- * one pid per line, written at spawn, and never believed without a real
- * process check. All four laptop surfaces implement exactly these rules,
+ * a canonical PID line plus birth/boot identity, written at spawn and
+ * never believed without identity validation. Repaired surfaces share these rules,
  * so a session opened anywhere shows as running — and can be closed —
  * everywhere. */
 
@@ -918,50 +919,117 @@ static bool run_pid_alive(long pid)
     return true;
 }
 
+static bool process_identity(long pid, char *identity, size_t size, bool *dead)
+{
+    char path[64], stat_text[4096], boot[64];
+    if (dead != NULL) *dead = false;
+    if (!run_pid_valid(pid)) return false;
+    (void)snprintf(path, sizeof path, "/proc/%ld/stat", pid);
+    if (!read_proc_stat(path, stat_text, sizeof stat_text) ||
+        !read_proc_stat("/proc/sys/kernel/random/boot_id", boot, sizeof boot))
+        return false;
+    char *closing = strrchr(stat_text, ')');
+    if (closing == NULL || closing[1] != ' ') return false;
+    if (closing[2] == 'Z' || closing[2] == 'X') {
+        if (dead != NULL) *dead = true;
+        return false;
+    }
+    char *save = NULL;
+    char *token = strtok_r(closing + 2, " ", &save);
+    for (int field = 3; token != NULL && field < 22; field++)
+        token = strtok_r(NULL, " ", &save);
+    if (token == NULL || token[0] < '0' || token[0] > '9') return false;
+    char *end;
+    errno = 0;
+    unsigned long long start = strtoull(token, &end, 10);
+    if (errno != 0 || *end != '\0' || start == 0) return false;
+    boot[strcspn(boot, "\n")] = '\0';
+    if (strlen(boot) != 36 || strspn(boot, "0123456789abcdef-") != 36)
+        return false;
+    int n = snprintf(identity, size, "v1 %ld %llu %s\n", pid, start, boot);
+    return n > 0 && (size_t)n < size;
+}
+
 bool desk_laptop_run_record(const char *id, long pid)
 {
-    char path[PATH_MAX];
-    char text[32];
-    int written;
-    if (!run_pid_valid(pid) || !run_pid_path(id, path, sizeof path)) return false;
-    {
-        char directory[PATH_MAX];
-        if (!desk_laptop_run_directory(directory, sizeof directory) ||
-            !ensure_directory(directory))
-            return false;
-    }
-    written = snprintf(text, sizeof text, "%ld\n", pid);
+    char path[PATH_MAX], metadata[PATH_MAX], directory[PATH_MAX];
+    char text[32], identity[128];
+    if (!process_identity(pid, identity, sizeof identity, NULL) ||
+        !run_pid_path(id, path, sizeof path) ||
+        !format_text(metadata, sizeof metadata, "%s.identity", path, NULL) ||
+        !desk_laptop_run_directory(directory, sizeof directory) ||
+        !ensure_directory(directory)) return false;
+    int written = snprintf(text, sizeof text, "%ld\n", pid);
     if (written <= 0 || (size_t)written >= sizeof text) return false;
-    return write_private_file(path, text, (size_t)written);
+    /* Publish metadata first. A partial pair fails closed in every repaired reader. */
+    return write_private_file(metadata, identity, strlen(identity)) &&
+           write_private_file(path, text, (size_t)written);
+}
+
+static int read_registered_pid(const char *id, long *pid)
+{
+    char path[PATH_MAX], text[64], canonical[64];
+    size_t length;
+    if (!run_pid_path(id, path, sizeof path)) return -1;
+    errno = 0;
+    if (!read_small_file(path, text, sizeof text, &length))
+        return errno == ENOENT ? 0 : -1;
+    long value;
+    if (!parse_run_pid(text, length, &value)) return -1;
+    int n = snprintf(canonical, sizeof canonical, "%ld\n", value);
+    if (n < 0 || length != (size_t)n || memcmp(text, canonical, length) != 0)
+        return -1;
+    *pid = value;
+    return 1;
+}
+
+static bool registered_identity_matches(const char *id, long pid, bool *dead)
+{
+    char path[PATH_MAX], metadata[PATH_MAX], expected[128], actual[128];
+    size_t length;
+    if (dead != NULL) *dead = false;
+    return process_identity(pid, actual, sizeof actual, dead) &&
+           run_pid_path(id, path, sizeof path) &&
+           format_text(metadata, sizeof metadata, "%s.identity", path, NULL) &&
+           read_small_file(metadata, expected, sizeof expected, &length) &&
+           length == strlen(actual) && memcmp(expected, actual, length) == 0;
 }
 
 int desk_laptop_run_status(const char *id, long *pid)
 {
-    char path[PATH_MAX];
-    char text[64];
-    size_t length = 0;
-    long value;
+    long value = 0;
     if (pid != NULL) *pid = 0;
-    if (!run_pid_path(id, path, sizeof path)) return -1;
-    if (!read_small_file(path, text, sizeof text, &length)) return 0;
-    if (parse_run_pid(text, length, &value) && run_pid_alive(value)) {
-        if (pid != NULL) *pid = value;
-        return 1;
-    }
-    /* Stale: the recorded process is gone or the file is garbled. The
-     * contract says whichever reader notices cleans up. */
-    (void)unlink(path);
-    return 0;
+    int status = read_registered_pid(id, &value);
+    if (status != 1) return status;
+    if (!run_pid_alive(value)) return 0;
+    /* Do not unlink shared records on read: another provider may be updating
+     * the pair. Unverifiable records also block duplicate launches. */
+    bool dead = false;
+    if (!registered_identity_matches(id, value, &dead)) return dead ? 0 : -1;
+    if (pid != NULL) *pid = value;
+    return 1;
 }
 
 bool desk_laptop_run_terminate(const char *id)
 {
     long pid = 0;
-    int status = desk_laptop_run_status(id, &pid);
+    int status = read_registered_pid(id, &pid);
+    if (status == 0) return true;
     if (status < 0) return false;
-    if (status == 0) return true; /* already gone counts as closed */
-    if (kill((pid_t)pid, SIGTERM) != 0 && errno != ESRCH) return false;
-    return true;
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+    int fd = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+    if (fd < 0 && errno == ESRCH) return true;
+    if (fd >= 0) {
+        bool verified = registered_identity_matches(id, pid, NULL);
+        int result = -1;
+        if (verified) result = (int)syscall(SYS_pidfd_send_signal, fd,
+                                           SIGTERM, NULL, 0);
+        int saved_errno = errno;
+        close(fd);
+        return verified && (result == 0 || saved_errno == ESRCH);
+    }
+#endif
+    return false; /* No numeric-PID signaling fallback. */
 }
 
 bool desk_laptop_run_any(void)
@@ -1205,12 +1273,12 @@ bool desk_laptop_selftest(void)
                          format_text(stale_path, sizeof stale_path,
                                      "%s/ops.pid", run_directory, NULL) &&
                          write_private_file(stale_path, "not-a-pid\n", 10) &&
-                         desk_laptop_run_status("ops", NULL) == 0 &&
-                         access(stale_path, F_OK) != 0,
-                     "a garbled pid file is cleaned up on read");
+                         desk_laptop_run_status("ops", NULL) == -1 &&
+                         access(stale_path, F_OK) == 0,
+                     "an unverifiable pid file is retained and refused");
         ok &= expect(write_private_file(stale_path, "1\n", 2) &&
-                         desk_laptop_run_status("ops", NULL) == 0 &&
-                         access(stale_path, F_OK) != 0,
+                         desk_laptop_run_status("ops", NULL) == -1 &&
+                         access(stale_path, F_OK) == 0,
                      "pid 1 and below never count as a session");
         {
             pid_t child = fork();
@@ -1221,9 +1289,9 @@ bool desk_laptop_selftest(void)
                 ok &= expect(waitid(P_PID, (id_t)child, &info,
                                     WEXITED | WNOWAIT) == 0,
                              "private child exits without being reaped");
-                ok &= expect(desk_laptop_run_record("zombie", (long)child) &&
+                ok &= expect(!desk_laptop_run_record("zombie", (long)child) &&
                              desk_laptop_run_status("zombie", NULL) == 0,
-                             "an externally tracked zombie is cleared");
+                             "an exited process cannot be registered");
                 (void)waitpid(child, NULL, 0);
             }
         }

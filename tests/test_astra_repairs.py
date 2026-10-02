@@ -57,24 +57,27 @@ int main(int argc, char **argv) {
     const char *invalid[] = {"", "0", "1", "-2", "+2", " 2", "2\nextra",
                             "2\n\n", "2 ", "999999999999999999999999999999"};
     char path[PATH_MAX];
-    assert(desk_laptop_run_record("test", 123));
+    assert(ensure_directory(argv[1]));
+    char directory[PATH_MAX];
+    assert(desk_laptop_run_directory(directory, sizeof directory));
+    assert(ensure_directory(directory));
     assert(run_pid_path("test", path, sizeof path));
     for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; ++i) {
         assert(!parse_run_pid(invalid[i], strlen(invalid[i]), &value));
         assert(write_private_file(path, invalid[i], strlen(invalid[i])));
-        assert(desk_laptop_run_terminate("test"));
+        assert(!desk_laptop_run_terminate("test"));
         assert(calls == 0);
     }
     const char embedded[] = {'2', '\0', '3'};
     assert(!parse_run_pid(embedded, sizeof embedded, &value));
     assert(write_private_file(path, embedded, sizeof embedded));
-    assert(desk_laptop_run_status("test", NULL) == 0 && calls == 0);
+    assert(desk_laptop_run_status("test", NULL) == -1 && calls == 0);
     assert(!desk_laptop_run_record("test", 1));
 #if LONG_MAX > INT_MAX
     assert(!desk_laptop_run_record("test", (long)INT_MAX + 1));
     assert(!run_pid_alive((long)INT_MAX + 1) && calls == 0);
 #endif
-    assert(desk_laptop_run_record("test", 123));
+    assert(write_private_file(path, "123\n", 4));
     assert(desk_laptop_run_status("test", NULL) == 0 && calls == 1);
     return 0;
 }
@@ -88,8 +91,13 @@ int main(int argc, char **argv) {
 #define posix_spawnp mock_spawn
 #define nanosleep mock_sleep
 #define access mock_access
+#define kill mock_kill
 #include "src/launcher.c"
-static int wait_mode, spawned;
+static int wait_mode, spawned, signals;
+int mock_kill(pid_t pid, int sig) {
+    assert(pid == 123 && (sig == SIGTERM || sig == SIGKILL));
+    ++signals; return 0;
+}
 pid_t mock_waitpid(pid_t pid, int *status, int options) {
     (void)status;
     assert(pid > 1 && options == WNOHANG);
@@ -128,6 +136,8 @@ int main(void) {
     wait_mode = 1;
     assert(spawn_detached(command, 1));
     assert(pending_children[1] == 123 && spawned == 2);
+    wait_mode = 0; cancel_pending_child(123); assert(signals == 2);
+    wait_mode = 2; cancel_pending_child(123); assert(signals == 2);
     return 0;
 }
 ''', sdk=True)

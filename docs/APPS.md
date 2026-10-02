@@ -231,19 +231,16 @@ toast reporting as every row above.
 
 ### Running sessions, the lid, and closing
 
-Registry records remain ASCII decimal PIDs with a trailing newline (readers
-also accept EOF immediately after the digits). Land rejects extra bytes,
-conversion overflow, and values outside positive `pid_t` range or at most 1
-before any process check or signal. There is no record-version or ownership
-change: all providers still share the same files and stale-record cleanup.
-This validation does not add process-identity protection against PID reuse.
-
-The registry — `run/<id>.pid` beside the profiles, one pid per file,
-written at spawn, and never believed without a real `kill(pid, 0)` check
-(a stale or garbled file is deleted by whichever reader notices) — is one
-contract shared with kilix-cap, `kilix laptop`, and the launcher TUI, so
-a session opened anywhere shows as running everywhere. In the house it
-shows twice:
+Registry records use canonical ASCII decimal PIDs and a trailing newline.
+A private `run/<id>.pid.identity` sidecar contains `v1 PID START_TICKS BOOT_UUID`
+plus newline, published before the PID. Birth ticks (procfs field 22) and boot
+UUID must match the live process; missing or mismatched metadata fails closed.
+Readers retain shared records to avoid deleting another provider's replacement.
+Closing acquires a pidfd before revalidating identity, with no numeric-PID or
+older-host fallback. Legacy records need their originating owner; observing a
+currently live PID is not sufficient to migrate one. Land, Cap, and the host
+share this contract; the launcher TUI delegates to the host. Mocked interoperability
+is tested separately from live session/hardware qualification.
 
 - The **set-up laptop itself is stateful art**: closed while nothing
   runs, open while any profile session is live, with a short lid
@@ -253,8 +250,8 @@ shows twice:
   all). A **carried laptop always reads as closed** in the hotbar and
   inventory.
 - The **home page marks running profiles** (`RUNNING - ENTER CLOSES`),
-  and Enter on such a row closes that session — `kilix laptop close`
-  when the host verb exists, a SIGTERM to the recorded pid otherwise —
+  and Enter on such a row closes that session through its identity-verified
+  pidfd —
   instead of opening a duplicate. Walking away just leaves the session
   running and the lid open.
 
