@@ -4410,7 +4410,13 @@ static int laptop_test_body(const char *config_dir)
                           "FAIL laptop lid closes when the session ends\n");
             return EXIT_FAILURE;
         }
-        (void)rmdir(run_dir);
+        written = snprintf(pid_path, sizeof pid_path, "%s/ops.pid.identity",
+                           run_dir);
+        if (written < 0 || (size_t)written >= sizeof pid_path ||
+            unlink(pid_path) != 0 || rmdir(run_dir) != 0) {
+            (void)fprintf(stderr, "FAIL laptop identity fixture cleanup\n");
+            return EXIT_FAILURE;
+        }
     }
 
     /* An empty profile directory still opens a usable menu. */
